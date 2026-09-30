@@ -9,6 +9,7 @@ pub mod applescript;
 pub mod fake;
 pub mod parse;
 
+pub use actions::PlayerCommand;
 pub use applescript::AppleScriptPlayer;
 pub use fake::volume_write_landed;
 #[allow(
@@ -210,10 +211,18 @@ pub trait Player {
     /// Play a URI. Works for tracks, albums, playlists and artists, and works on
     /// the Free tier because it goes through AppleScript (SPEC §6).
     fn play_uri(&self, uri: &str) -> Result<(), PlayerError>;
+
+    /// Run one raw write, e.g. `set shuffling to true`.
+    ///
+    /// On the trait rather than only on `AppleScriptPlayer` because the TUI needs
+    /// it for shuffle and repeat, and a fake that cannot do it would leave those
+    /// two bindings untested. Implementations must keep the "never launch
+    /// Spotify" guard (COMPAT rule 2) — that is the contract, not a detail.
+    fn command(&self, _script: &str) -> Result<(), PlayerError>;
 }
 
 /// Why a player call failed, in terms trak can act on.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PlayerError {
     /// Spotify is not running. trak must never launch it (COMPAT rule 2).
     #[error("Spotify is not running")]

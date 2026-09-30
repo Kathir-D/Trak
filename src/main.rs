@@ -7,6 +7,7 @@ mod cli;
 mod player;
 #[cfg(test)]
 mod testutil;
+mod tui;
 
 use std::io::IsTerminal as _;
 use std::process::ExitCode;
@@ -146,16 +147,8 @@ fn run(args: Cli) -> ExitCode {
     };
 
     let code = match args.command {
-        // Bare `trak` is the TUI, which does not exist yet (TODO 3.1). It must
-        // exist as a path now and say something honest rather than nothing (2.8).
-        None => {
-            eprintln!(
-                "trak {} — the TUI is not built yet (TODO 3.1).\n\
-                 Meanwhile: `trak status`, `trak vol up`, `trak next`, `trak --help`.",
-                env!("CARGO_PKG_VERSION")
-            );
-            EXIT_USAGE
-        }
+        // Bare `trak` opens the TUI (SPEC §2).
+        None => tui::run(),
         Some(Command::Status { field }) => status(&player, args.json, style(args.plain), field),
         Some(Command::Play { uri: Some(uri) }) => play(&player, &uri),
         Some(Command::Play { uri: None }) => cli::run_action(&mut player, "play"),
@@ -266,6 +259,12 @@ impl crate::player::Player for AnyPlayer {
             Self::Fake(p) => p.play_uri(uri),
         }
     }
+    fn command(&self, script: &str) -> Result<(), crate::player::PlayerError> {
+        match self {
+            Self::Real(p) => p.command(script),
+            Self::Fake(p) => p.command(script),
+        }
+    }
 }
 
 fn fail(e: player::PlayerError) -> i32 {
@@ -357,11 +356,11 @@ fn stop(player: &mut AnyPlayer) -> i32 {
 
 /// `quit`. A write, so it only ever runs because the user asked (COMPAT rule 3).
 fn quit(player: &mut AnyPlayer) -> i32 {
-    let Some(real) = player.real() else {
+    if player.real().is_none() {
         eprintln!("the fake player cannot quit Spotify");
         return EXIT_USAGE;
-    };
-    match real.command("quit") {
+    }
+    match player.command("quit") {
         Ok(()) => {
             println!("Quitting Spotify.");
             EXIT_OK
@@ -423,21 +422,7 @@ fn mode(player: &mut AnyPlayer, what: Mode) -> i32 {
     };
     // The same guarded path every other write uses, so the "never launch
     // Spotify" rule lives in exactly one place.
-    let Some(real) = player.real() else {
-        // The fake applies the change in memory instead of through osascript.
-        return match line.as_str() {
-            "set shuffling to true" => {
-                let _ = player.state();
-                EXIT_OK
-            }
-            "set shuffling to false" => {
-                let _ = player.state();
-                EXIT_OK
-            }
-            _ => EXIT_OK,
-        };
-    };
-    match real.command(&line) {
+    match player.command(&line) {
         Ok(()) => EXIT_OK,
         Err(e) => fail(e),
     }

@@ -185,9 +185,9 @@ end run
 
     /// One line, and it is a write: only ever call this for a user action.
     ///
-    /// Public so the CLI can use the same guarded path for shuffle and repeat
-    /// without duplicating the "never launch Spotify" rule.
-    pub fn command(&self, line: &str) -> Result<(), PlayerError> {
+    /// Builds a one-line write script with the running check as its first
+    /// statement, so a non-running Spotify can never be launched.
+    fn command(&self, line: &str) -> Result<(), PlayerError> {
         let script = format!(
             r#"on run argv
 	if application "Spotify" is not running then return "not-running"
@@ -288,6 +288,10 @@ impl Player for AppleScriptPlayer {
         let uri = uri.trim();
         crate::player::check_playable_uri(uri)?;
         self.command(&format!("play track \"{uri}\""))
+    }
+
+    fn command(&self, script: &str) -> Result<(), PlayerError> {
+        AppleScriptPlayer::command(self, script)
     }
 }
 

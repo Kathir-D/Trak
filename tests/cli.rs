@@ -265,13 +265,16 @@ fn a_bare_name_is_a_setup_error_not_a_silent_nothing() {
         .stderr(predicate::str::contains("Client ID"));
 }
 
+/// Bare `trak` is the TUI, and a TUI cannot run on a pipe. It must say so and
+/// point at the commands that do work, rather than entering raw mode and looking
+/// hung.
 #[test]
-fn bare_trak_exits_2_and_says_what_exists() {
-    // TODO 2.8: the path must exist and be honest until the TUI lands.
+fn bare_trak_without_a_terminal_says_so_and_suggests_the_cli() {
     trak()
         .assert()
         .code(2)
-        .stderr(predicate::str::contains("status"));
+        .stderr(predicate::str::contains("needs a terminal"))
+        .stderr(predicate::str::contains("trak status"));
 }
 
 #[test]

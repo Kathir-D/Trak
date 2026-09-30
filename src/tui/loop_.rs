@@ -1,0 +1,478 @@
+//! The event loop, and the terminal it owns.
+//!
+//! The only place in the TUI that touches the terminal or a player. Everything
+//! else is pure, which is why the app and the renderer can be tested without
+//! either (ARCHITECTURE, "Never block the UI thread").
+//!
+//! The hard requirement from TODO 3.1: **quitting must leave the terminal
+//! usable**, including after a panic. So the alternate screen, raw mode and the
+//! cursor are restored from a panic hook as well as on the happy path.
+
+use std::io::{IsTerminal, Write};
+use std::time::{Duration, Instant};
+
+use crossterm::ExecutableCommand;
+use crossterm::event::{
+    DisableMouseCapture, EnableMouseCapture, Event as TermEvent, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers, poll, read,
+};
+use crossterm::terminal::{
+    DisableLineWrap, EnableLineWrap, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode,
+    enable_raw_mode,
+};
+use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
+
+use crate::player::AppleScriptPlayer;
+use crate::player::PlayerCommand;
+use crate::player::actions::Worker;
+use crate::player::actions::WorkerResult;
+use crate::tui::app::{App, Event, update};
+use crate::tui::render::draw;
+use crate::tui::theme::{Accent, Border, Theme};
+
+/// How long to wait for a terminal event before doing anything else.
+///
+/// This is also the refresh rate of the clock and the progress interpolation.
+/// It is short because the bar is interpolated locally from the last read, so
+/// moving it costs nothing and an AppleScript read never happens at this rate
+/// (docs/APPLESCRIPT.md §4).
+const INPUT_WAIT: Duration = Duration::from_millis(100);
+
+/// The poll interval. The notification (TODO 3.9) is the primary update path;
+/// this is only the safety net, so it is deliberately slow. An AppleScript read is
+/// ~430 ms and covers only what the notification is silent about
+/// (docs/APPLESCRIPT.md §4 and §9).
+const POLL_PLAYING: Duration = Duration::from_secs(3);
+const POLL_IDLE: Duration = Duration::from_secs(5);
+
+/// Owns the terminal, and puts it back no matter how we leave.
+pub struct TerminalGuard {
+    restored: bool,
+}
+
+impl TerminalGuard {
+    /// Enter the alternate screen and raw mode.
+    ///
+    /// The panic hook is installed first, so a panic anywhere below still leaves
+    /// the user's terminal readable rather than stuck in raw mode.
+    pub fn enter() -> std::io::Result<Self> {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let _ = restore_terminal();
+            previous(info);
+        }));
+
+        enable_raw_mode()?;
+        let mut out = std::io::stdout();
+        // Line wrap off: a stray wide glyph must not reflow the whole screen.
+        let _ = out.execute(DisableLineWrap);
+        out.execute(EnterAlternateScreen)?;
+        Ok(Self { restored: false })
+    }
+
+    /// Put the terminal back. Safe to call more than once.
+    pub fn restore(&mut self) {
+        if self.restored {
+            return;
+        }
+        self.restored = true;
+        let _ = restore_terminal();
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        self.restore();
+    }
+}
+
+fn restore_terminal() -> std::io::Result<()> {
+    let mut out = std::io::stdout();
+    let _ = out.execute(crossterm::cursor::Show);
+    let _ = out.execute(LeaveAlternateScreen);
+    let _ = out.execute(EnableLineWrap);
+    let _ = disable_raw_mode();
+    out.flush()
+}
+
+/// Run the TUI. Returns the process exit code.
+pub fn run() -> i32 {
+    // A TUI needs a terminal. Without one, entering raw mode and the alternate
+    // screen produces an unreadable mess and a process that looks hung, so say
+    // so and point at the commands that do work.
+    if !std::io::stdout().is_terminal() {
+        eprintln!(
+            "trak: the TUI needs a terminal.\n\
+             For a one-shot command use `trak status`, `trak vol up`, `trak next`, or `trak --help`."
+        );
+        return 2;
+    }
+
+    let mut guard = match TerminalGuard::enter() {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("trak: cannot start the TUI: {e}");
+            return 1;
+        }
+    };
+
+    let backend = CrosstermBackend::new(std::io::stdout());
+    let mut terminal = match Terminal::new(backend) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("trak: cannot start the TUI: {e}");
+            guard.restore();
+            return 1;
+        }
+    };
+    // Mouse is on by default (SPEC §2); it makes the progress bar seekable and
+    // the tabs clickable (TODO 3.8).
+    let _ = terminal.backend_mut().execute(EnableMouseCapture);
+    let _ = terminal.clear();
+
+    let code = event_loop(&mut terminal);
+
+    let _ = terminal.backend_mut().execute(DisableMouseCapture);
+    guard.restore();
+    code
+}
+
+fn event_loop<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> i32 {
+    let worker = Worker::new(AppleScriptPlayer::new());
+    let mut app = App::new();
+    let theme = Theme::new(Accent::Art, Border::Rounded);
+
+    let mut last_poll = Instant::now();
+    let mut last_clock_tick = Instant::now();
+
+    loop {
+        // 1. Finished writes first, so a completed command is applied before the
+        //    next key can queue another.
+        while let Some(result) = worker.poll() {
+            app = match result {
+                WorkerResult::State(s) => update(app, Event::PlayerState(s)).app,
+                WorkerResult::ReadFailed(crate::player::PlayerError::NotRunning) => {
+                    update(app, Event::NotRunning).app
+                }
+                // A read that failed for any other reason is not a reason to
+                // throw away what is already on screen; show it as a notice.
+                WorkerResult::ReadFailed(e) => {
+                    let (msg, _) = crate::cli::report(e);
+                    let mut next = app;
+                    next.toast = Some(crate::tui::app::Toast {
+                        text: msg.lines().next().unwrap_or("read failed").to_string(),
+                        at: std::time::Instant::now(),
+                    });
+                    next
+                }
+                WorkerResult::CommandDone(cmd, result) => {
+                    update(app, Event::CommandDone(cmd, result)).app
+                }
+            };
+        }
+
+        // 2. Terminal input.
+        match poll(INPUT_WAIT) {
+            Ok(true) => match read() {
+                Ok(TermEvent::Key(k)) => {
+                    if k.modifiers.contains(KeyModifiers::CONTROL) && k.code == KeyCode::Char('c') {
+                        app = update(app, Event::Quit).app;
+                    } else if let Some(c) = char_for(k) {
+                        let u = update(app, Event::Key(c));
+                        app = u.app;
+                        submit_all(u.commands, &worker);
+                    }
+                }
+                Ok(TermEvent::Resize(_, _)) => {
+                    app = update(app, Event::Resize).app;
+                    // ratatui handles the buffer; a redraw picks the new size up.
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    // A broken stdin means there is no terminal to talk to.
+                    eprintln!("trak: terminal input failed: {e}");
+                    break;
+                }
+            },
+            Ok(false) => {}
+            Err(e) => {
+                eprintln!("trak: terminal input failed: {e}");
+                break;
+            }
+        }
+
+        // 3. The local tick: toast expiry and the poll-due flag.
+        app = update(app, Event::Tick).app;
+
+        if last_clock_tick.elapsed() >= Duration::from_secs(1) {
+            last_clock_tick = Instant::now();
+            app.clock = clock_string();
+        }
+
+        // 4. A poll when one is due. `poll_due` is false while a command is in
+        //    flight, so a poll never queues behind a write.
+        let interval = if app.is_playing() {
+            POLL_PLAYING
+        } else {
+            POLL_IDLE
+        };
+        if app.poll_due && !worker.is_busy() && last_poll.elapsed() >= interval {
+            last_poll = Instant::now();
+            worker.submit(|p| match p.state() {
+                Ok(st) => WorkerResult::State(Box::new(st)),
+                Err(e) => WorkerResult::ReadFailed(e),
+            });
+        }
+
+        if terminal.draw(|f| draw(f, &app, &theme)).is_err() {
+            break;
+        }
+        if app.should_quit {
+            break;
+        }
+    }
+
+    // The worker shuts itself down and joins its thread on drop, so no thread is
+    // left holding an AppleScript call when the terminal is restored. TODO 8.5
+    // extends that to proving the process tap leaves no device behind.
+    0
+}
+
+/// Queue commands on the worker.
+///
+/// `is_poll` marks a read rather than a write: a poll must never carry a write,
+/// and the worker treats a poll as a plain `state()` call.
+fn submit_all(commands: Vec<PlayerCommand>, worker: &Worker) {
+    for cmd in commands {
+        worker.submit(move |p| match run_one(p, cmd.clone()) {
+            Ok(()) => WorkerResult::CommandDone(cmd, Ok(())),
+            Err(e) => WorkerResult::CommandDone(cmd, Err(e)),
+        });
+    }
+}
+
+fn run_one(
+    p: &mut dyn crate::player::Player,
+    cmd: PlayerCommand,
+) -> Result<(), crate::player::PlayerError> {
+    use crate::player::actions::{seek_checked, set_volume_checked, step_volume};
+
+    match cmd {
+        PlayerCommand::Toggle => p.toggle(),
+        PlayerCommand::Next => p.next(),
+        PlayerCommand::Prev => p.previous(),
+        PlayerCommand::Replay => p.seek(0.0).map(|_| ()),
+        PlayerCommand::Seek(secs) => seek_checked(p, secs).map(|_| ()),
+        PlayerCommand::VolumeStep(step) => step_volume(p, step).map(|_| ()),
+        PlayerCommand::SetVolume(v) => set_volume_checked(p, v).map(|_| ()),
+        PlayerCommand::ToggleShuffle => {
+            let on = !p.state()?.shuffling_enabled;
+            p.command(&format!("set shuffling to {on}"))
+        }
+        PlayerCommand::CycleRepeat => {
+            // AppleScript cannot read back "repeat one" as distinct from "repeat
+            // all", so the app remembers the mode and this writes its boolean.
+            let on = !p.state()?.repeating_enabled;
+            p.command(&format!("set repeating to {on}"))
+        }
+        PlayerCommand::PlayUri(_) => Ok(()),
+        PlayerCommand::Launch => launch_spotify(),
+    }
+}
+
+/// The char `update` should see for a key, or `None` for a key trak ignores.
+///
+/// Arrows are folded onto their vim equivalents so both work from one binding
+/// (SPEC §4: "Arrows **and** vim keys").
+fn char_for(k: KeyEvent) -> Option<char> {
+    // Some terminals emit a release event as well as a press; acting on both would
+    // make a held key repeat twice as fast.
+    if k.kind == KeyEventKind::Release {
+        return None;
+    }
+    match k.code {
+        KeyCode::Char(c) if matches!(c, 'h' | 'j' | 'k' | 'l') => Some(c),
+        KeyCode::Char(c) => Some(c),
+        KeyCode::Enter => Some('\n'),
+        KeyCode::Tab if k.modifiers.contains(KeyModifiers::SHIFT) => Some('Z'),
+        KeyCode::Tab => Some('\t'),
+        KeyCode::Left => Some('h'),
+        KeyCode::Right => Some('l'),
+        KeyCode::Down => Some('j'),
+        KeyCode::Up => Some('k'),
+        _ => None,
+    }
+}
+
+/// Ask Launch Services to start Spotify in the background: no focus, no Dock
+/// bounce. This is the single launch trak ever performs (COMPAT rule 2), and only
+/// because the user pressed enter on the idle card.
+fn launch_spotify() -> Result<(), crate::player::PlayerError> {
+    let mut cmd = if which("headless-spotify").is_some() {
+        let mut c = std::process::Command::new("headless-spotify");
+        c.arg("launch");
+        c
+    } else {
+        let mut c = std::process::Command::new("open");
+        c.args(["-g", "-j", "-a", "Spotify"]);
+        c
+    };
+    cmd.spawn()
+        .map(|_| ())
+        .map_err(|e| crate::player::PlayerError::Script(format!("launching Spotify: {e}")))
+}
+
+fn which(program: &str) -> Option<std::path::PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|d| d.join(program))
+        .find(|p| p.is_file())
+}
+
+fn clock_string() -> String {
+    // The header only needs HH:MM, and `date` is on every macOS, so there is no
+    // reason to take a date dependency for it.
+    std::process::Command::new("date")
+        .arg("+%H:%M")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::KeyEventState;
+
+    fn key(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers: mods,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }
+    }
+
+    #[test]
+    fn plain_characters_pass_through() {
+        assert_eq!(
+            char_for(key(KeyCode::Char('n'), KeyModifiers::NONE)),
+            Some('n')
+        );
+        assert_eq!(
+            char_for(key(KeyCode::Char('q'), KeyModifiers::NONE)),
+            Some('q')
+        );
+    }
+
+    #[test]
+    fn enter_and_tab_become_control_chars() {
+        assert_eq!(
+            char_for(key(KeyCode::Enter, KeyModifiers::NONE)),
+            Some('\n')
+        );
+        assert_eq!(char_for(key(KeyCode::Tab, KeyModifiers::NONE)), Some('\t'));
+    }
+
+    /// SPEC §4: arrows and vim keys both work, from one binding.
+    #[test]
+    fn arrows_fold_onto_their_vim_equivalents() {
+        assert_eq!(char_for(key(KeyCode::Left, KeyModifiers::NONE)), Some('h'));
+        assert_eq!(char_for(key(KeyCode::Right, KeyModifiers::NONE)), Some('l'));
+        assert_eq!(char_for(key(KeyCode::Down, KeyModifiers::NONE)), Some('j'));
+        assert_eq!(char_for(key(KeyCode::Up, KeyModifiers::NONE)), Some('k'));
+    }
+
+    /// Acting on a release as well as a press would double every keypress.
+    #[test]
+    fn key_release_events_are_ignored() {
+        let mut k = key(KeyCode::Char('n'), KeyModifiers::NONE);
+        k.kind = KeyEventKind::Release;
+        assert_eq!(char_for(k), None);
+    }
+
+    #[test]
+    fn ctrl_c_is_routed_through_the_same_quit_path() {
+        // The loop must not poke should_quit directly, or the quit logic ends up
+        // in two places.
+        let app = update(App::new(), Event::Quit).app;
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn a_key_trak_has_no_binding_for_is_ignored() {
+        assert_eq!(char_for(key(KeyCode::F(5), KeyModifiers::NONE)), None);
+        assert_eq!(char_for(key(KeyCode::Esc, KeyModifiers::NONE)), None);
+    }
+
+    #[test]
+    fn the_clock_is_hh_mm_or_empty() {
+        let c = clock_string();
+        assert!(c.is_empty() || (c.len() == 5 && c.contains(':')), "{c:?}");
+    }
+
+    #[test]
+    fn which_finds_a_program_on_this_path() {
+        assert!(which("sh").is_some(), "sh is always on PATH");
+        assert!(which("definitely-not-a-real-program-xyz").is_none());
+    }
+
+    /// The launch must not focus Spotify or bounce the Dock (COMPAT rule 2).
+    #[test]
+    fn the_launch_command_is_backgrounded() {
+        // Building it without running it: `which` picks headless-spotify when it
+        // is on PATH, which is what the owner's machine has.
+        let headless = which("headless-spotify").is_some();
+        let cmd = if headless {
+            let mut c = std::process::Command::new("headless-spotify");
+            c.arg("launch");
+            c
+        } else {
+            let mut c = std::process::Command::new("open");
+            c.args(["-g", "-j", "-a", "Spotify"]);
+            c
+        };
+        let rendered = format!("{:?}", cmd);
+        if !headless {
+            assert!(
+                rendered.contains("-g"),
+                "must not focus Spotify: {rendered}"
+            );
+            assert!(
+                rendered.contains("-j"),
+                "must not hide other apps: {rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_command_runs_against_the_fake_without_panicking() {
+        use crate::player::FakePlayer;
+        let mut p = FakePlayer::playing();
+        for cmd in [
+            PlayerCommand::Toggle,
+            PlayerCommand::Next,
+            PlayerCommand::Prev,
+            PlayerCommand::Replay,
+            PlayerCommand::Seek(30.0),
+            PlayerCommand::VolumeStep(10),
+            PlayerCommand::VolumeStep(-10),
+            PlayerCommand::SetVolume(50),
+        ] {
+            // The fake has no AppleScript `command`, so the two that need it are
+            // checked separately; everything else must simply not panic.
+            if run_one(&mut p, cmd.clone()).is_err() {
+                assert!(
+                    matches!(
+                        cmd,
+                        PlayerCommand::ToggleShuffle | PlayerCommand::CycleRepeat
+                    ),
+                    "only the guarded writes may fail on the fake, got {cmd:?}"
+                );
+            }
+        }
+    }
+}

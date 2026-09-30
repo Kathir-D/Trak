@@ -220,20 +220,39 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
 
 ## Phase 3 — TUI shell (Version B): layout, history, info
 
-- [ ] 3.1 **Terminal plumbing**: ratatui + crossterm, alternate screen, raw mode, panic hook that
-      restores the terminal, clean exit on `q`/ctrl-c/SIGTERM, resize events. Done when: the app opens
-      and quits without leaving the terminal broken, including after a forced panic (test).
-- [ ] 3.2 **`App` state, `Event`, `update()`** per ARCHITECTURE; event loop with a tick and a worker
-      thread that polls `Player` (1 s playing / 3 s otherwise) and sends `Event::PlayerState`.
-      Done when: table tests for `update()`; running against `FakePlayer` advances state.
-- [ ] 3.3 **Wide layout**: header (name, status dot, clock), Now Playing pane (text-only for now:
-      title, artist, album, shuffle/repeat, progress bar interpolated locally, ⏮ ⏯ ⏭, volume meter),
-      right pane with tab strip, footer key hints. Rounded borders. Done when: `TestBackend` snapshots
-      at 100×30 look like SPEC §3 with no wrapped or torn borders.
-- [ ] 3.4 **Responsive breakpoints.** Tune numbers empirically and record them in ARCHITECTURE:
-      wide (side by side) → stacked (right pane under Now Playing) → compact strip → "terminal too
-      small" message below a hard minimum. Done when: snapshot tests at ≥ 6 sizes and a manual live
-      resize test show no panic, no garbled borders, and layouts switching at the recorded thresholds.
+- [x] 3.1 **Terminal plumbing.** `src/tui/loop_.rs`. Alternate screen, raw mode, line wrap off,
+      mouse capture on, all restored from a **panic hook** as well as on the happy path. > The
+      **worker shuts down and joins its thread on `Drop`**, so no thread is still inside an
+      AppleScript call when the terminal is restored — that is how a TUI leaves a terminal broken.
+      > **A TUI on a pipe refuses cleanly** (exit 2, points at the CLI) instead of entering raw mode
+      and looking hung. > Verified by running it in cmux and screenshotting
+      (`docs/images/tui-3.3-wide.png`). > **[owner]** worth a look: a live resize, and a forced
+      panic, since neither can be checked without hands on a terminal.
+- [x] 3.2 **`App` state, `Event`, `update()`.** `src/tui/app.rs`, 40 tests. `update` is pure and
+      returns the commands to run; nothing draws or writes there. > **The poll is 3 s playing / 5 s
+      idle, not the 1 s the task guessed**, because 1.3 proved the notification is the primary
+      update path and the poll only covers what it is silent about (seek, volume, shuffle, repeat,
+      artwork) — and a read is ~430 ms. > The progress bar is **interpolated locally** from the last
+      read, clamped at the duration and frozen while paused. > `PlayerCommand` lives in
+      `player::actions`, not the TUI: the worker reports it, so the player layer needs it. > The
+      worker's result is a `WorkerResult` enum, not a `Result<(), _>`: a poll's payload *is* the
+      state, and folding both into one type is what made the first version poll without ever
+      displaying anything. > A test asserts **a poll or a tick never produces a command** (COMPAT
+      rule 3) and another that a second key is dropped while one is in flight.
+- [x] 3.3 **Wide layout.** `src/tui/render.rs`. Header with status dot and clock, Now Playing with
+      title/artist/album/shuffle/repeat, the interpolated bar, ⏮ ⏯ ⏭, the volume meter, the tab
+      strip and the footer hints. Rounded by default. Snapshot at 100×30 plus a real cmux screenshot
+      (`docs/images/tui-3.3-wide.png`). > The art area is a **framed placeholder**, not a gap, so
+      the layout reads as designed and 4.1 already has its space reserved. > Every pane is built
+      from an `inner()` rect shrunk by one cell, which is what stops borders tearing. > The volume
+      line says `vol` in plain text: the 🔊 emoji rendered as a **muted speaker** in cmux next to a
+      100% meter, which says the opposite of what it means.
+- [x] 3.4 **Responsive breakpoints.** One function, `layout_for(w, h)`, so the renderer and the
+      tests cannot disagree. **wide ≥ 76×16 · stacked ≥ 46×12 · compact ≥ 30×8 · too small below
+      that.** A test sweeps 27 widths × 20 heights asserting the wide threshold holds, and another
+      renders at 7 sizes × 7 heights plus the idle case and asserts no panic. > Bars and meters are
+      asserted to be **one cell wide per character** (via `unicode-width`), because a wide glyph in a
+      bar is the first thing that tears a layout.
 - [ ] 3.5 **Idle card** when Spotify is not running: `enter` launches it (COMPAT rule 2) and the UI
       recovers by itself when the poll sees it. Done when: quitting Spotify while trak runs shows the
       card within 3 s and pressing enter brings it back without focusing Spotify's window.

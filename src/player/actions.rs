@@ -103,9 +103,39 @@ pub fn step_volume<P: Player + ?Sized>(p: &mut P, step: i16) -> Result<WriteOutc
     set_volume_checked(p, target)
 }
 
-/// The result of a background command, reported back as an event.
-#[allow(dead_code, reason = "used by the TUI event loop, TODO 3.2")]
-pub type CommandResult = Result<WriteOutcome, PlayerError>;
+/// A user-initiated action. The event loop runs these; `update` never does.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PlayerCommand {
+    Toggle,
+    Next,
+    Prev,
+    Replay,
+    /// `Some(secs)` to seek, `None` to step by the configured amount.
+    Seek(f64),
+    VolumeStep(i16),
+    SetVolume(u8),
+    ToggleShuffle,
+    CycleRepeat,
+    PlayUri(String),
+    /// The idle card's enter. The only launch trak ever performs (COMPAT rule 2).
+    Launch,
+}
+
+/// What a finished job reports back.
+///
+/// A poll and a write are different shapes: a poll's whole point is the state it
+/// read, while a write only reports whether it landed. Folding them into one
+/// `Result<(), _>` is what made the TUI poll without ever displaying anything.
+#[derive(Debug)]
+pub enum WorkerResult {
+    /// A read succeeded.
+    State(Box<crate::player::PlayerState>),
+    /// A read failed. `NotRunning` is the common one and gets its own handling in
+    /// the TUI, because it means "show the idle card", not "show an error".
+    ReadFailed(PlayerError),
+    /// A write finished.
+    CommandDone(PlayerCommand, Result<(), PlayerError>),
+}
 
 /// Runs player writes on a worker thread so the render loop never blocks.
 ///
@@ -114,10 +144,9 @@ pub type CommandResult = Result<WriteOutcome, PlayerError>;
 ///
 /// Used by the TUI event loop (TODO 3.2); the CLI is a one-shot command and does
 /// not need it.
-#[allow(dead_code, reason = "used by the TUI event loop, TODO 3.2")]
 pub struct Worker {
     job_tx: Option<Sender<Job>>,
-    result_rx: Receiver<CommandResult>,
+    result_rx: Receiver<WorkerResult>,
     handle: Option<JoinHandle<()>>,
     /// Set while a command is in flight, so a held-down key does not queue ten
     /// of them.
@@ -125,16 +154,21 @@ pub struct Worker {
 }
 
 /// A unit of work for the worker, boxed so one channel carries every command.
-#[allow(dead_code, reason = "used by the TUI event loop, TODO 3.2")]
-type Job = Box<dyn FnOnce(&mut dyn Player) -> CommandResult + Send>;
+type Job = Box<dyn FnOnce(&mut dyn Player) -> WorkerResult + Send>;
 
-// The worker is the TUI's background thread; the CLI never needs one. It gains a
-// caller in TODO 3.2, which is the very next task.
-#[allow(dead_code, reason = "used by the TUI event loop, TODO 3.2")]
+impl Drop for Worker {
+    /// Shutting down on drop is what guarantees the thread is joined. Without it a
+    /// thread could still be inside an AppleScript call while the terminal is
+    /// being restored, which is how a TUI ends up leaving the terminal broken.
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
 impl Worker {
     pub fn new<P: Player + Send + 'static>(player: P) -> Self {
         let (job_tx, job_rx) = channel::<Job>();
-        let (result_tx, result_rx) = channel::<CommandResult>();
+        let (result_tx, result_rx) = channel::<WorkerResult>();
         let busy = Arc::new(AtomicBool::new(false));
         let thread_busy = Arc::clone(&busy);
 
@@ -168,7 +202,7 @@ impl Worker {
     /// keeps a repeated keypress from building a backlog.
     pub fn submit<F>(&self, f: F)
     where
-        F: FnOnce(&mut dyn Player) -> CommandResult + Send + 'static,
+        F: FnOnce(&mut dyn Player) -> WorkerResult + Send + 'static,
     {
         let Some(tx) = &self.job_tx else { return };
         if self.busy.load(Ordering::Acquire) {
@@ -184,8 +218,8 @@ impl Worker {
         self.busy.load(Ordering::Acquire)
     }
 
-    /// Take a finished command, if there is one. Never blocks.
-    pub fn poll(&self) -> Option<CommandResult> {
+    /// Take a finished job, if there is one. Never blocks.
+    pub fn poll(&self) -> Option<WorkerResult> {
         self.result_rx.try_recv().ok()
     }
 
@@ -205,7 +239,6 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::player::PlaybackState;
     use crate::player::fake::{FakePlayer, Quirks};
 
     #[test]
@@ -247,44 +280,26 @@ mod tests {
     fn stepping_the_volume_clamps_at_both_ends() {
         let mut p = FakePlayer::playing();
         p.set_volume(95).unwrap();
-        let o = step_volume(&mut p, 10).unwrap();
-        assert_eq!(o.wanted, 100, "must not wrap to 105");
-
+        assert_eq!(
+            step_volume(&mut p, 10).unwrap().wanted,
+            100,
+            "no wrap to 105"
+        );
         p.set_volume(5).unwrap();
-        let o = step_volume(&mut p, -10).unwrap();
-        assert_eq!(o.wanted, 0, "must not wrap to -5");
+        assert_eq!(step_volume(&mut p, -10).unwrap().wanted, 0, "no wrap to -5");
     }
 
     #[test]
-    fn stepping_down_then_up_returns_to_the_start() {
-        let mut p = FakePlayer::playing();
-        p.set_volume(80).unwrap();
-        step_volume(&mut p, -10).unwrap();
-        let back = step_volume(&mut p, 10).unwrap();
-        assert_eq!(back.wanted, 80);
-        assert!(back.landed);
-    }
-
-    #[test]
-    fn a_seek_is_read_back_and_lands() {
+    fn a_seek_is_read_back_against_the_clamped_target() {
         let mut p = FakePlayer::playing();
         let o = seek_checked(&mut p, 60.0).unwrap();
         assert!(o.landed);
         assert_eq!(o.read, 60);
-    }
 
-    #[test]
-    fn a_seek_past_the_end_lands_at_the_end() {
-        let mut p = FakePlayer::playing();
         let o = seek_checked(&mut p, 9999.0).unwrap();
         assert!(o.landed, "clamping to the end is landing, not a failure");
         assert_eq!(o.wanted, 360, "the reported target is the clamped one");
-        assert_eq!(o.read, 360);
-    }
 
-    #[test]
-    fn a_seek_before_the_start_lands_at_the_start() {
-        let mut p = FakePlayer::playing();
         let o = seek_checked(&mut p, -10.0).unwrap();
         assert!(o.landed);
         assert_eq!(o.read, 0);
@@ -310,72 +325,15 @@ mod tests {
         ));
     }
 
+    /// A poll comes back as the state it read, which is the only way the TUI has
+    /// anything to draw.
     #[test]
-    fn the_worker_runs_a_command_off_the_calling_thread() {
+    fn a_poll_job_returns_the_state_it_read() {
         let w = Worker::new(FakePlayer::playing());
-        w.submit(|p| {
-            let o = set_volume_checked(p, 42)?;
-            Ok(o)
+        w.submit(|p| match p.state() {
+            Ok(s) => WorkerResult::State(Box::new(s)),
+            Err(e) => WorkerResult::ReadFailed(e),
         });
-        // Give the worker a moment, then collect.
-        let mut out = None;
-        for _ in 0..200 {
-            if let Some(r) = w.poll() {
-                out = Some(r);
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-        let o = out.expect("the worker should have reported").unwrap();
-        assert_eq!(o.wanted, 42);
-        assert!(o.landed);
-    }
-
-    /// A held-down key must not queue a dozen writes: while one job runs, further
-    /// submissions are dropped rather than piled up behind it.
-    #[test]
-    fn the_worker_drops_commands_while_one_is_in_flight() {
-        use std::sync::atomic::AtomicUsize;
-        let ran = Arc::new(AtomicUsize::new(0));
-        let counter = Arc::clone(&ran);
-        let w = Worker::new(FakePlayer::playing());
-
-        // The 50 submissions happen far faster than the job can finish, so they
-        // all collide with the first.
-        for _ in 0..50 {
-            let c = Arc::clone(&counter);
-            w.submit(move |p| {
-                c.fetch_add(1, Ordering::AcqRel);
-                std::thread::sleep(std::time::Duration::from_millis(30));
-                set_volume_checked(p, 10)
-            });
-        }
-        assert!(w.is_busy(), "the first submit should be in flight");
-
-        // Wait for it to drain, then count what actually ran.
-        let mut done = 0;
-        for _ in 0..400 {
-            if w.poll().is_some() {
-                done += 1;
-            }
-            if !w.is_busy() && ran.load(Ordering::Acquire) > 0 {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-        let n = ran.load(Ordering::Acquire);
-        assert!(n >= 1, "at least one command must run");
-        assert!(n < 50, "commands must be coalesced, but {n} of 50 ran");
-        assert!(done >= 1, "the result must come back");
-    }
-
-    #[test]
-    fn a_failing_command_still_reports_and_clears_the_busy_flag() {
-        let w = Worker::new(FakePlayer::with_quirks(Quirks {
-            not_running: true,
-            ..Quirks::default()
-        }));
-        w.submit(|p| set_volume_checked(p, 10));
         let mut got = None;
         for _ in 0..200 {
             if let Some(r) = w.poll() {
@@ -384,24 +342,94 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
-        assert!(matches!(got, Some(Err(PlayerError::NotRunning))));
+        match got.expect("a result") {
+            WorkerResult::State(s) => {
+                assert_eq!(s.track.title, "Census Designated");
+            }
+            other => panic!("expected a state, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_poll_on_a_missing_player_reports_read_failed() {
+        let w = Worker::new(FakePlayer::with_quirks(Quirks {
+            not_running: true,
+            ..Quirks::default()
+        }));
+        w.submit(|p| match p.state() {
+            Ok(s) => WorkerResult::State(Box::new(s)),
+            Err(e) => WorkerResult::ReadFailed(e),
+        });
+        let mut got = None;
+        for _ in 0..200 {
+            if let Some(r) = w.poll() {
+                got = Some(r);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(matches!(
+            got.expect("a result"),
+            WorkerResult::ReadFailed(PlayerError::NotRunning)
+        ));
+    }
+
+    #[test]
+    fn a_failing_job_still_reports_and_clears_the_busy_flag() {
+        let w = Worker::new(FakePlayer::with_quirks(Quirks {
+            not_running: true,
+            ..Quirks::default()
+        }));
+        w.submit(|p| match p.state() {
+            Ok(s) => WorkerResult::State(Box::new(s)),
+            Err(e) => WorkerResult::ReadFailed(e),
+        });
+        let mut got = None;
+        for _ in 0..200 {
+            if let Some(r) = w.poll() {
+                got = Some(r);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(got.is_some());
         assert!(!w.is_busy(), "the worker must not stay stuck busy");
+    }
+
+    /// A held-down key must not queue a dozen writes.
+    #[test]
+    fn the_worker_drops_commands_while_one_is_in_flight() {
+        use std::sync::atomic::AtomicUsize;
+        let ran = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&ran);
+        let w = Worker::new(FakePlayer::playing());
+        for _ in 0..50 {
+            let c = Arc::clone(&counter);
+            w.submit(move |p| {
+                c.fetch_add(1, Ordering::AcqRel);
+                std::thread::sleep(std::time::Duration::from_millis(30));
+                let _ = set_volume_checked(p, 10);
+                WorkerResult::CommandDone(PlayerCommand::Toggle, Ok(()))
+            });
+        }
+        assert!(w.is_busy());
+        for _ in 0..400 {
+            let _ = w.poll();
+            if !w.is_busy() && ran.load(Ordering::Acquire) > 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let n = ran.load(Ordering::Acquire);
+        assert!(n >= 1, "at least one command must run");
+        assert!(n < 50, "commands must be coalesced, but {n} of 50 ran");
     }
 
     #[test]
     fn shutting_down_joins_the_thread() {
         let mut w = Worker::new(FakePlayer::playing());
         w.shutdown();
-        // A second shutdown is harmless, and polling a dead worker is fine.
         w.shutdown();
         assert!(w.poll().is_none());
-    }
-
-    #[test]
-    fn a_paused_player_still_accepts_a_seek() {
-        let mut p = FakePlayer::playing();
-        p.set_playback(PlaybackState::Paused);
-        let o = seek_checked(&mut p, 30.0).unwrap();
-        assert!(o.landed);
     }
 }

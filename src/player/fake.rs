@@ -246,6 +246,26 @@ impl Player for FakePlayer {
         Ok(())
     }
 
+    /// The fake records the write and applies the two it knows about, so the
+    /// TUI's shuffle and repeat bindings are testable.
+    fn command(&self, script: &str) -> Result<(), PlayerError> {
+        self.gate()?;
+        self.record(script);
+        let mut i = self.inner.borrow_mut();
+        if let Some(v) = script
+            .strip_prefix("set shuffling to ")
+            .and_then(|v| v.trim().parse::<bool>().ok())
+        {
+            i.shuffling = v;
+        } else if let Some(v) = script
+            .strip_prefix("set repeating to ")
+            .and_then(|v| v.trim().parse::<bool>().ok())
+        {
+            i.repeating = v;
+        }
+        Ok(())
+    }
+
     fn play_uri(&self, uri: &str) -> Result<(), PlayerError> {
         self.gate()?;
         self.record(&format!("play_uri {uri}"));
