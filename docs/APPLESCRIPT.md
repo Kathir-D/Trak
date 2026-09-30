@@ -360,3 +360,124 @@ osascript -e 'tell application "Spotify" to return duration of current track'
 osascript -e 'tell application "Spotify" to return starred of current track'   # -10000
 osascript spikes/applescript/trak-read.applescript | tr '\037' '\n'
 ```
+
+---
+
+## 9. `PlaybackStateChanged` (TODO 1.3)
+
+### It works, from a plain CLI process
+
+`com.spotify.client.PlaybackStateChanged` is a real distributed notification, and
+**a bare, un-bundled Rust binary receives it.** That was the open question in
+TODO 1.3 ("a non-bundled process may not receive distributed notifications") and
+the answer is that it does. Verified with `spikes/notify` (Rust, `objc2` +
+`objc2-foundation`) and, independently, with a 20-line Swift program.
+
+`objc2-foundation` 0.3 exposes `NSDistributedNotificationCenter` but **only the
+selector-based registration** — the block variant is not generated:
+
+```rust
+// spikes/notify/src/main.rs, the shape player/notify.rs should take
+define_class!(
+    #[unsafe(super(NSObject))]
+    pub struct Observer;
+    unsafe impl NSObjectProtocol for Observer {}
+    impl Observer {
+        #[unsafe(method(handleNotification:))]
+        fn handle(&self, note: &NSNotification) { /* -> trak Event channel */ }
+    }
+);
+
+let observer: Retained<Observer> = msg_send![Observer::alloc(), init];
+NSDistributedNotificationCenter::defaultCenter().addObserver_selector_name_object(
+    &observer,
+    sel!(handleNotification:),
+    Some(&NSNotificationName::from_str("com.spotify.client.PlaybackStateChanged")),
+    None,
+);
+NSRunLoop::currentRunLoop().runUntilDate(&until);
+```
+
+Note the cost of this choice: trak's TUI already runs a main run loop, so
+registering a selector is workable, but it means `player/notify.rs` must own an
+`NSObject` subclass and keep it alive. It also means the callback is delivered on
+the **main thread**, so it must do nothing but hand the data to a channel.
+
+### The real `userInfo` keys — the guessed names were wrong
+
+TODO 1.3 listed `Player State`, `Name`, `Artist`, `Album`, `Track ID`,
+`Duration`, `Playback Position` as "believed but unconfirmed". Confirmed, with
+**13** keys, not 7:
+
+| Key | Value | Type | Notes |
+| --- | --- | --- | --- |
+| `Player State` | `Playing` | `NSTaggedPointerString` | **Capitalised**, unlike AppleScript's lowercase `playing`/`paused`/`stopped`. Normalise on parse. |
+| `Name` | `misplace` | `NSTaggedPointerString` | track title |
+| `Artist` | `Jane Remover` | `__NSCFString` | |
+| `Album` | `Frailty` | `NSTaggedPointerString` | |
+| `Album Artist` | `Jane Remover` | `__NSCFString` | |
+| `Track ID` | `spotify:track:0ALXVfQFaNZ1GmqvlG8X7V` | `__NSCFString` | **Full URI**, same as AppleScript's `id`. Not a bare 22-char id. |
+| `Duration` | `233783` | `__NSCFNumber` | **Milliseconds**, same unit as AppleScript. |
+| `Playback Position` | `108.714` | `__NSCFNumber` | **Seconds**, float, same as AppleScript. |
+| `Track Number` | `3` | `__NSCFNumber` | |
+| `Disc Number` | `1` | `__NSCFNumber` | |
+| `Popularity` | `46` | `__NSCFNumber` | 0–100 |
+| `Play Count` | `0` | `__NSCFNumber` | note the space in the name; AppleScript calls it `played count` |
+| `Has Artwork` | `1` | `__NSCFBoolean` | **new, and not in SPEC §5.** It is a *boolean*, not a URL. |
+
+Two gaps worth noting:
+
+- **There is no `artwork url` in the notification.** Only the boolean
+  `Has Artwork`. Album art still requires an AppleScript read (TODO 4.1) — the
+  notification can tell trak *whether* to bother, not *what* to show. This is
+  the single best reason to keep the slow AppleScript read in the loop.
+- `Play Count` (notification) vs `played count` (AppleScript) — different
+  spellings for what appears to be the same value. Treat the notification as
+  authoritative only for the fields it has, and normalise both into one
+  `TrackInfo` in the parser.
+
+`object` is always `com.spotify.client`.
+
+### Which changes actually fire it
+
+This is the finding that shapes the architecture. Each row was an isolated
+6-second listening window with a single write, so there is no ambiguity:
+
+| Change | Fires? |
+| --- | --- |
+| `play` / `pause` / `playpause` | **yes** |
+| `next track` / `previous track` | **yes** |
+| `set player position` (seek) | **no** — 3 separate seeks, 0 events, 0 events again on a repeat run |
+| `set sound volume` | **no** |
+| `set shuffling` | **no** |
+| `set repeating` | **no** |
+
+The notification therefore covers *playback state and track changes* — precisely
+the events trak must not miss, and precisely the ones Sonar's buttons, the media
+keys and the Spotify window all produce. It does **not** cover the four things
+trak's own keys write. trak applies its own writes locally, so it does not need
+an event for them, but a volume or shuffle changed *outside* trak (Sonar's fade,
+the Spotify window) will only be seen by a poll.
+
+### Latency
+
+Measured from a second process issuing the write to the callback firing, using
+`Date().timeIntervalSince1970` on both sides:
+
+| Action | Write issued → notification |
+| --- | --- |
+| `pause` → event | ~170 ms |
+| `next track` → event | ~170 ms |
+
+**Well inside TODO 3.9's < 300 ms budget** (and that 170 ms includes the ~50 ms
+`osascript` spawn of the *writer*, so the real notification latency is lower).
+
+### Decision
+
+Subscribe via `objc2-foundation` + a `define_class!` observer, and keep the
+AppleScript poll as a **slow safety net**, not as the primary path. Concretely,
+this revises the poll cost problem in §4: the 300 ms fast read no longer has to
+happen every second, because the notification tells trak immediately when
+something changed. The poll becomes 3–5 s (or slower) and only has to cover
+volume, shuffle, repeat and artwork — the things the notification is silent
+about. Recorded in `docs/ARCHITECTURE.md`.

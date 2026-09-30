@@ -1,5 +1,8 @@
 # Rust
 /target/
+# Spike crates are throwaway; their build output never belongs in the repo
+/spikes/*/target/
+/spikes/*/Cargo.lock
 # Release artifacts (rebuilt by scripts/package-release.sh)
 /dist/
 # macOS

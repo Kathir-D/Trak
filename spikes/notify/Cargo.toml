@@ -1,0 +1,19 @@
+[package]
+name = "notify-spike"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = [
+    "NSNotification",
+    "NSString",
+    "NSDictionary",
+    "NSArray",
+    "NSDate",
+    "NSObject",
+] }
+objc2-app-kit = { version = "0.3", features = ["NSApplication"] }
+
+[workspace]

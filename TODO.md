@@ -73,13 +73,19 @@ Each spike ends with facts written to a doc, not just working code. Throwaway co
       `id` changes)**, keep the poll on a worker thread, and lean on 1.3's notification to make the
       poll a safety net. Process spawn alone is 50 ms, so the `is running` check must live inside the
       same script.
-- [ ] 1.3 **`PlaybackStateChanged` notification.** Listen for `com.spotify.client.PlaybackStateChanged`
-      (distributed notification), print `userInfo` on play / pause / skip / seek. Verify the key names
-      (`Player State`, `Name`, `Artist`, `Album`, `Track ID`, `Duration`, `Playback Position` — believed
-      but unconfirmed) and whether seeks fire it. Try from Rust (`cidre` / objc2) or a Swift one-liner
-      just to observe. Done when: `docs/APPLESCRIPT.md` lists the real keys, and there is a decision on
-      how the Rust app subscribes (crate, or a poll-only fallback if subscribing from a plain CLI
-      process is not viable — a non-bundled process may not receive distributed notifications; verify).
+- [x] 1.3 **`PlaybackStateChanged` notification.** > **It works, from a plain un-bundled Rust
+      CLI** (`spikes/notify` proves it; the "only bundled apps get distributed notifications"
+      worry does not apply). Use **`objc2-foundation` + `define_class!` with the
+      selector-based `addObserver`** — 0.3 does not generate the block variant — and keep the
+      observer alive for the process. Latency **~170 ms** (inside 3.9's 300 ms budget). > **Real
+      userInfo has 13 keys, not the 7 guessed**, and the guesses were wrong in detail: `Player
+      State` is `Playing`/`Paused` (capitalised, unlike AppleScript's `playing`), `Track ID` is
+      the **full URI**, `Duration` is **ms**, `Playback Position` is **seconds**, the play count
+      key is `Play Count` not `played count`, and there is a new `Has Artwork` **boolean**. > **No
+      `artwork url` in the notification**, which is the strongest reason to keep the slow
+      AppleScript read. > **Fires for play/pause/skip only — NOT for seek, volume, shuffle or
+      repeat** (each isolated in its own 6 s window). Decision: notification is primary, poll drops
+      to 3–5 s as a safety net. Written up in `docs/APPLESCRIPT.md` §9 and `ARCHITECTURE.md`.
 - [ ] 1.4 **Album art in cmux and other terminals.** Render one image with the Kitty graphics
       protocol, then iTerm2 inline images, then sixel, in cmux (installed at `/Applications/cmux.app`)
       and in Terminal.app; use a tiny `ratatui-image` example (`Picker::from_query_stdio`).

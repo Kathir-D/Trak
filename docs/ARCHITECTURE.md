@@ -73,9 +73,29 @@ notify.rs          display notification on song change
 - **Shell out to `/usr/bin/osascript`** (like headless-spotify) instead of in-process
   NSAppleScript: no Objective-C surface for the common path, trivial to fake, easy to time out.
   Read everything in **one** batched script that returns a delimited string (≈1 process per poll,
-  not 10). Measure the cost in TODO 1.2; if a poll is > 80 ms, revisit.
-- **Progress bar is interpolated locally** between polls (position + elapsed since last read while
-  `playing`), so it is smooth without polling at 60 Hz.
+  not 10). **Measured: 431 ms p50 / 437 ms p95 for a 17-field read — 5.5× the 80 ms the plan
+  assumed** (`docs/APPLESCRIPT.md` §4). The cost is ~18 ms *per Apple Event inside Spotify's own
+  handler*; Finder answers 30 events in 2 ms, and JXA, `osacompile`d scripts, list coalescing and
+  a warm process all fail to recover it. So the read is **split**:
+  - **Fast read** (state, position, volume, shuffling, repeating, id — 6 events, ~300 ms) on the
+    poll tick.
+  - **Slow read** (the 11 track fields) only when `id` differs from the last read, so it costs
+    ~300 ms once per song rather than once per tick.
+  Every script's first statement must be the `application "Spotify" is running` guard, because a
+  bare `tell` **launches** a non-running Spotify (verified) and COMPAT rule 2 forbids that. The
+  guard cannot be a multi-line `-e` (syntax error `-2740`); use
+  `-e 'return (application "Spotify" is running) as string'`.
+- **The notification is the primary path; the poll is a slow safety net.** Spotify's
+  `com.spotify.client.PlaybackStateChanged` distributed notification **is received by a plain
+  un-bundled Rust process** (`spikes/notify`), so `player/notify.rs` subscribes with
+  `objc2-foundation`'s `NSDistributedNotificationCenter` (selector-based registration only — the
+  block variant is not generated) and delivers ~170 ms after a play/pause/skip, inside TODO 3.9's
+  300 ms budget. **It does not fire for seeks, volume, shuffle or repeat changes** — exactly the
+  four things the notification's `userInfo` (13 keys) omits artwork for. So the poll must still
+  read volume / shuffle / repeat / artwork, but at **3–5 s**, not 1 s, since nothing it covers
+  changes quickly. This is what makes the expensive AppleScript read affordable at all.
+- **Progress bar is interpolated locally** between polls and notifications (position + elapsed
+  since last read while `playing`), so it is smooth without polling at 60 Hz.
 - **Session history** is recorded by observing track changes while the TUI runs; it stores the
   `spotify url`/URI, so `enter` replays with `play track "<uri>"`.
 - **Rendering art**: `ratatui-image` picks Kitty / iTerm2 / sixel / half-blocks. Whether **cmux**
