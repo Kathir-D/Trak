@@ -258,16 +258,25 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
       keys it accepts, and a test asserts every other key does nothing on it. > The launch runs
       `headless-spotify launch` when it is on PATH, else `open -g -j -a Spotify` — no focus, no Dock
       bounce. A test asserts the flags, not just that the command exists.
-- [ ] 3.6 **Session history + History tab.** Recording, the 500 cap, dedupe and `j`/`k` are
-      done and tested; the tab renders with an empty state. > Tests pin the off-by-one: each read
-      records the *previous* track, so 540 reads leave [start, Track 0..Track 538] and the oldest 40
-      go. > **`enter` does not play the selected row yet** — `PlayerCommand::PlayUri` exists and the
-      fake handles it, but nothing queues it from a keypress. That is what is left.
-- [ ] 3.7 **Info tab.** Done for the AppleScript facts: duration, disc and track number, popularity,
-      URI, artwork, play count, album artist, with `—` for anything Spotify did not say. > A test
-      renders the **ad** fixture and asserts the dashes appear rather than a `0` popularity — an
-      advert reporting 0 is "unknown", not "nobody rated it". > **"Times heard this session" is not
-      there yet**: it needs the history to be keyed by URI, which 3.6 finishes.
+- [x] 3.6 **Session history + History tab.** `enter` plays the selected row by URI. **Verified
+      against a real Spotify**: skip, arrow to the row, `enter`, and the same
+      `spotify:track:` is playing again. > The tab draws the *now playing* track as its own `▶` row
+      above the history, because the history only holds tracks that have already finished —
+      without that row the current song is missing from the tab you use to remember what you just
+      played. > **The cursor was clamped at `history.len()` rather than `len - 1`**, so it could sit
+      one past the last row with nothing selected, and `j` counted into a list the renderer never
+      draws. Both are fixed and pinned by tests. > A new row lands at the *front* of the view
+      (newest first), so a track change steps the cursor down by one to keep the same song selected
+      — **but only if the user has moved the selection at all**. Without that condition a session
+      left alone walks the cursor to the oldest track, because every skip nudged it one row down. > 
+      `FakePlayer::play_uri` was **not** applying the URI allow-list, so the fake accepted URIs the
+      real player refuses; a test that passed against the fake would have failed in production.
+- [x] 3.7 **Info tab.** Every AppleScript fact, plus **"heard this session"**, counted by URI
+      across the history. > The label column is 18 wide, not 14: "heard this session" is the longest
+      label and at 14 the value ran straight into it with no gap. > The count is the current track
+      plus every history entry with the same URI, so a track heard once reads `1`, not `0` — and a
+      poll can never inflate it, because re-reading the same track is not a change. > An advert has
+      no URI to count by, so it prints a dash rather than a number it could not have earned.
 - [ ] 3.8 **Input**: all keys in SPEC §4 that apply to B, arrows + vim, `Tab`/`Shift-Tab`, `1`–`3`,
       `?` help overlay listing every key, `esc`. Mouse (click tabs and rows, click/drag progress bar to
       seek, wheel scroll, click ⏮⏯⏭) gated by the config flag (default on). Done when: each key has

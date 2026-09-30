@@ -268,6 +268,10 @@ impl Player for FakePlayer {
 
     fn play_uri(&self, uri: &str) -> Result<(), PlayerError> {
         self.gate()?;
+        // The same allow-list the real player applies, so a test that passes here
+        // is a test that will pass against Spotify. A fake that accepts anything
+        // is worse than no fake: it lets a broken URI through to production.
+        crate::player::check_playable_uri(uri)?;
         self.record(&format!("play_uri {uri}"));
         let mut i = self.inner.borrow_mut();
         if let Some(track) = i.queue.iter().find(|t| t.uri.as_deref() == Some(uri)) {

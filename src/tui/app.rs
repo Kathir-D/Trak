@@ -23,6 +23,13 @@ pub struct HistoryEntry {
 
 pub const HISTORY_CAP: usize = 500;
 
+/// How many history rows the History tab will ever draw.
+///
+/// The list holds up to `HISTORY_CAP` entries, and drawing 500 of them into a
+/// 20-row pane is wasted work on every frame. This also has to be the bound the
+/// selection is clamped to, or the cursor can point at a row that is not there.
+pub const HISTORY_VIEW: usize = 200;
+
 /// How long a toast stays up (TODO 4.8).
 const TOAST_SECS: f64 = 2.5;
 
@@ -113,6 +120,10 @@ pub struct App {
     pub history: Vec<HistoryEntry>,
     pub tab: Tab,
     pub history_cursor: usize,
+    /// Whether the user has actually moved the selection. Without this, every
+    /// track change would drag the cursor down with the new row, and a session
+    /// left alone would end up selecting the *oldest* track.
+    pub cursor_moved: bool,
     pub show_help: bool,
     /// The volume the user last chose, which is what the meter shows. Spotify's
     /// read-back is quantised and would make the meter jitter by 1 %
@@ -147,6 +158,7 @@ impl App {
             history: Vec::new(),
             tab: Tab::History,
             history_cursor: 0,
+            cursor_moved: false,
             show_help: false,
             volume: 0,
             muted: false,
@@ -198,6 +210,35 @@ impl App {
         } else {
             advanced
         }
+    }
+
+    /// The row `enter` would play, or `None` when there is nothing to play.
+    ///
+    /// The cursor counts rows from the **newest**, because that is the order the
+    /// tab draws them in. It is an index into the view, not into `history`, so
+    /// the two are related by `len - 1 - i` — getting that backwards plays the
+    /// wrong song, which is the sort of bug that only shows up on a real library.
+    pub fn selected_history(&self) -> Option<&HistoryEntry> {
+        self.history.iter().rev().nth(self.history_cursor)
+    }
+
+    /// The highest cursor value that still points at a drawn row.
+    fn history_cursor_max(&self) -> usize {
+        self.history.len().min(HISTORY_VIEW).saturating_sub(1)
+    }
+
+    /// How many times the current track has come round this session.
+    ///
+    /// `None` for an advert, which has no URI to count by. The current track
+    /// counts as one, so a track heard once reads `1` and not `0` (TODO 3.7).
+    pub fn times_heard(&self) -> Option<u32> {
+        let uri = self.track()?.uri.as_ref()?;
+        let past = self
+            .history
+            .iter()
+            .filter(|e| e.track.uri.as_ref() == Some(uri))
+            .count();
+        Some(past as u32 + 1)
     }
 
     fn toast(&mut self, text: impl Into<String>) {
@@ -309,9 +350,26 @@ fn handle_key(app: &mut App, c: char, commands: &mut Vec<PlayerCommand>) {
         '1' => app.tab = Tab::History,
         '2' => app.tab = Tab::Info,
         '3' => app.tab = Tab::Lyrics,
-        'j' => app.history_cursor = (app.history_cursor + 1).min(app.history.len()),
-        'k' => app.history_cursor = app.history_cursor.saturating_sub(1),
+        'j' => {
+            app.history_cursor = (app.history_cursor + 1).min(app.history_cursor_max());
+            app.cursor_moved = true;
+        }
+        'k' => {
+            app.history_cursor = app.history_cursor.saturating_sub(1);
+            app.cursor_moved = true;
+        }
         _ if busy => {}
+        // `enter` plays the selected history row (SPEC §4). It only means that on
+        // the History tab, because that is the only one with a selection; on the
+        // other tabs it is a no-op rather than something that guesses.
+        '\n' => {
+            if app.tab == Tab::History
+                && let Some(entry) = app.selected_history()
+                && let Some(uri) = entry.track.uri.clone()
+            {
+                push(app, commands, PlayerCommand::PlayUri(uri));
+            }
+        }
         ' ' => push(app, commands, PlayerCommand::Toggle),
         'n' => push(app, commands, PlayerCommand::Next),
         'p' => push(app, commands, PlayerCommand::Prev),
@@ -391,6 +449,15 @@ fn apply_state(app: &mut App, s: PlayerState) {
         if app.history.len() > HISTORY_CAP {
             let excess = app.history.len() - HISTORY_CAP;
             app.history.drain(0..excess);
+        }
+        // The tab draws newest first, so the new row goes to the *front* of the
+        // view and everything the user was looking at shifts down one. Stepping
+        // the cursor keeps the same song selected instead of yanking the
+        // selection onto whatever happens to be above it -- but only if the
+        // selection is the user's to keep. A cursor nobody has touched stays at
+        // the newest row, which is where it belongs.
+        if app.cursor_moved {
+            app.history_cursor = (app.history_cursor + 1).min(app.history_cursor_max());
         }
     }
 
@@ -658,12 +725,167 @@ mod tests {
             let (next, _) = press(app, 'j');
             app = next;
         }
-        assert_eq!(app.history_cursor, 3);
+        // The newest of three rows is index 2. Clamping at `len` instead would
+        // leave the cursor on a row that does not exist, with nothing selected.
+        assert_eq!(app.history_cursor, 2, "must not point past the last row");
         for _ in 0..99 {
             let (next, _) = press(app, 'k');
             app = next;
         }
         assert_eq!(app.history_cursor, 0);
+    }
+
+    /// A long session must not be able to select a row the renderer never draws.
+    #[test]
+    fn the_cursor_cannot_reach_past_the_drawn_window() {
+        let mut app = with_track();
+        for n in 0..(HISTORY_CAP + 10) {
+            let mut s = playing();
+            s.track.uri = Some(format!("spotify:track:t{n}"));
+            app = update(app, Event::PlayerState(Box::new(s))).app;
+        }
+        for _ in 0..(HISTORY_CAP * 2) {
+            let (next, _) = press(app, 'j');
+            app = next;
+        }
+        assert!(app.history_cursor < HISTORY_VIEW);
+        assert!(app.selected_history().is_some());
+    }
+
+    /// `n` skips, so the history holds `[Census, Old 0 .. Old n-2]` and the track
+    /// now playing is `Old n-1`. The current track is *not* in the history -- it
+    /// only gets in when the next one arrives -- which is the off-by-one every
+    /// test below has to be written around.
+    fn app_with_history(n: usize) -> App {
+        let mut app = with_track();
+        for i in 0..n {
+            let mut s = playing();
+            s.track.uri = Some(format!("spotify:track:t{i}"));
+            s.track.title = format!("Old {i}");
+            s.track.artist = "Someone".into();
+            app = update(app, Event::PlayerState(Box::new(s))).app;
+        }
+        app
+    }
+
+    /// The whole point of the History tab (SPEC §4): `enter` plays that row again.
+    #[test]
+    fn enter_plays_the_selected_history_row() {
+        let app = app_with_history(3);
+        // Newest first, so row 0 is Old 1 -- Old 2 is what is playing now.
+        assert_eq!(app.selected_history().unwrap().track.title, "Old 1");
+        let (_, cmds) = press(app, '\n');
+        assert_eq!(
+            cmds,
+            vec![PlayerCommand::PlayUri("spotify:track:t1".into())]
+        );
+    }
+
+    /// Arrowing down must move the selection, and `enter` must follow it.
+    #[test]
+    fn enter_plays_wherever_the_cursor_is() {
+        let app = app_with_history(3);
+        let (app, _) = press(app, 'j');
+        assert_eq!(app.selected_history().unwrap().track.title, "Old 0");
+        let (_, cmds) = press(app, '\n');
+        assert_eq!(
+            cmds,
+            vec![PlayerCommand::PlayUri("spotify:track:t0".into())]
+        );
+    }
+
+    /// An advert has no URI, so there is nothing to ask Spotify to play.
+    #[test]
+    fn enter_does_nothing_when_the_row_is_unplayable() {
+        let mut app = with_track();
+        let mut ad = playing();
+        ad.track.uri = None;
+        app.history.push(HistoryEntry {
+            track: ad.track,
+            at: Instant::now(),
+        });
+        let (_, cmds) = press(app, '\n');
+        assert!(cmds.is_empty(), "an advert must not be queued for playback");
+    }
+
+    /// Only the History tab has a selection, so enter elsewhere is a no-op rather
+    /// than something that guesses.
+    #[test]
+    fn enter_is_only_meaningful_on_the_history_tab() {
+        let mut app = app_with_history(2);
+        app.tab = Tab::Info;
+        let (_, cmds) = press(app, '\n');
+        assert!(cmds.is_empty());
+    }
+
+    /// A new row lands at the front of the view, so the selection has to step
+    /// down with it or it silently jumps to a different song.
+    #[test]
+    fn a_track_change_keeps_the_same_row_selected() {
+        let app = app_with_history(3);
+        let (app, _) = press(app, 'j');
+        let chosen = app.selected_history().unwrap().track.title.clone();
+        let mut s = playing();
+        s.track.uri = Some("spotify:track:brand-new".into());
+        s.track.title = "Brand New".into();
+        let app = update(app, Event::PlayerState(Box::new(s))).app;
+        assert_eq!(
+            app.selected_history().unwrap().track.title,
+            chosen,
+            "a skip must not move the selection"
+        );
+    }
+
+    /// The other half of that: a session nobody scrolled must leave the cursor
+    /// on the newest row, not slowly walk down to the oldest one.
+    #[test]
+    fn an_untouched_cursor_stays_on_the_newest_row() {
+        let app = app_with_history(6);
+        assert_eq!(app.history.len(), 6);
+        assert!(!app.cursor_moved);
+        assert_eq!(
+            app.selected_history().unwrap().track.title,
+            "Old 4",
+            "the newest finished track"
+        );
+        let (_, cmds) = press(app, '\n');
+        assert_eq!(
+            cmds,
+            vec![PlayerCommand::PlayUri("spotify:track:t4".into())]
+        );
+    }
+
+    #[test]
+    fn times_heard_counts_the_current_track_and_the_past_ones() {
+        let app = with_track();
+        assert_eq!(app.times_heard(), Some(1), "heard once so far");
+
+        // Listen to it again later, non-consecutively, so the dedupe cannot hide
+        // the second play.
+        let mut other = playing();
+        other.track.uri = Some("spotify:track:something-else".into());
+        let app = update(app, Event::PlayerState(Box::new(other))).app;
+        let back = playing();
+        let app = update(app, Event::PlayerState(Box::new(back))).app;
+        assert_eq!(app.times_heard(), Some(2));
+    }
+
+    /// An advert has no URI, so "times heard" has nothing to count.
+    #[test]
+    fn times_heard_is_unknown_for_an_advert() {
+        let ad = parse(&fixture("playing_ad.txt")).unwrap();
+        let app = update(App::new(), Event::PlayerState(Box::new(ad))).app;
+        assert_eq!(app.times_heard(), None);
+    }
+
+    /// Re-reading the same track must not inflate the count.
+    #[test]
+    fn a_poll_does_not_inflate_times_heard() {
+        let mut app = with_track();
+        for _ in 0..10 {
+            app = update(app, Event::PlayerState(Box::new(playing()))).app;
+        }
+        assert_eq!(app.times_heard(), Some(1));
     }
 
     #[test]

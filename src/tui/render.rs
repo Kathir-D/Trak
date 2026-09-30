@@ -13,7 +13,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 
 use crate::player::PlaybackState;
-use crate::tui::app::{App, HISTORY_CAP, Tab};
+use crate::tui::app::{App, HISTORY_VIEW, Tab};
 use crate::tui::theme::{Theme, format_time, progress_bar};
 
 /// Which layout the terminal is wide enough for.
@@ -409,7 +409,7 @@ fn draw_tabs(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     }
 
     let lines: Vec<Line> = match app.tab {
-        Tab::History => history_lines(app),
+        Tab::History => history_lines(app, theme),
         Tab::Info => info_lines(app, theme),
         Tab::Lyrics => vec![Line::from(Span::styled(
             if app.is_idle() { "" } else { "no lyrics yet" },
@@ -435,46 +435,81 @@ fn tab_strip(app: &App) -> String {
         .join(" ")
 }
 
-fn history_lines<'a>(app: &'a App) -> Vec<Line<'a>> {
-    if app.history.is_empty() {
-        return vec![Line::from(Span::styled(
-            "nothing yet this session — tracks appear here as they play",
-            Theme::dim(),
-        ))];
+fn history_lines<'a>(app: &'a App, theme: &'a Theme) -> Vec<Line<'a>> {
+    let mut out = Vec::new();
+
+    // The track that is playing is not in the history yet -- history holds the
+    // *outgoing* tracks -- so it is drawn as its own row above them, marked with
+    // the same ▶ the SPEC uses, and it is not selectable. Otherwise the current
+    // song is missing from the tab you use to remember what you just played.
+    if let Some(t) = app.track() {
+        let now = if t.artist.is_empty() {
+            t.title.clone()
+        } else {
+            format!("{} — {}", t.artist, t.title)
+        };
+        out.push(Line::from(Span::styled(
+            format!("▶ {now}"),
+            theme.accent_style().add_modifier(Modifier::BOLD),
+        )));
     }
-    // Newest first, which is what a history is for.
-    app.history
-        .iter()
-        .rev()
-        .take(HISTORY_CAP.min(200))
-        .enumerate()
-        .map(|(i, e)| {
-            let selected = i == app.history_cursor;
-            let marker = if selected { "▶" } else { " " };
-            let text = if e.track.artist.is_empty() {
-                e.track.title.clone()
-            } else {
-                format!("{} — {}", e.track.artist, e.track.title)
-            };
-            let style = if selected {
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-            Line::from(Span::styled(format!("{marker} {text}"), style))
-        })
-        .collect()
+
+    if app.history.is_empty() {
+        if out.is_empty() {
+            out.push(Line::from(Span::styled(
+                "nothing yet this session — tracks appear here as they play",
+                Theme::dim(),
+            )));
+        } else {
+            out.push(Line::from(Span::styled(
+                "  no earlier tracks this session",
+                Theme::dim(),
+            )));
+        }
+        return out;
+    }
+
+    out.push(Line::from(Span::styled(
+        "  earlier this session",
+        Theme::dim(),
+    )));
+
+    // Newest first, which is what a history is for, and the same order the
+    // cursor counts in (`App::selected_history`).
+    out.extend(
+        app.history
+            .iter()
+            .rev()
+            .take(HISTORY_VIEW)
+            .enumerate()
+            .map(|(i, e)| {
+                let selected = i == app.history_cursor;
+                let marker = if selected { "›" } else { " " };
+                let text = if e.track.artist.is_empty() {
+                    e.track.title.clone()
+                } else {
+                    format!("{} — {}", e.track.artist, e.track.title)
+                };
+                let style = if selected {
+                    Style::default().add_modifier(Modifier::REVERSED)
+                } else {
+                    Style::default()
+                };
+                Line::from(Span::styled(format!("{marker} {text}"), style))
+            }),
+    );
+    out
 }
 
 fn info_lines<'a>(app: &'a App, theme: &'a Theme) -> Vec<Line<'a>> {
     let Some(t) = app.track().cloned() else {
         return vec![Line::from(Span::styled("nothing is playing", Theme::dim()))];
     };
+    // 18 is the longest label ("heard this session"); a narrower column runs the
+    // value straight into the label with no gap.
     let dash = |k: &str, v: String| -> Line<'a> {
         Line::from(vec![
-            Span::styled(format!("{k:<14}"), Theme::dim()),
+            Span::styled(format!("{k:<18} "), Theme::dim()),
             Span::styled(v, theme.accent_style()),
         ])
     };
@@ -500,6 +535,14 @@ fn info_lines<'a>(app: &'a App, theme: &'a Theme) -> Vec<Line<'a>> {
         "play count",
         t.play_count
             .map(|p| p.to_string())
+            .unwrap_or_else(|| "—".into()),
+    ));
+    // Only the track with a URI can be counted, so an advert prints a dash
+    // rather than a number it could not have earned.
+    out.push(dash(
+        "heard this session",
+        app.times_heard()
+            .map(|n| n.to_string())
             .unwrap_or_else(|| "—".into()),
     ));
     out.push(dash("uri", or_dash(t.uri.as_deref().unwrap_or(""))));
@@ -927,6 +970,99 @@ mod tests {
             .join("\n");
         assert!(text.contains('—'), "missing values print a dash: {text}");
         assert!(text.contains("advert"), "{text}");
+    }
+
+    /// The Info tab is where "times heard this session" lives (TODO 3.7).
+    #[test]
+    fn the_info_tab_counts_the_plays_this_session() {
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        let mut app = app_at(100, 30);
+        app.tab = Tab::Info;
+        // Hear the same track again, so the count is not just the trivial one.
+        let mut other = parse(&fixture("playing_track.txt")).unwrap();
+        other.track.uri = Some("spotify:track:OTHER".into());
+        other.track.title = "Other".into();
+        app = update(app, Event::PlayerState(Box::new(other))).app;
+        let census = parse(&fixture("playing_track.txt")).unwrap();
+        app = update(app, Event::PlayerState(Box::new(census))).app;
+
+        let theme = Theme::default();
+        term.draw(|f| draw(f, &app, &theme)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let text = (0..30)
+            .map(|y| {
+                (0..100)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("heard this session"), "{text}");
+        assert!(
+            text.contains("heard this session 2"),
+            "twice this session: {text}"
+        );
+    }
+
+    /// The current track is drawn above the history, marked ▶, because the
+    /// history itself only holds the tracks that have already finished.
+    #[test]
+    fn the_history_tab_marks_the_track_that_is_playing() {
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        let mut app = app_at(100, 30);
+        app.tab = Tab::History;
+        assert!(
+            text_of(&mut term, &app, 100, 30).contains("▶ Jane Remover — Census Designated"),
+            "the now-playing row"
+        );
+
+        let mut other = parse(&fixture("playing_track.txt")).unwrap();
+        other.track.title = "Something Else".into();
+        // A different URI, because history records by URI: a different title on
+        // the same track is not a change.
+        other.track.uri = Some("spotify:track:OTHER".into());
+        app = update(app, Event::PlayerState(Box::new(other))).app;
+        let text = text_of(&mut term, &app, 100, 30);
+        assert!(text.contains("▶ Jane Remover — Something Else"), "{text}");
+        assert!(
+            text.contains("earlier this session"),
+            "the finished tracks go under a heading: {text}"
+        );
+        assert!(
+            text.contains("Census Designated"),
+            "kept as history: {text}"
+        );
+    }
+
+    /// With nothing played yet there is no ▶ row, and the tab says so.
+    #[test]
+    fn an_empty_history_says_so() {
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        let app = app_at(100, 30);
+        let text = text_of(&mut term, &app, 100, 30);
+        assert!(text.contains("no earlier tracks"), "{text}");
+    }
+
+    fn text_of(
+        term: &mut ratatui::Terminal<ratatui::backend::TestBackend>,
+        app: &App,
+        w: u16,
+        h: u16,
+    ) -> String {
+        let theme = Theme::default();
+        term.draw(|f| draw(f, app, &theme)).unwrap();
+        let buf = term.backend().buffer().clone();
+        (0..h)
+            .map(|y| {
+                (0..w)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     #[test]

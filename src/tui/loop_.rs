@@ -152,7 +152,10 @@ fn event_loop<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> i32 {
     let mut app = App::new();
     let theme = Theme::new(Accent::Art, Border::Rounded);
 
-    let mut last_poll = Instant::now();
+    // `None` means "never polled", which is due straight away. Starting the
+    // clock at `now` instead would leave the TUI sitting on the idle card for a
+    // whole poll interval before it found out Spotify was running.
+    let mut last_poll: Option<Instant> = None;
     let mut last_clock_tick = Instant::now();
 
     loop {
@@ -256,8 +259,9 @@ fn event_loop<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> i32 {
         } else {
             POLL_IDLE
         };
-        if app.poll_due && !worker.is_busy() && last_poll.elapsed() >= interval {
-            last_poll = Instant::now();
+        let due = last_poll.is_none_or(|t| t.elapsed() >= interval);
+        if app.poll_due && !worker.is_busy() && due {
+            last_poll = Some(Instant::now());
             worker.submit(|p| match p.state() {
                 Ok(st) => WorkerResult::State(Box::new(st)),
                 Err(e) => WorkerResult::ReadFailed(e),
@@ -316,7 +320,10 @@ fn run_one(
             let on = !p.state()?.repeating_enabled;
             p.command(&format!("set repeating to {on}"))
         }
-        PlayerCommand::PlayUri(_) => Ok(()),
+        // `enter` on a history row (TODO 3.6). The URI came out of a read, and
+        // `play_uri` checks the allow-list itself, so there is no path from a
+        // Spotify string to a generated AppleScript literal.
+        PlayerCommand::PlayUri(uri) => p.play_uri(&uri),
         // Copying is not a Spotify write at all, so it never touches a player.
         PlayerCommand::CopyLink(link) => {
             // A pasteboard that refuses is not a Spotify failure, and the link is
@@ -509,6 +516,7 @@ mod tests {
             PlayerCommand::VolumeStep(10),
             PlayerCommand::VolumeStep(-10),
             PlayerCommand::SetVolume(50),
+            PlayerCommand::PlayUri("spotify:track:6HacgXCExkzS552ILfJTXu".into()),
         ] {
             // The fake has no AppleScript `command`, so the two that need it are
             // checked separately; everything else must simply not panic.
@@ -522,5 +530,46 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The History tab's `enter`, end to end against the fake (TODO 3.6).
+    #[test]
+    fn enter_on_a_history_row_reaches_spotify() {
+        use crate::player::{FakePlayer, PlaybackState, Player};
+        let mut p = FakePlayer::playing();
+        let before = p.state().unwrap().track.uri.clone();
+        run_one(
+            &mut p,
+            PlayerCommand::PlayUri("spotify:track:replayed".into()),
+        )
+        .unwrap();
+        let s = p.state().unwrap();
+        assert_ne!(s.track.uri, before);
+        assert_eq!(s.track.uri.as_deref(), Some("spotify:track:replayed"));
+        assert_eq!(s.playback, PlaybackState::Playing);
+    }
+
+    /// The URI is interpolated into an AppleScript literal, so one that is not on
+    /// the allow-list must never get that far.
+    #[test]
+    fn an_unplayable_uri_is_refused_before_it_reaches_spotify() {
+        use crate::player::{FakePlayer, Player};
+        let mut p = FakePlayer::playing();
+        let before = p.state().unwrap().track.uri.clone();
+        for bad in [
+            "spotify:ad:1",
+            "spotify:track:x\" & (do shell script \"id\") & \"",
+            "https://example.com",
+        ] {
+            assert!(
+                run_one(&mut p, PlayerCommand::PlayUri(bad.into())).is_err(),
+                "{bad:?} must be refused"
+            );
+        }
+        assert_eq!(
+            p.state().unwrap().track.uri,
+            before,
+            "the player was left alone"
+        );
     }
 }
