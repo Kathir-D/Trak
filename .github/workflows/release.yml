@@ -1,0 +1,145 @@
+name: Release
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build, package, publish
+    runs-on: macos-15
+    outputs:
+      # Both come from the packaging script, which is the only thing that has seen
+      # the artifact, so there is one checksum in this pipeline rather than three
+      # places that could compute different ones.
+      version: ${{ steps.package.outputs.version }}
+      sha256: ${{ steps.package.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        # The same toolchain and the same action versions as ci.yml, so a release
+        # cannot be produced by a different Rust than the one CI just tested.
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy && rustup default stable
+      - name: Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - name: The tag, VERSION and Cargo.toml must agree
+        # A tag is what people install from and what the tap advertises. If the
+        # three disagree, stop before anything is published rather than after.
+        run: |
+          set -eu
+          VERSION="$(tr -d ' \t\r\n' < VERSION)"
+          CARGO_VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
+          if [ "$VERSION" != "$CARGO_VERSION" ]; then
+            echo "::error::VERSION is $VERSION but Cargo.toml says $CARGO_VERSION"
+            exit 1
+          fi
+          if [ "v$VERSION" != "${{ github.ref_name }}" ]; then
+            echo "::error::tag ${{ github.ref_name }} != v$VERSION — the tag has to be v\$(cat VERSION)"
+            exit 1
+          fi
+          echo "releasing v$VERSION"
+      - name: Gate
+        # The same gate ci.yml runs. A tag pointing at a red build is worse than no
+        # tag: the sha256 would be published for a binary nothing has tested.
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --all-targets -- -D warnings
+          cargo test
+      - name: Package
+        id: package
+        run: ./scripts/package-release.sh
+      - name: Publish the release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: trak ${{ github.ref_name }}
+          # A glob that matches nothing would otherwise publish a release with no
+          # tarball and a checksum for one that does not exist.
+          fail_on_unmatched_files: true
+          files: |
+            dist/trak-*-macos.tar.gz
+            dist/SHA256SUMS.txt
+
+  formula:
+    name: Bump the tap
+    # Its own job on purpose: a tap failure must not un-publish a good release, and
+    # the sha256 crosses the boundary as an output rather than as a file on a
+    # runner that no longer exists.
+    needs: release
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Point the formula at this release
+        env:
+          VERSION: ${{ needs.release.outputs.version }}
+          SHA256: ${{ needs.release.outputs.sha256 }}
+        run: |
+          set -eu
+          python3 - "$VERSION" "$SHA256" <<'EOF'
+          import re, sys
+          version, sha = sys.argv[1], sys.argv[2]
+          if not re.fullmatch(r"[0-9][0-9A-Za-z.+-]*", version):
+              sys.exit(f"the release reported no usable version: {version!r}")
+          if not re.fullmatch(r"[0-9a-f]{64}", sha):
+              sys.exit(f"the release reported no usable sha256: {sha!r}")
+          path = "Formula/trak.rb"
+          source = open(path).read()
+
+          def sub(pattern, replacement, label):
+              # count=1 without checking the count is how a changed formula layout
+              # silently ships the previous version's URL.
+              new, count = re.subn(pattern, replacement, source, count=1, flags=re.M)
+              if count != 1:
+                  sys.exit(f"expected exactly one {label} line in {path}")
+              return new
+
+          source = sub(r'^  version ".*"$', f'  version "{version}"', "version")
+          source = sub(r'^  url ".*"$',
+                       f'  url "https://github.com/Kathir-D/trak/releases/download/v{version}'
+                       f'/trak-{version}-macos.tar.gz"',
+                       "url")
+          source = sub(r'^  sha256 ".*"$', f'  sha256 "{sha}"', "sha256")
+          if "UNRELEASED" in source or "REPLACED-BY" in source:
+              sys.exit("a placeholder survived the substitution")
+          open(path, "w").write(source)
+          print(f"formula points at v{version}, sha256 {sha}")
+          EOF
+      # `brew install kathir-d/tap/trak` reads the formula from the tap, not from
+      # this repository. TAP_DEPLOY_KEY is a deploy key with write access to
+      # Kathir-D/homebrew-tap and to nothing else, which is how the tap keeps its
+      # one-writer-per-file rule — the same mechanism headless-spotify uses. (TODO
+      # 9.2 named a HOMEBREW_TAP_TOKEN secret; the deploy key is what the tap
+      # actually documents and what its sibling workflow uses.)
+      - name: Publish the formula to the Homebrew tap
+        env:
+          TAP_DEPLOY_KEY: ${{ secrets.TAP_DEPLOY_KEY }}
+          VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          if [ -z "$TAP_DEPLOY_KEY" ]; then
+            echo "::error::TAP_DEPLOY_KEY is not set, so the tap was not updated. The release is up; add the secret and re-run this job."
+            exit 1
+          fi
+          KEY="$RUNNER_TEMP/tap_key"
+          printf '%s\n' "$TAP_DEPLOY_KEY" > "$KEY" && chmod 600 "$KEY"
+          export GIT_SSH_COMMAND="ssh -i $KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+          git clone --depth 1 git@github.com:Kathir-D/homebrew-tap.git "$RUNNER_TEMP/tap"
+          mkdir -p "$RUNNER_TEMP/tap/Formula"
+          cp Formula/trak.rb "$RUNNER_TEMP/tap/Formula/trak.rb"
+          cd "$RUNNER_TEMP/tap"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/trak.rb
+          # A re-run for the same tag has nothing new to commit.
+          if git diff --cached --quiet; then
+            echo "The tap already points at ${GITHUB_REF_NAME}."
+            exit 0
+          fi
+          git commit -m "trak ${GITHUB_REF_NAME#v}: $VERSION"
+          git push origin HEAD

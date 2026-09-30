@@ -182,6 +182,9 @@ fixtures under `tests/fixtures/` so future tests are hermetic.
 ```
 AGENTS.md  CLAUDE.md  README.md  TODO.md  LICENSE  THIRD-PARTY-NOTICES.md  VERSION
 Cargo.toml  rustfmt.toml  src/main.rs
+scripts/          (created by task 9.1: package-release.sh)
+Formula/trak.rb   (created by task 9.3)
+.github/workflows/release.yml  (created by task 9.2)
 docs/  SPEC.md  COMPAT.md  ARCHITECTURE.md  AGENT-PROMPTS.md
        TERMINALS.md + KEYCHAIN.md + WEB-API.md + AUDIO-TAP.md exist (1.3–1.7)
        (created by tasks: APPLESCRIPT.md KEYCHAIN.md TERMINALS.md AUDIO-TAP.md README-NOTES.md RELEASING.md)

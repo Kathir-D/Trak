@@ -7,6 +7,7 @@
 pub mod accent;
 pub mod art;
 pub mod cli;
+pub mod config;
 pub mod headless;
 pub mod lyrics;
 pub mod player;
