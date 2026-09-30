@@ -348,6 +348,38 @@ impl Tab {
     }
 }
 
+/// A Web API call the app has decided on and the loop should make.
+///
+/// A queue rather than a direct call, for the same reason player commands are: a
+/// network round trip must not happen on the thread that draws. `update` is pure
+/// and does not know whether there is a token, so it records what it wants and
+/// the loop decides whether it can be done.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WebJob {
+    Search(String),
+    Playlists,
+    Liked,
+    Queue,
+    Library(LibrarySection),
+    PlaylistItems(String),
+    ArtistAlbums(String),
+    AlbumTracks(String),
+    Enqueue(String),
+    Like(String, bool),
+    Unlike(String),
+    CreatePlaylist(String),
+    AddToPlaylist {
+        playlist: String,
+        uri: String,
+    },
+    RemoveFromPlaylist {
+        playlist: String,
+        uri: String,
+    },
+    /// Whether the playing track is liked, which is `GET /me/library/contains`.
+    IsLiked(String),
+}
+
 /// Which volume trak changes (TODO 4.4, R2).
 /// Everything the Web API tabs hold (TODO 7.6-7.11).
 ///
@@ -1161,6 +1193,10 @@ impl App {
 pub struct Updated {
     pub app: App,
     pub commands: Vec<PlayerCommand>,
+    /// The Web API calls the app wants made. The loop runs them on the worker,
+    /// for the same reason `commands` exists: a search is a network round trip
+    /// and must not happen on the thread that draws.
+    pub web: Vec<WebJob>,
 }
 
 /// The one place the app's state changes.
@@ -1169,6 +1205,7 @@ pub struct Updated {
 /// is what keeps this function pure and testable.
 pub fn update(mut app: App, event: Event) -> Updated {
     let mut commands = Vec::new();
+    let mut web = Vec::new();
 
     match event {
         Event::Quit => app.should_quit = true,
@@ -1191,7 +1228,7 @@ pub fn update(mut app: App, event: Event) -> Updated {
             // than no answer: it puts results on screen that do not match the
             // box they came from.
             if for_query != app.web.query {
-                return Updated { app, commands };
+                return Updated { app, commands, web };
             }
             app.web.searching = false;
             app.web.search_shown = for_query;
@@ -1237,7 +1274,7 @@ pub fn update(mut app: App, event: Event) -> Updated {
             app.spectrum = app.viz.spectrum();
         }
 
-        Event::Key(c) => handle_key(&mut app, c, &mut commands),
+        Event::Key(c) => handle_key(&mut app, c, &mut commands, &mut web),
 
         Event::PlayerState(s) => {
             apply_state(&mut app, *s);
@@ -1372,16 +1409,315 @@ pub fn update(mut app: App, event: Event) -> Updated {
         }
     }
 
-    Updated { app, commands }
+    Updated { app, commands, web }
 }
 
-fn handle_key(app: &mut App, c: char, commands: &mut Vec<PlayerCommand>) {
+/// The search input, which owns every key while it has focus.
+///
+/// A `q` typed into a search box is the letter q. That is the whole reason this
+/// is separate from the rest of the key handling rather than a mode flag checked
+/// in one place: the moment a key means two things, every binding has to know
+/// which meaning it is getting.
+fn web_search_key(app: &mut App, c: char, web: &mut Vec<WebJob>) {
+    match c {
+        '\x1b' | '\n' => {
+            // Both close the box. Enter runs what has been typed; escape throws
+            // it away, which is the point of having escape.
+            app.web.search_focus = false;
+            if c == '\n' {
+                // Enter runs what has been typed; escape threw it away, which is
+                // the reason there is an escape.
+                app.web.search_debounce = 0.0;
+                if !app.web.query.trim().is_empty() {
+                    web.push(WebJob::Search(app.web.query.trim().to_string()));
+                    app.web.searching = true;
+                }
+            }
+        }
+        // Backspace arrives as either \x7f (macOS) or \x08 (the DEC set). The
+        // loop maps it to one of them; both erase, because which one arrives is
+        // a property of the terminal, not of what the user meant.
+        '\x7f' | '\x08' => {
+            app.web.query.pop();
+            app.web.search_debounce = 0.0;
+            app.web.searching = false;
+        }
+        // A control character is not text.
+        ch if ch.is_control() => {}
+        ch => {
+            app.web.query.push(ch);
+            // Every keystroke restarts the wait, so a slow typist sends one
+            // request for the word rather than one per letter.
+            app.web.search_debounce = 0.0;
+            app.web.searching = false;
+        }
+    }
+}
+
+/// One key on a Web API tab. `true` means the key was consumed.
+///
+/// Playback of a result is `PlayUri`, which is `play track "<uri>"` through
+/// AppleScript -- not a Web API call. That is deliberate: it is the only path
+/// that works on a Free account, and dev mode has removed the Web API's own
+/// playback endpoints.
+fn web_tab_key(
+    app: &mut App,
+    c: char,
+    commands: &mut Vec<PlayerCommand>,
+    web: &mut Vec<WebJob>,
+) -> bool {
+    let queue_uri = |app: &App| -> Option<String> { app.web.row_uri(app.tab) };
+    match c {
+        '/' => {
+            app.web.search_focus = true;
+            true
+        }
+        'j' | 'k' => {
+            let down = c == 'j';
+            web_move(app, down, 1);
+            true
+        }
+        // Between the four result groups inside Search (7.6). `[` and `]`, and
+        // not `Tab`: SPEC section 4 gives `Tab` as "cycle focus between panes /
+        // tabs" for *both* versions, and 7.6's "Tab jumps groups" would take it
+        // away on exactly one tab. A key that means two things depending on which
+        // tab is showing is a key nobody can remember.
+        '[' | ']' if app.tab == Tab::Search => {
+            let n = 4;
+            app.web.group = if c == ']' {
+                (app.web.group + 1) % n
+            } else {
+                (app.web.group + n - 1) % n
+            };
+            // The cursor is per group, so arriving somewhere shows where you were
+            // last there rather than resetting to the top.
+            true
+        }
+        '\x1b' => {
+            // Back out of a page before back out of the tab, or out of the tab
+            // before quitting: a person who opened an album and pressed escape
+            // did not mean to leave trak.
+            if app.web.close_page() {
+                return true;
+            }
+            false
+        }
+        '\n' => {
+            match (app.tab, queue_uri(app)) {
+                // A track row plays.
+                (_, Some(uri)) => commands.push(PlayerCommand::PlayUri(uri)),
+                // A row with no URI is an album or a playlist, and enter opens it.
+                (Tab::Search, None) => web_open_selected(app),
+                (Tab::Playlists, None) => web_open_selected(app),
+                (Tab::Library, None) => web_open_selected(app),
+                _ => {}
+            }
+            true
+        }
+        // `o` opens the artist or album under the cursor, which is a different
+        // thing from enter: on an album row, enter opens it and `o` is the way to
+        // say "no, the artist".
+        'o' => {
+            web_open_selected(app);
+            true
+        }
+        // Add to the queue is Premium-only and the 403 is the *expected* answer
+        // on Free, so the key is not disabled -- it is tried, and the typed error
+        // is the message. Pretending it is unavailable would be a guess.
+        'A' => {
+            if let Some(uri) = queue_uri(app) {
+                web.push(WebJob::Enqueue(uri));
+            }
+            true
+        }
+        'f' => {
+            // Like or unlike the *playing* track, not the selected row: a like is
+            // a statement about a song, and the one the user can hear is the one
+            // they mean.
+            if let Some(uri) = app.track().and_then(|t| t.uri.clone()) {
+                let liked = app.web.liked_here.unwrap_or(false);
+                // Optimistic: the row flips now and the check is invalidated, so
+                // a slow write does not feel like a key that did nothing.
+                app.web.liked_here = Some(!liked);
+                web.push(if liked {
+                    WebJob::Unlike(uri)
+                } else {
+                    WebJob::Like(uri, true)
+                });
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+/// The URI under the cursor, from whichever list `tab` is showing.
+///
+/// The tab is passed in rather than stored: `WebState` is the *contents* of the
+/// Web tabs, and a second copy of "which one is open" is a second thing to fall
+/// out of step.
+impl WebState {
+    pub fn row_uri(&self, tab: Tab) -> Option<String> {
+        if self.open.is_some() {
+            return self.open_row_uri();
+        }
+        match tab {
+            Tab::Search => {
+                let i = self.group_row[self.group];
+                match self.group {
+                    0 => self.results.tracks.get(i).map(|t| t.uri.clone()),
+                    // An album and a playlist row are not playable by URI: enter
+                    // opens them, and `PlayUri` would be asking for a thing that
+                    // is not a track.
+                    _ => None,
+                }
+            }
+            Tab::Liked => self
+                .liked
+                .items
+                .get(self.liked_cursor)
+                .and_then(|i| i.track.as_ref())
+                .map(|t| t.uri.clone()),
+            Tab::Queue => self
+                .queue
+                .upcoming
+                .get(self.queue_cursor)
+                .map(|t| t.uri.clone()),
+            _ => None,
+        }
+    }
+
+    /// One search group's rows, as the strings the tabs compare against.
+    pub fn group_rows(&self, group: usize) -> Vec<String> {
+        match group {
+            0 => self.results.tracks.iter().map(|t| t.to_string()).collect(),
+            1 => self.results.albums.iter().map(|a| a.to_string()).collect(),
+            2 => self.results.artists.iter().map(|a| a.to_string()).collect(),
+            _ => self
+                .results
+                .playlists
+                .iter()
+                .map(|p| p.to_string())
+                .collect(),
+        }
+    }
+
+    /// The id under the cursor, for opening a page.
+    pub fn row_id(&self, tab: Tab) -> Option<String> {
+        if self.open.is_some() {
+            return None;
+        }
+        match tab {
+            Tab::Search => {
+                let i = self.group_row[self.group];
+                match self.group {
+                    1 => self.results.albums.get(i).map(|a| a.id.clone()),
+                    2 => self.results.artists.get(i).map(|a| a.id.clone()),
+                    3 => self.results.playlists.get(i).map(|p| p.id.clone()),
+                    _ => None,
+                }
+            }
+            Tab::Playlists => self
+                .playlists
+                .items
+                .get(self.playlist_cursor)
+                .map(|p| p.id.clone()),
+            Tab::Library => match self.library.section {
+                LibrarySection::Albums => self
+                    .library
+                    .albums
+                    .items
+                    .get(self.library_cursor)
+                    .map(|a| a.id.clone()),
+                // An artist row and a recent track have no id to open: an artist
+                // is not playable and there is no tracklist behind one any more,
+                // since `top-tracks` was removed.
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+}
+
+/// Move the cursor within whichever list the tab is showing.
+fn web_move(app: &mut App, down: bool, n: usize) {
+    let tab = app.tab;
+    let web = &mut app.web;
+    let len = match tab {
+        Tab::Search => web.group_rows(web.group).len(),
+        Tab::Playlists => web.playlists.items.len(),
+        Tab::Liked => web.liked.items.len(),
+        Tab::Queue => web.queue.upcoming.len(),
+        Tab::Library => match web.library.section {
+            LibrarySection::Albums => web.library.albums.items.len(),
+            LibrarySection::Artists => web.library.artists.items.len(),
+            LibrarySection::Recent => web.library.recent.items.len(),
+        },
+        _ => 0,
+    };
+    // No rows means no move, rather than a cursor at 0 in an empty list that
+    // looks selected.
+    if len == 0 {
+        return;
+    }
+    let cur = match tab {
+        Tab::Search => web.group_row[web.group],
+        Tab::Playlists => web.playlist_cursor,
+        Tab::Liked => web.liked_cursor,
+        Tab::Queue => web.queue_cursor,
+        Tab::Library => web.library_cursor,
+        _ => 0,
+    };
+    let next = if down {
+        (cur + n).min(len.saturating_sub(1))
+    } else {
+        cur.saturating_sub(n)
+    };
+    match tab {
+        Tab::Search => web.group_row[web.group] = next,
+        Tab::Playlists => web.playlist_cursor = next,
+        Tab::Liked => web.liked_cursor = next,
+        Tab::Queue => web.queue_cursor = next,
+        Tab::Library => web.library_cursor = next,
+        _ => {}
+    }
+}
+
+/// Open whatever the cursor is on, as a page. `None` for a row that is not
+/// openable, which is most of them and is not an error.
+fn web_open_selected(app: &mut App) {
+    let Some(id) = app.web.row_id(app.tab) else {
+        return;
+    };
+    match app.tab {
+        // An album row opens the album; a playlist row opens the playlist.
+        Tab::Search => match app.web.group {
+            1 => app.web.open_album(id),
+            2 => app.web.open_artist(id),
+            3 => app.web.open_playlist(id),
+            _ => {}
+        },
+        Tab::Playlists => app.web.open_playlist(id),
+        Tab::Library => app.web.open_album(id),
+        _ => {}
+    }
+}
+
+fn handle_key(app: &mut App, c: char, commands: &mut Vec<PlayerCommand>, web: &mut Vec<WebJob>) {
     // The first-run hint goes on any key, before anything else reads it, so it
     // cannot swallow one.
     app.hint = None;
 
     if app.settings_open {
         crate::tui::settings::key(app, c);
+        return;
+    }
+
+    // The search input owns the keyboard while it has focus, because a `q` there
+    // is the letter q and not "quit". Checked before the help overlay because a
+    // focused input is modal in a way an overlay is not.
+    if app.web.search_focus {
+        web_search_key(app, c, web);
         return;
     }
 
@@ -1404,6 +1740,14 @@ fn handle_key(app: &mut App, c: char, commands: &mut Vec<PlayerCommand>) {
             'q' | 'Q' => app.should_quit = true,
             _ => {}
         }
+        return;
+    }
+
+    // The Web tabs get their own keys before the transport ones, because on those
+    // tabs the transport keys mean something else -- `f` is a like, not a
+    // shuffle, and a `space` on a search result plays it rather than the
+    // transport.
+    if app.tab.needs_web() && web_tab_key(app, c, commands, web) {
         return;
     }
 
@@ -1942,11 +2286,18 @@ mod tests {
     fn tabs_cycle_and_numbers_jump() {
         let mut app = with_track();
         let start = app.tab;
+        // The position in `ALL`, looked up rather than cast. `start as usize` is
+        // the *discriminant*, which is 0 for the first variant whatever its
+        // position in the table is, so the cast compiles and the test is wrong.
+        let at = Tab::ALL
+            .iter()
+            .position(|t| *t == start)
+            .expect("every tab is in the table");
         for i in 1..=Tab::ALL.len() {
             app = press(app, '\t').0;
             assert_eq!(
                 app.tab,
-                Tab::ALL[(start as usize + i) % Tab::ALL.len()],
+                Tab::ALL[(at + i) % Tab::ALL.len()],
                 "after {i} tabs"
             );
         }
@@ -1954,11 +2305,8 @@ mod tests {
 
         // Shift-Tab is the way back.
         let app = press(app, 'Z').0;
-        let back = Tab::ALL
-            .iter()
-            .position(|t| *t == start)
-            .map(|i| Tab::ALL[(i + Tab::ALL.len() - 1) % Tab::ALL.len()]);
-        assert_eq!(Some(app.tab), back, "shift-tab goes back");
+        let back = Tab::ALL[(at + Tab::ALL.len() - 1) % Tab::ALL.len()];
+        assert_eq!(app.tab, back, "shift-tab goes back");
 
         // And a digit jumps, which is the same fact stated once rather than a
         // second table that can disagree with the first.
@@ -3122,6 +3470,287 @@ mod tests {
             !app.art.begin("https://i.scdn.co/image/two"),
             "one download per track, not one per poll"
         );
+    }
+
+    /// The test helper for the Web tabs: on a given tab, with `update` used the
+    /// way the loop uses it.
+    fn on(tab: Tab) -> App {
+        let mut app = with_track();
+        app.tab = tab;
+        app.web.connection = Connection::Connected;
+        app
+    }
+
+    fn key(app: App, c: char) -> (App, Vec<PlayerCommand>, Vec<WebJob>) {
+        let u = update(app, Event::Key(c));
+        (u.app, u.commands, u.web)
+    }
+
+    fn a_track(id: &str, name: &str) -> crate::web::api::Track {
+        crate::web::api::Track {
+            id: id.into(),
+            name: name.into(),
+            uri: format!("spotify:track:{id}"),
+            duration_ms: 1000,
+            track_number: None,
+            disc_number: None,
+            artists: Vec::new(),
+            album: None,
+        }
+    }
+
+    /// The search box owns every key while it has focus, including the ones that
+    /// quit trak. A `q` typed into a search box is the letter q.
+    #[test]
+    fn a_focused_search_box_keeps_the_keys_that_quit_the_tui() {
+        let (app, _, _) = key(on(Tab::Search), '/');
+        assert!(app.web.search_focus, "/ focuses the input");
+        assert!(!app.should_quit, "and does not do anything else");
+
+        let (app, cmds, web) = key(app, 'q');
+        assert_eq!(app.web.query, "q", "q is a letter here");
+        assert!(!app.should_quit, "the tui is still running");
+        assert!(cmds.is_empty() && web.is_empty());
+
+        let (app, _, _) = key(app, '\x7f');
+        assert_eq!(app.web.query, "", "and backspace erases it");
+        let (app, _, _) = key(app, 'w');
+        assert_eq!(app.web.query, "w");
+    }
+
+    /// Enter runs the search; escape throws the text away. Pressing escape after
+    /// typing must not send anything.
+    #[test]
+    fn enter_searches_and_escape_discards() {
+        let app = key(on(Tab::Search), '/').0;
+        let app = "teardrop".chars().fold(app, |a, c| key(a, c).0);
+        assert_eq!(app.web.query, "teardrop");
+        assert_eq!(app.web.search_debounce, 0.0, "each key restarts the wait");
+
+        let (app, _, web) = key(app, '\x1b');
+        assert!(!app.web.search_focus);
+        assert!(web.is_empty(), "escape sends nothing: {web:?}");
+
+        let app = key(on(Tab::Search), '/').0;
+        let app = "teardrop".chars().fold(app, |a, c| key(a, c).0);
+        let (app, _, web) = key(app, '\n');
+        assert!(!app.web.search_focus, "enter closes the box too");
+        assert_eq!(web, vec![WebJob::Search("teardrop".into())]);
+        assert!(app.web.searching, "and says it is looking");
+    }
+
+    /// A blank query is not a search: `GET /search?q=` spends quota and answers
+    /// nothing.
+    #[test]
+    fn an_empty_query_is_not_sent() {
+        let app = key(on(Tab::Search), '/').0;
+        assert!(key(app, '\n').2.is_empty());
+    }
+
+    /// Every keystroke restarts the debounce rather than counting down from the
+    /// last one, or a ten-letter word would be ten searches over a second.
+    #[test]
+    fn every_keystroke_restarts_the_debounce() {
+        let mut app = on(Tab::Search);
+        app.web.search_focus = true;
+        app = key(app, 'a').0;
+        app.web.search_debounce = 0.2;
+        app = key(app, 'b').0;
+        assert_eq!(
+            app.web.search_debounce, 0.0,
+            "the wait restarts, it does not count down"
+        );
+    }
+
+    /// Groups move with `[` and `]`, and `Tab` keeps changing tabs everywhere --
+    /// including on Search, which is where 7.6 wanted to take it.
+    #[test]
+    fn groups_move_with_brackets_and_tab_keeps_changing_tabs() {
+        let mut app = on(Tab::Search);
+        app.web.group = 0;
+        app = key(app, ']').0;
+        assert_eq!(app.web.group, 1);
+        app = key(app, ']').0;
+        app = key(app, ']').0;
+        assert_eq!(app.web.group, 3, "three presses, three groups");
+        app = key(app, ']').0;
+        assert_eq!(app.web.group, 0, "four groups, four presses");
+        app = key(app, '[').0;
+        assert_eq!(app.web.group, 3, "[ goes back");
+
+        let before = app.tab;
+        let (app, _, _) = key(app, '\t');
+        assert_ne!(app.tab, before, "Tab still changes tabs on Search");
+    }
+
+    /// Enter on a track row plays it by URI, through AppleScript -- not through
+    /// the Web API, whose playback endpoints are gone in dev mode and which would
+    /// not work on a Free account either way.
+    #[test]
+    fn enter_on_a_track_plays_it_by_uri() {
+        let mut app = on(Tab::Search);
+        app.web.results.tracks = vec![a_track("1", "Teardrop")];
+        let (app, cmds, web) = key(app, '\n');
+        assert_eq!(cmds, vec![PlayerCommand::PlayUri("spotify:track:1".into())]);
+        assert!(web.is_empty(), "playing is not a web call: {web:?}");
+        assert!(app.web.open.is_none());
+    }
+
+    /// Enter on an album row opens the album: an album has no URI to play, and
+    /// offering nothing would look broken.
+    #[test]
+    fn enter_on_an_album_opens_it() {
+        let mut app = on(Tab::Search);
+        app.web.group = 1;
+        app.web.results.albums = vec![crate::web::api::Album {
+            id: "5nMdc39z78kifAc5WXv9Yj".into(),
+            name: "Mezzanine".into(),
+            uri: "spotify:album:5nMdc39z78kifAc5WXv9Yj".into(),
+            release_date: None,
+            artists: Vec::new(),
+            images: Vec::new(),
+            total_tracks: None,
+        }];
+        let (app, cmds, _) = key(app, '\n');
+        assert!(cmds.is_empty(), "an album is not played");
+        assert_eq!(
+            app.web.open,
+            Some(Open::Album("5nMdc39z78kifAc5WXv9Yj".into())),
+            "it is opened"
+        );
+    }
+
+    /// Escape leaves a page before it leaves the tab. Someone who opened an album
+    /// and pressed escape did not mean to leave trak.
+    #[test]
+    fn escape_walks_the_navigation_stack() {
+        let mut app = on(Tab::Playlists);
+        app.web.open_artist("artist-1".into());
+        app.web.open_album("album-1".into());
+        assert_eq!(app.web.pages.len(), 2);
+
+        let (app, cmds, _) = key(app, '\x1b');
+        assert!(!app.should_quit, "not quit");
+        assert!(cmds.is_empty());
+        assert_eq!(
+            app.web.open,
+            Some(Open::Artist("artist-1".into())),
+            "one level"
+        );
+        let (app, _, _) = key(app, '\x1b');
+        assert_eq!(app.web.open, None, "and then the list");
+    }
+
+    /// Add-to-queue is Premium-only and the 403 is the *expected* answer on
+    /// Free, so the key is tried rather than refused: the typed error says so,
+    /// not a guess made before the request.
+    #[test]
+    fn add_to_queue_is_tried_rather_than_refused() {
+        let mut app = on(Tab::Search);
+        app.web.results.tracks = vec![a_track("1", "Teardrop")];
+        let (_, cmds, web) = key(app, 'A');
+        assert_eq!(web, vec![WebJob::Enqueue("spotify:track:1".into())]);
+        assert!(cmds.is_empty(), "the queue is a web call, not a player one");
+    }
+
+    /// `f` likes the *playing* track, not the selected row, and flips the row at
+    /// once so a slow write does not feel like a key that did nothing.
+    #[test]
+    fn f_likes_the_playing_track_and_flips_at_once() {
+        let app = on(Tab::Liked);
+        let uri = app.track().and_then(|t| t.uri.clone()).expect("a uri");
+        let (app, _, web) = key(app, 'f');
+        assert_eq!(app.web.liked_here, Some(true), "the row flipped at once");
+        assert_eq!(web, vec![WebJob::Like(uri.clone(), true)]);
+        assert_eq!(key(app, 'f').2, vec![WebJob::Unlike(uri)], "and back again");
+    }
+
+    /// An advert has no URI, so there is nothing for a like to be about.
+    #[test]
+    fn f_does_nothing_for_a_track_with_no_uri() {
+        let mut advert = on(Tab::Liked);
+        advert.state.as_mut().expect("state").track.uri = None;
+        let (app, cmds, web) = key(advert, 'f');
+        assert!(cmds.is_empty() && web.is_empty());
+        assert_eq!(app.web.liked_here, None, "and says nothing either way");
+    }
+
+    /// A page that arrives after the user has left it is dropped, so opening an
+    /// album and going back does not leave the list showing the album.
+    #[test]
+    fn a_page_that_arrives_after_you_left_it_is_dropped() {
+        let mut app = on(Tab::Playlists);
+        app.web.open_album("album-2".into());
+        let stale = Event::Page {
+            what: PageWhat::AlbumTracks("album-1".into()),
+            result: Ok(PageLoaded::AlbumTracks {
+                id: "album-1".into(),
+                page: crate::web::api::Page::empty(),
+            }),
+        };
+        let app = update(app, stale).app;
+        assert_eq!(app.web.open, Some(Open::Album("album-2".into())));
+        assert!(
+            app.web.open_track_page.is_empty(),
+            "the stale answer filled the wrong page"
+        );
+    }
+
+    /// A list tab keeps what it loaded when the user comes back to it, because
+    /// the quota is per developer account.
+    #[test]
+    fn a_list_survives_leaving_the_tab_and_coming_back() {
+        let mut app = on(Tab::Playlists);
+        app = update(
+            app,
+            Event::Page {
+                what: PageWhat::Playlists,
+                result: Ok(PageLoaded::Playlists(crate::web::api::Page::empty())),
+            },
+        )
+        .app;
+        app = update(app, Event::Queue(Ok(crate::web::api::Queue::default()))).app;
+        assert!(
+            app.web.playlists.items.is_empty(),
+            "still loaded, just empty"
+        );
+    }
+
+    /// An answer for a search the user has typed past is dropped. This is the
+    /// failure that makes a live search feel broken: a slow "ma" landing after a
+    /// fast "massive attack".
+    #[test]
+    fn a_search_answer_for_an_old_question_is_dropped() {
+        let app = on(Tab::Search);
+        let stale = Event::Searched {
+            for_query: "ma".into(),
+            result: Ok(crate::web::api::SearchResults {
+                tracks: vec![a_track("1", "Stale")],
+                ..Default::default()
+            }),
+        };
+        let app = update(app, stale).app;
+        assert!(
+            app.web.results.tracks.is_empty(),
+            "a result for a question that is not on screen was shown"
+        );
+    }
+
+    /// The three not-connected states each say what to do, and a connected
+    /// client says nothing -- a client that keeps talking about connecting when
+    /// it is connected is worse than one that never mentions it.
+    #[test]
+    fn only_a_disconnected_client_has_something_to_say() {
+        assert_eq!(Connection::Connected.notice(), None);
+        for (c, needle) in [
+            (Connection::NoClientId, "Client ID"),
+            (Connection::LoggedOut, "connect"),
+            (Connection::NeedsRelogin, "reconnect"),
+        ] {
+            let notice = c.notice().expect("a notice");
+            assert!(notice.contains(needle), "{c:?} says {notice:?}");
+            assert_eq!(notice.lines().count(), 1, "toasts are one line");
+        }
     }
 
     #[test]

@@ -29,7 +29,10 @@ use crate::player::PlayerCommand;
 use crate::player::actions::Worker;
 use crate::player::actions::{CommandOutcome, WorkerResult, WriteOutcome};
 use crate::tui::app::{App, Event, update};
+use crate::tui::app::{Tab, WebJob};
 use crate::tui::theme::Theme;
+use crate::web::api::{Library, SpotifyLibrary};
+use crate::web::token::Store;
 
 /// How long to wait for a terminal event before doing anything else.
 ///
@@ -441,6 +444,25 @@ fn event_loop<B: ratatui::backend::Backend>(
             }
         }
 
+        // 2z. The Web API tab that is showing, fetched the first time it is shown
+        //     (7.6-7.9). A tab the user has already loaded is not fetched again:
+        //     the dev-mode quota is per developer account and shared across Client
+        //     IDs, so a refresh that fetches what is already on screen is spent
+        //     quota for nothing.
+        if app.tab.needs_web()
+            && app.web.connection.connected()
+            && let Some(job) = tab_needs(app.tab, &app.web)
+        {
+            submit_web(vec![job], &worker);
+        }
+        // A page that has just been opened, and an opened page that has no rows
+        // yet. The open page is fetched because the user asked for it by name.
+        if let Some(open) = app.web.open.clone()
+            && let Some(job) = page_needs(&open, &app.web)
+        {
+            submit_web(vec![job], &worker);
+        }
+
         // 2b. Album art (TODO 4.1). One download per track, on the worker, and
         //     only when the track has artwork we do not already have. The cache
         //     makes a rewind through the history free.
@@ -512,6 +534,7 @@ fn event_loop<B: ratatui::backend::Backend>(
                         let u = update(app, Event::Key(c));
                         app = u.app;
                         submit_all(u.commands, &worker);
+                        submit_web(u.web, &worker);
                     }
                 }
                 Ok(TermEvent::Mouse(m)) => {
@@ -519,6 +542,7 @@ fn event_loop<B: ratatui::backend::Backend>(
                         let u = update(app, mouse_event(m, &regions, &mut scrubbing));
                         app = u.app;
                         submit_all(u.commands, &worker);
+                        submit_web(u.web, &worker);
                     }
                 }
                 Ok(TermEvent::Resize(_, _)) => {
@@ -644,6 +668,197 @@ fn event_loop<B: ratatui::backend::Backend>(
         .config_dirty
         .then(|| app.config.with_settings(&app.settings));
     (0, pending)
+}
+
+/// A Web API client for whatever the token file currently holds, or `None` when
+/// there is nothing to talk to.
+///
+/// Read fresh each time rather than cached: the token can expire under a running
+/// session, and a client holding a dead token is how "search silently stopped
+/// working an hour ago" happens.
+fn web_client() -> Option<SpotifyLibrary> {
+    let store = crate::web::token::TokenFile::at(&crate::config::Paths::from_env());
+    let loaded = store.load().ok()?;
+    let now = std::time::SystemTime::now();
+    // A token that is stale still has a refresh token, and refreshing is the
+    // caller's business, not this function's. An *expired* refresh token is the
+    // one case that is not "just stale": it is a new login.
+    if loaded.token.as_ref().is_some_and(|t| t.refresh_stale(now)) {
+        return None;
+    }
+    Some(SpotifyLibrary::at(
+        crate::web::api::API_BASE,
+        loaded.token.as_ref()?,
+    ))
+}
+
+/// Run one Web API job on the worker and turn its answer into an app event.
+///
+/// Every arm produces an already-built [`Event`], so the loop has one line here
+/// and adding a tab adds no arm to its match.
+fn run_web(job: WebJob) -> Option<crate::player::actions::WorkerResult> {
+    use crate::player::actions::WorkerResult;
+    use crate::tui::app::{Event, PageLoaded, PageWhat};
+    let client = web_client()?;
+    let event = match job {
+        WebJob::Search(query) => Event::Searched {
+            for_query: query.clone(),
+            result: client.search(&query),
+        },
+        WebJob::Playlists => Event::Page {
+            what: PageWhat::Playlists,
+            result: client.playlists(None).map(PageLoaded::Playlists),
+        },
+        WebJob::Liked => Event::Page {
+            what: PageWhat::Liked,
+            result: client.liked_tracks(None).map(PageLoaded::Liked),
+        },
+        WebJob::Queue => Event::Queue(client.queue()),
+        WebJob::Library(section) => {
+            let what = match section {
+                crate::tui::app::LibrarySection::Albums => PageWhat::LibraryAlbums,
+                crate::tui::app::LibrarySection::Artists => PageWhat::LibraryArtists,
+                crate::tui::app::LibrarySection::Recent => PageWhat::LibraryRecent,
+            };
+            Event::Page {
+                what,
+                result: match section {
+                    crate::tui::app::LibrarySection::Albums => {
+                        client.saved_albums(None).map(PageLoaded::LibraryAlbums)
+                    }
+                    crate::tui::app::LibrarySection::Artists => client
+                        .followed_artists(None)
+                        .map(PageLoaded::LibraryArtists),
+                    crate::tui::app::LibrarySection::Recent => {
+                        client.recently_played(None).map(PageLoaded::LibraryRecent)
+                    }
+                },
+            }
+        }
+        WebJob::PlaylistItems(id) => Event::Page {
+            what: PageWhat::PlaylistItems(id.clone()),
+            result: client
+                .playlist_items(&id, None)
+                .map(|page| PageLoaded::PlaylistItems { id, page }),
+        },
+        WebJob::ArtistAlbums(id) => Event::Page {
+            what: PageWhat::ArtistAlbums(id.clone()),
+            result: client
+                .artist_albums(&id, None)
+                .map(|page| PageLoaded::ArtistAlbums { id, page }),
+        },
+        WebJob::AlbumTracks(id) => Event::Page {
+            what: PageWhat::AlbumTracks(id.clone()),
+            result: client
+                .album_tracks(&id, None)
+                .map(|page| PageLoaded::AlbumTracks { id, page }),
+        },
+        WebJob::Enqueue(uri) => {
+            let result = client.enqueue(&uri);
+            return Some(WorkerResult::Web(Event::WebWrote(result)));
+        }
+        WebJob::Like(uri, liked) => {
+            let result = client.set_liked(&uri, liked);
+            return Some(WorkerResult::Web(Event::WebWrote(result)));
+        }
+        WebJob::Unlike(uri) => {
+            let result = client.set_liked(&uri, false);
+            return Some(WorkerResult::Web(Event::WebWrote(result)));
+        }
+        // Nothing to send: the check is folded into the like write, which is
+        // one request rather than two.
+        WebJob::IsLiked(_) => return None,
+        WebJob::CreatePlaylist(name) => {
+            let result = client.create_playlist(&name, false);
+            return Some(WorkerResult::Web(Event::WebWrote(result.map(|_| ()))));
+        }
+        WebJob::AddToPlaylist { playlist, uri } => {
+            let result = client.add_to_playlist(&playlist, &uri);
+            return Some(WorkerResult::Web(Event::WebWrote(result)));
+        }
+        WebJob::RemoveFromPlaylist { playlist, uri } => {
+            let result = client.remove_from_playlist(&playlist, &uri);
+            return Some(WorkerResult::Web(Event::WebWrote(result)));
+        }
+    };
+    Some(WorkerResult::Web(event))
+}
+
+/// Queue Web API jobs on the worker.
+///
+/// One at a time, and only if the worker is free: the same rule as player
+/// commands, for the same reason. A refused job is not queued for later either --
+/// a search the user has already typed past is not worth sending, and a list they
+/// have left is not worth loading.
+fn submit_web(jobs: Vec<WebJob>, worker: &Worker) {
+    for job in jobs {
+        // `run_web` needs a client, which needs a token. Without one there is
+        // nothing to send and the tab has already said so in its own body.
+        if web_client().is_none() {
+            continue;
+        }
+        // `run_web` answers `None` only for a job that has nothing to do, and
+        // the worker has to answer with *something*. The something is a Web event
+        // that changes nothing, so a job which turned out to be a no-op cannot
+        // show a stale badge.
+        let accepted = worker.submit(move |_| {
+            run_web(job).unwrap_or(crate::player::actions::WorkerResult::Web(
+                crate::tui::app::Event::WebWrote(Ok(())),
+            ))
+        });
+        if !accepted {
+            break;
+        }
+    }
+}
+
+/// What a tab needs the first time it is shown, if anything.
+///
+/// Lazily, one list at a time. The Library tab has three lists and most visits
+/// leave after looking at the first, so asking for all three on entry would be
+/// three requests for nothing -- and the quota is per developer account.
+fn tab_needs(tab: Tab, web: &crate::tui::app::WebState) -> Option<WebJob> {
+    match tab {
+        Tab::Search if !web.searching && web.search_shown.is_empty() => None,
+        Tab::Playlists if web.playlists.items.is_empty() && web.playlists.next.is_none() => {
+            Some(WebJob::Playlists)
+        }
+        Tab::Liked if web.liked.items.is_empty() && web.liked.next.is_none() => Some(WebJob::Liked),
+        Tab::Queue if web.queue.upcoming.is_empty() && web.queue.now_playing.is_none() => {
+            Some(WebJob::Queue)
+        }
+        Tab::Library => {
+            let i = match web.library.section {
+                crate::tui::app::LibrarySection::Albums => 0,
+                crate::tui::app::LibrarySection::Artists => 1,
+                crate::tui::app::LibrarySection::Recent => 2,
+            };
+            (!web.library.loaded[i]).then_some(WebJob::Library(web.library.section))
+        }
+        // A page that has just been opened is the thing to fetch, and it is the
+        // loop's business because only it knows whether the worker is free.
+        _ => None,
+    }
+}
+
+/// The fetch an open page needs, if it does not have its rows yet.
+fn page_needs(open: &crate::tui::app::Open, web: &crate::tui::app::WebState) -> Option<WebJob> {
+    match open {
+        // Empty rows is the signal: a playlist with no tracks and one that has
+        // not been fetched are the same to this code and only one of them is
+        // worth a request. The cost is a second request for a genuinely empty
+        // playlist, which is cheaper than being wrong about every real one.
+        crate::tui::app::Open::Playlist(id) if web.open_tracks.is_empty() => {
+            Some(WebJob::PlaylistItems(id.clone()))
+        }
+        crate::tui::app::Open::Artist(id) if web.open_albums.is_empty() => {
+            Some(WebJob::ArtistAlbums(id.clone()))
+        }
+        crate::tui::app::Open::Album(id) if web.open_track_page.is_empty() => {
+            Some(WebJob::AlbumTracks(id.clone()))
+        }
+        _ => None,
+    }
 }
 
 /// Queue commands on the worker.
