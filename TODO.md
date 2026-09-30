@@ -406,7 +406,4 @@ Requires Sonar installed and running (`brew install --cask kathir-d/tap/sonar`) 
 
 ## Backlog (not committed to; do not start without the owner)
 
-- Homebrew-core submission (needs stars/notability).
-- Device switching (Spotify Connect) — dropped from v1.
 - Rebindable keys.
-- Extras explicitly rejected for v1: `status --format`, `trak mini`, shell completions, man page.
