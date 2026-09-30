@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+#
+# Run a command with a wall-clock limit, and say so loudly if it blows it.
+#
+# Why this exists: this repo has several commands that can hang with no output and
+# no exit -- a cargo build waiting on a package cache lock, a test binary stuck on
+# a socket, a release script's `codesign`, a pty script whose child never dies. An
+# unattended agent session waits forever and nothing says why. Every long command
+# in a commit message should therefore be wrapped in this.
+#
+#   scripts/with-timeout 120 cargo test
+#   scripts/with-timeout 30  ./target/debug/trak status
+#
+# Exit codes, so a caller can tell the three cases apart:
+#   0    the command finished and its own exit code was 0
+#   *    the command finished; its own exit code is passed through
+#   124  the command hit the time limit and was killed  (GNU timeout's code)
+#   125  the command could not be started at all
+#   126  the command was found but could not be run
+#   127  the command was not found
+#
+# The message on a timeout names the seconds, because "it hung" is useless to
+# whoever reads the log an hour later.
+
+set -euo pipefail
+
+usage() {
+    sed -n '3,20p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+if [[ ${1:-} == "-h" || ${1:-} == "--help" || $# -lt 2 ]]; then
+    usage
+    exit ${1:-0}
+fi
+
+secs=$1
+shift
+
+if ! [[ $secs =~ ^[0-9]+$ ]] || ((secs == 0)); then
+    echo "with-timeout: the limit must be a whole number of seconds, got '$secs'" >&2
+    exit 125
+fi
+
+# GNU coreutils' `timeout` is the reference implementation and is present on
+# macOS as `gtimeout` under Homebrew. Neither is assumed to exist: this script is
+# also the thing that has to work on a machine where the agent is stuck, so it
+# falls back to a plain background job plus a watchdog.
+if command -v timeout >/dev/null 2>&1; then
+    exec timeout --foreground --signal=TERM --kill-after=10 "$secs" "$@"
+fi
+if command -v gtimeout >/dev/null 2>&1; then
+    exec gtimeout --foreground --signal=TERM --kill-after=10 "$secs" "$@"
+fi
+
+# Fallback, for a machine with neither `timeout` nor `gtimeout` -- which is the
+# normal state of a stock macOS, where `timeout` only exists under Homebrew, and
+# `setsid` is not a macOS tool at all. A release script cannot depend on the
+# agent having installed coreutils.
+#
+# Killing the process *group* is the right idea and unavailable here, so the
+# watchdog walks the process *tree* with `pgrep -P` instead. That distinction is
+# not pedantry: a stuck `cargo test` holds a pty or a socket in a child, and
+# killing only the parent leaves exactly the thing this script exists to clean up
+# holding the terminal, which is how an agent session wedges with no output and
+# no exit.
+set +m
+
+"$@" &
+child=$!
+
+# The descendants of a pid, deepest first, so a parent is never signalled before
+# its children and a reparented child cannot be missed. `pgrep -P` is available on
+# macOS and on every Linux this runs on.
+descendants() {
+    local parent=$1 child_p
+    for child_p in $(pgrep -P "$parent" 2>/dev/null); do
+        descendants "$child_p"
+        printf '%s\n' "$child_p"
+    done
+}
+
+(
+    sleep "$secs" || exit 0
+    echo "with-timeout: '$*' hit the ${secs}s limit; killing it" >&2
+    # The process group first, when the command did get one (it will not on
+    # macOS, but this is also run under Linux and under a `setsid` wrapper).
+    kill -TERM -- "-$child" 2>/dev/null || true
+    for pid in $(descendants "$child"); do
+        kill -TERM "$pid" 2>/dev/null || true
+    done
+    kill -TERM "$child" 2>/dev/null || true
+    # Give them the grace period to exit, then insist. A process that ignores
+    # TERM is the case that makes a timeout useless, so KILL is not optional.
+    sleep 10
+    for pid in $(descendants "$child"); do
+        kill -KILL "$pid" 2>/dev/null || true
+    done
+    kill -KILL "$child" 2>/dev/null || true
+) &
+watchdog=$!
+
+status=0
+wait "$child" 2>/dev/null || status=$?
+kill "$watchdog" 2>/dev/null || true
+wait "$watchdog" 2>/dev/null || true
+
+# A signalled child is reported by the shell as 128+signal: 143 for TERM, 137 for
+# KILL. GNU `timeout` reports 124 for the same thing, so a caller cannot tell
+# which implementation ran by the exit code alone.
+case $status in
+    124 | 137 | 143) exit 124 ;;
+    *) exit "$status" ;;
+esac
