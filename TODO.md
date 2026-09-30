@@ -30,7 +30,7 @@ Legend: `[ ]` todo · `[x]` done · **A/B** = with / without a Spotify Client ID
 | R1 | Real-audio visualizer: the process-tap permission is attributed to the *terminal app*; a CLI child may not get a usable "System Audio Recording" prompt, or cmux may not be prompt-able | Spike first (1.5). Always ship the simulated fallback (8.3). README documents which terminals work |
 | R2 | ~~Spotify ≥ 1.3.x ignores AppleScript `set sound volume`~~ **REFUTED on 1.3.1.234 (1.1):** sets work 8/8, but the read-back is often target−1 (quantisation). Rule now = read back with a ±1 tolerance (`docs/APPLESCRIPT.md` §5) | 4.4 (reframed as a preference) |
 | R3 | Keychain items created by an ad-hoc-signed binary can re-prompt after every upgrade (the code identity changes) | Test in 7.4; fall back to a `0600` token file in `~/.config/trak/` and document the trade-off |
-| R4 | Spotify Web API developer-mode rules changed recently (Premium owner requirement, user cap, endpoint removals, loopback-only redirect URIs) | Verify current rules in 7.1 *before* building A; update SPEC §6 |
+| R4 | ~~Spotify Web API developer-mode rules changed recently~~ **CONFIRMED AND WORSE THAN EXPECTED (1.7):** `localhost` redirect URIs are **banned** (use `http://127.0.0.1`, no port); Premium now required of the **app owner**; user cap **5**; all batch "get several" endpoints, `/markets` and **`/artists/{id}/top-tracks` removed**; `Track.popularity` removed; search `limit` max **10**; refresh tokens expire in **6 months**; no numeric rate limits are published | All recorded with citations in `docs/WEB-API.md`; SPEC §6 and this phase rewritten to match. Still verify playlist `/items` against a real dev-mode login |
 | R5 | cmux may not pass the Kitty image protocol through | Spike 1.4; half-blocks fallback must look good on its own |
 | R6 | `cidre` API for process taps is unstable / under-documented | Spike 1.5 with its `core-audio-record` example; if unusable, write a ~150-line Objective-C-free binding or a tiny helper, decided in the spike |
 | R7 | Spotify hiding is blocked on ≥ 1.3.1, so headless behaviour cannot be tested today | COMPAT test matrix row stays unverified until it works; do not fake it |
@@ -103,12 +103,18 @@ Each spike ends with facts written to a doc, not just working code. Throwaway co
       `cavacore` and print bar heights; confirm the crate builds on stable Rust for both
       `aarch64-apple-darwin` and `x86_64-apple-darwin`. Done when: findings + chosen bar count and
       sample rate in `docs/AUDIO-TAP.md`.
-- [ ] 1.7 **Spotify Web API reality check (R4).** Read Spotify's current developer docs (redirect URI
-      rules, developer-mode restrictions, rate limits, which endpoints still exist: search, playlists,
-      queue, saved tracks/albums, followed artists, recently played, artist top tracks, album tracks,
-      playlist edit). Done when: `docs/WEB-API.md` lists each endpoint trak needs, whether it is
-      available in developer mode, scopes required, and any Premium-only behaviour; SPEC §6 updated.
-      Cite the doc URL and date for each claim.
+- [x] 1.7 **Spotify Web API reality check (R4).** `docs/WEB-API.md`, every claim cited and dated,
+      two of the most plan-changing (the `localhost` ban and the Feb 2026 removal list) verified a
+      second time by hand against the live docs. > Later agents: **`localhost` is banned** — register
+      `http://127.0.0.1` with no port and bind an ephemeral one (7.3's instructions must say this
+      exactly). **Developer mode needs a Premium *app owner* and caps at 5 users.** **`GET
+      /artists/{id}/top-tracks` is gone with no replacement** (7.10 is albums-only). Library writes
+      go to `/me/library`, is-liked to `/me/library/contains`. **All batch "get several" endpoints
+      are gone**, so `rspotify`'s id-list helpers must not be used (7.5). Search `limit` max is 10.
+      **Refresh tokens last 6 months** (7.2). **No numeric rate limits are published** and no
+      `X-RateLimit-*` headers exist — 429 handling uses `Retry-After` only. > **Unresolved:** the
+      Feb 2026 "still available" list omits `/playlists/{id}/items` while the migration guide tells
+      you to use it. Verify in 7.7/7.11 with a real login; do not assume either way.
 - [ ] 1.8 **Keychain vs ad-hoc signing (R3).** Store and read a secret with the `security-framework`
       crate from an ad-hoc-signed binary; rebuild (new signature) and read again; observe prompts.
       Done when: `docs/WEB-API.md` (token storage section) states the finding and picks Keychain or
@@ -262,35 +268,62 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
 
 ## Phase 7 — Version A: Web API
 
-- [ ] 7.1 **Confirm API reality (R4)** — this is task 1.7's output; read `docs/WEB-API.md` and adjust
-      the tasks below if endpoints or rules changed. Done when: SPEC §6 and this phase match the doc.
-- [ ] 7.2 **PKCE auth**: loopback listener on a free port (or the fixed port the redirect URI needs),
-      opens the browser with `open`, exchanges the code, refreshes tokens automatically, handles
-      revocation / expiry by prompting re-login. Needs: 7.1. Done when: unit tests with a mock token
-      endpoint; **[owner]** completes a real login once.
+- [x] 7.1 **Confirm API reality (R4)** — done in 1.7; SPEC §6 and every task in this phase were
+      rewritten against `docs/WEB-API.md` in the same commit. > The 7.2/7.3/7.5/7.7/7.8/7.10/7.11
+      notes below carry the specific changes.
+- [ ] 7.2 **PKCE auth**: loopback listener on an **ephemeral** port; the registered redirect URI is
+      `http://127.0.0.1` with **no port**, and the port actually used is sent in the request. Opens
+      the browser with `open`, exchanges the code, refreshes tokens automatically. > **Refresh
+      tokens expire after 6 months** (`docs/WEB-API.md` §6) — record the authorisation time locally,
+      warn before expiry, and treat an invalid refresh token as "discard and re-login", not as an
+      error state. Needs: 7.1. Done when: unit tests with a mock token endpoint; **[owner]** completes
+      a real login once.
 - [ ] 7.3 **Guided setup in `trak config`**: screen with numbered steps — open
       `https://developer.spotify.com/dashboard` (via `open`), create an app, add the exact redirect URI
       shown (copyable), paste the Client ID (validate shape), press enter → browser login → success
-      screen. `Log out` clears the token. Done when: every step has an on-screen explanation and errors
-      (bad ID, denied consent, port busy) are handled with retry. **[owner]** walks through it once.
+      screen. `Log out` clears the token. > **The redirect URI to display and copy is exactly
+      `http://127.0.0.1` — no port, no path, and never `localhost`** (Spotify bans `localhost`, and
+      dynamic ports are explicitly allowed only for loopback IP literals). Confirm during the first
+      real login whether the dashboard accepts the no-path form; fall back to a fixed
+      `http://127.0.0.1:<port>/callback` if not. Done when: every step has an on-screen explanation
+      and errors (bad ID, denied consent, port busy) are handled with retry. **[owner]** walks
+      through it once.
 - [ ] 7.4 **Token storage** per the 1.8 decision (Keychain or `0600` file), never logged, never in the
       config file. Done when: tests for both backends behind a `Store` trait; documented in README.
-- [ ] 7.5 **`Library` trait + rspotify wrapper + `FakeLibrary`.** Rate-limit (429 + Retry-After) and
-      403 (Premium-only) map to friendly typed errors. Done when: fixture-driven tests, no live network.
+- [ ] 7.5 **`Library` trait + rspotify wrapper + `FakeLibrary`.** > **Do not use `rspotify`'s
+      id-list helpers** (`tracks(ids)`, `artists(ids)`, `albums(ids)`) — the batch endpoints they
+      call were removed in dev mode. Loop one id per request and cache hard; the quota is per
+      developer account and shared across Client IDs. 429: **only `Retry-After` is documented and
+      there is no `X-RateLimit-*` header or quota endpoint**, so back off with a cap and show a
+      one-liner; distinguish `"reason": "QUOTA_EXCEEDED"` in the body. 403: two real causes — Premium
+      (queue) and an account not on the app's 5-user allowlist. Map both to friendly typed errors.
+      Needs: 7.1. Done when: fixture-driven tests, no live network.
 - [ ] 7.6 **Search tab**: `/` focuses the input, live results debounced (~250 ms), grouped Tracks /
       Albums / Artists / Playlists, `Tab` jumps groups, `enter` plays (AppleScript `play track "<uri>"`,
       so it works on Free), `A` queues, `o` opens the artist/album page. Done when: update() tests
       with `FakeLibrary`; snapshot tests; stale responses never overwrite newer ones.
 - [ ] 7.7 **Playlists tab** (list, open, play, tracklist) and **Liked tab** (list, play from here,
-      `f` toggles like on the current track). Done when: tests + manual.
-- [ ] 7.8 **Queue tab** (now playing + up next) and add-to-queue (`A`). Note Premium-only limits from
-      1.7. Done when: works or shows the clear Premium message; tests.
+      `f` toggles like on the current track). > Field rename: playlist `tracks` → **`items`**
+      (`items.items.item`), and `items` is **only present for playlists the user owns or collaborates
+      on** — no feature may promise to show any playlist's tracks. > `f` is `PUT`/`DELETE
+      `/me/library` and the liked check is `GET /me/library/contains`, not `/me/tracks`. > **Playlist
+      item read/write is unverified in dev mode** (docs contradict themselves) — confirm here with a
+      real login and degrade cleanly if it 403s. Done when: tests + manual.
+- [ ] 7.8 **Queue tab** (now playing + up next) and add-to-queue (`A`). > `POST /me/player/queue`
+      is **Premium-only by Spotify's own documentation**; `GET /me/player/queue` is not. A 403 on add
+      is the expected Free-tier path, not an error. `User.product` no longer exists, so Premium
+      cannot be detected up front — rely on the 403. Done when: works or shows the clear Premium
+      message; tests.
 - [ ] 7.9 **Library tab**: saved albums, followed artists, recently played. Done when: paginated
       lists load lazily; tests.
-- [ ] 7.10 **Artist page** (top tracks, albums) and **album page** (tracklist, play from track).
-      Back with `esc`. Done when: navigation stack tests; manual.
+- [ ] 7.10 **Artist page** and **album page** (tracklist, play from track). Back with `esc`. >
+      **Albums only — `GET /artists/{id}/top-tracks` was removed in dev mode with no replacement**, so
+      the top-tracks half of this task is dead. `GET /artists/{id}/albums` still works. SPEC §6 is
+      updated. Done when: navigation stack tests; manual.
 - [ ] 7.11 **Playlist editing**: add current/selected track to a playlist (picker), remove from a
-      playlist, create playlist. Done when: confirmation on destructive actions; tests with fakes.
+      playlist, create playlist. > Use `POST`/`DELETE /me/playlists/{id}/items` (the `/tracks`
+      variants are removed), and `POST /me/playlists` to create. Same unverified-in-dev-mode caveat as
+      7.7. Done when: confirmation on destructive actions; tests with fakes.
 - [ ] 7.12 **`trak play <song|album|artist|list>`** (finish 2.7) using search; pick the best match
       like shpotify; print what it chose. Done when: `assert_cmd` tests with `FakeLibrary`.
 - [ ] 7.13 **Tab order and default tab for A**, plus the B-mode hint that a Client ID unlocks these.

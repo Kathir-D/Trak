@@ -129,16 +129,46 @@ It **cannot** list a queue, playlists, the library, or search. That is exactly t
 
 ## 6. Version A (Web API)
 
-- Auth: Authorization Code + PKCE, loopback redirect. Verify Spotify's current rules for redirect
-  URIs (loopback `http://127.0.0.1:<port>` vs `localhost`) and **developer-mode restrictions**
-  (Premium requirement, user cap, endpoint deprecations) before building. TODO 1.7 and 7.1.
-- Features: live grouped search (Tracks / Albums / Artists / Playlists), playlists, queue view and
-  add-to-queue, liked songs, library (saved albums, followed artists, recently played), artist page
-  (top tracks, albums), album page (tracklist), playlist add / remove / create.
-- **Playback of results still goes through AppleScript** (`play track "<uri>"`), so it works on Free.
-  Queue mutation and device transfer may need Premium on Spotify's side; when the API returns 403,
-  show a clear one-line message, never a stack trace.
+Verified against the live docs on 2026-09-29; `docs/WEB-API.md` is the authority and
+carries the citations. The four rules below are not optional reading — each one
+invalidates a decision this section previously made.
+
+- Auth: Authorization Code + PKCE, **loopback redirect on an explicit IP literal**.
+  The redirect URI registered in the dashboard is exactly `http://127.0.0.1` —
+  **no port, no path** — and trak binds an ephemeral port per login and sends the
+  matching `redirect_uri` in the authorization request. `localhost` is **banned**
+  by Spotify and must never appear in a request. Registering a fixed port is the
+  fallback if the dashboard rejects the no-path form.
+- Developer mode is assumed, not requested: it **requires the app owner to hold
+  Spotify Premium** and **caps the app at 5 allowlisted users**. trak is a
+  personal tool so this is fine, but an un-allowlisted account gets a 403 and the
+  message must say so.
+- Features, adjusted to what dev mode still serves:
+  - live grouped search (`GET /search`, `limit` max is now **10**, default 5),
+  - the user's own playlists (`GET /me/playlists`) and playlist detail
+    (`GET /playlists/{id}`),
+  - queue view (`GET /me/player/queue`) and add-to-queue
+    (`POST /me/player/queue`, **Premium-only** — a 403 here is expected and must
+    read as a clear one-liner, never a stack trace),
+  - liked songs (`GET /me/tracks`), library (saved albums `GET /me/albums`,
+    followed artists `GET /me/following`, recently played
+    `GET /me/player/recently-played`),
+  - artist page — **albums only**; `GET /artists/{id}/top-tracks` was removed in
+    dev mode with no replacement,
+  - album page (`GET /albums/{id}/tracks`),
+  - playlist create (`POST /me/playlists`) and item add/remove
+    (`POST`/`DELETE /playlists/{id}/items`, **unverified in dev mode** — see
+    `docs/WEB-API.md` §3).
+  - Library **writes** use `PUT`/`DELETE /me/library` and the is-liked check uses
+    `GET /me/library/contains`; the older per-entity endpoints were removed.
+  - All "get several" batch endpoints were removed, so every lookup is one request
+    per item, cached hard (the dev-mode quota is per developer account).
+- **Playback of results still goes through AppleScript** (`play track "<uri>"`), so
+  it works on Free. This is now more important than ever: the Web API's own
+  playback endpoints are unavailable in dev mode.
 - Client ID lives in config; token in Keychain (or fallback, R3). Never log tokens.
+  **A refresh token lasts 6 months**, not indefinitely, so trak must show a
+  "reconnect Spotify" state rather than failing silently.
 
 ## 7. Visualizer
 
