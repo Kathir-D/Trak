@@ -29,7 +29,7 @@ use crate::player::PlayerCommand;
 use crate::player::actions::Worker;
 use crate::player::actions::{CommandOutcome, WorkerResult, WriteOutcome};
 use crate::tui::app::{App, Event, update};
-use crate::tui::theme::{Accent, Border, Theme};
+use crate::tui::theme::Theme;
 
 /// How long to wait for a terminal event before doing anything else.
 ///
@@ -54,6 +54,22 @@ const SONAR_EVERY: Duration = Duration::from_secs(2);
 
 const POLL_PLAYING: Duration = Duration::from_secs(3);
 const POLL_IDLE: Duration = Duration::from_secs(5);
+
+/// The frame rate the visualizer is drawn at (TODO 8.4). 30 fps is where bars
+/// stop looking like a slideshow; above that they cost battery and look the same.
+const VIZ_FPS: Duration = Duration::from_millis(33);
+
+/// Shown once, on a machine that has never run trak (TODO 5.4). It has to say
+/// where the settings are and what the optional bit is, because a first launch
+/// is the only moment a user is guaranteed to be looking.
+const FIRST_RUN_HINT: &str = "press , for settings \u{b7} optionally add a Spotify Client ID there for search and playlists (press any key to dismiss)";
+
+/// Whether the visualizer is the thing on screen right now. The frame rate, the
+/// fetch and the tap all hang off this rather than off the setting, so hiding
+/// the visualizer really does stop the work (TODO 8.5).
+fn visualizer_visible(app: &crate::tui::app::App) -> bool {
+    app.settings.display_mode == crate::tui::app::DisplayMode::Visualizer && !app.is_idle()
+}
 
 /// Owns the terminal, and puts it back no matter how we leave.
 pub struct TerminalGuard {
@@ -139,23 +155,158 @@ pub fn run() -> i32 {
     // bar seekable and the tabs clickable (TODO 3.8). It is only *asked for* when
     // the setting is on, so a terminal that reports mouse events cannot steal
     // text selection from a user who turned it off.
-    let settings = crate::tui::app::Settings::default();
+    // The config file is read before the alternate screen is cleared, so a
+    // corrupt file's notice has somewhere to go and the first frame is already
+    // drawn with the user's settings rather than flashing the defaults.
+    let loaded = crate::config::Config::load();
+    let (config, notice, first_run) = match loaded {
+        Ok(l) => {
+            // A missing file is the first run, not an error, and it is the only
+            // thing that is different about it -- so it is a fact to remember
+            // rather than a state to model (TODO 5.4).
+            let first_run = !l.path.exists();
+            (Some(l), None, first_run)
+        }
+        Err(e) => (None, Some(e.notice().to_string()), false),
+    };
+    let settings = config
+        .as_ref()
+        .map(|l| l.config.settings())
+        .unwrap_or_default();
     if settings.mouse {
         let _ = terminal.backend_mut().execute(EnableMouseCapture);
     }
     let _ = terminal.clear();
 
-    let code = event_loop(&mut terminal, settings);
+    let (code, pending) = event_loop(&mut terminal, settings, config, notice, first_run);
 
     let _ = terminal.backend_mut().execute(DisableMouseCapture);
     guard.restore();
+
+    // Saved after the terminal is back, so a failure is a line of text rather
+    // than an escape sequence. Losing a setting is worth saying out loud; it is
+    // not worth a panic on the way out of a TUI.
+    if let Some(config) = pending
+        && let Err(e) = config.save()
+    {
+        eprintln!("trak: could not write the config file: {}", e.notice());
+    }
+    code
+}
+
+/// `trak config`: the settings screen on its own, with no dashboard behind it
+/// (TODO 2.8, 5.2).
+///
+/// It is the same screen and the same code as the TUI's `,` -- one screen, two
+/// ways in -- so a setting cannot be editable in one and not the other. The
+/// difference is only what is behind it: here there is no track, no cover and no
+/// poll, which is why it works before Spotify has ever been launched.
+pub fn config_screen() -> i32 {
+    if !std::io::stdout().is_terminal() {
+        eprintln!(
+            "trak: `trak config` needs a terminal.\n\
+             The settings file is plain TOML: {}",
+            crate::config::Config::default()
+                .to_toml()
+                .lines()
+                .map(|l| format!("  {l}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        return 2;
+    }
+
+    let loaded = crate::config::Config::load();
+    let mut app = App::new();
+    let mut pending: Option<String> = None;
+    match loaded {
+        Ok(l) => {
+            if let Some(n) = l.notice() {
+                pending = Some(n);
+            }
+            app.config = l.config.clone();
+            app.settings = l.config.settings();
+        }
+        Err(e) => {
+            app.toast(e.notice());
+        }
+    }
+    app.settings_open = true;
+    crate::tui::settings::open(&mut app);
+
+    let mut guard = match TerminalGuard::enter() {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("trak: cannot start the settings screen: {e}");
+            return 1;
+        }
+    };
+    let backend = CrosstermBackend::new(std::io::stdout());
+    let mut terminal = match Terminal::new(backend) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("trak: cannot start the settings screen: {e}");
+            guard.restore();
+            return 1;
+        }
+    };
+    if app.settings.mouse {
+        let _ = terminal.backend_mut().execute(EnableMouseCapture);
+    }
+    let _ = terminal.clear();
+
+    // The theme is rebuilt from the settings each frame for the same reason the
+    // TUI's is: a border or an accent changed on this screen has to be visible
+    // here, immediately, rather than after the next launch.
+    let mut theme = Theme::new(app.settings.accent, app.settings.border);
+    let code = loop {
+        match poll(INPUT_WAIT) {
+            // A read that fails leaves the screen up: the user is in the middle
+            // of something, and a terminal hiccup is not a reason to throw it
+            // away unsaved.
+            Ok(true) => match read() {
+                Ok(TermEvent::Key(k)) => {
+                    if let Some(c) = char_for(k) {
+                        crate::tui::settings::key(&mut app, c);
+                    }
+                }
+                Ok(_) => {}
+                Err(_) => break 1,
+            },
+            Ok(false) => {}
+            Err(_) => break 1,
+        }
+        theme.accent = app.settings.accent;
+        theme.border = app.settings.border;
+        if terminal
+            .draw(|f| crate::tui::settings::render(f, f.area(), &app, &theme))
+            .is_err()
+        {
+            break 1;
+        }
+        // The screen clears `settings_open` on its own save-and-close.
+        if !app.settings_open {
+            break 0;
+        }
+    };
+
+    let _ = terminal.backend_mut().execute(DisableMouseCapture);
+    guard.restore();
+    // The screen's own `q` has already written the file; this is the belt to its
+    // braces, for a window closed some other way.
+    if let Some(n) = pending {
+        eprintln!("trak: {n}");
+    }
     code
 }
 
 fn event_loop<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     settings: crate::tui::app::Settings,
-) -> i32 {
+    config: Option<crate::config::Loaded>,
+    notice: Option<String>,
+    first_run: bool,
+) -> (i32, Option<crate::config::Config>) {
     let worker = Worker::new(AppleScriptPlayer::new());
     // The notification is the fast path; the poll stays as the safety net for
     // seek / volume / shuffle / repeat, which it is silent about
@@ -168,9 +319,27 @@ fn event_loop<B: ratatui::backend::Backend>(
     let notify = crate::player::notify::subscribe();
     let mut app = App::new();
     app.settings = settings;
+    app.config = config
+        .as_ref()
+        .map(|l| l.config.clone())
+        .unwrap_or_default();
+    if let Some(l) = &config {
+        app.config = l.config.clone();
+        if let Some(recovered) = l.notice() {
+            // A corrupt file was renamed and the defaults are in use. Saying so
+            // is the whole point of renaming it rather than just ignoring it.
+            app.toast(recovered);
+        }
+    }
+    if let Some(n) = notice {
+        app.toast(n);
+    }
+    if first_run {
+        app.hint = Some(FIRST_RUN_HINT.to_string());
+    }
     // The accent comes off the cover, so the theme is mutable for the life of the
     // session (TODO 4.2).
-    let mut theme = Theme::new(Accent::Art, Border::Rounded);
+    let mut theme = Theme::new(settings.accent, settings.border);
     // Where the last frame put the clickable things, and whether a seek drag is
     // in progress. A drag keeps seeking after the pointer leaves the bar, which
     // is the whole point of being able to scrub.
@@ -192,6 +361,7 @@ fn event_loop<B: ratatui::backend::Backend>(
     let mut last_clock_tick = Instant::now();
     let mut last_scroll = Duration::ZERO;
     let mut last_sonar = Instant::now() - SONAR_EVERY;
+    let mut last_viz = Instant::now() - VIZ_FPS;
 
     loop {
         // 1. Finished writes first, so a completed command is applied before the
@@ -271,7 +441,7 @@ fn event_loop<B: ratatui::backend::Backend>(
         // 2b. Album art (TODO 4.1). One download per track, on the worker, and
         //     only when the track has artwork we do not already have. The cache
         //     makes a rewind through the history free.
-        if app.art_enabled
+        if app.settings.show_art
             && let Some(track) = app.track()
             && let Some(url) = track.artwork_url.clone()
             && app.art.wants(track)
@@ -371,10 +541,28 @@ fn event_loop<B: ratatui::backend::Backend>(
         }
         // Waiting happens here rather than inside `poll`, so the run loop gets
         // the time instead of the terminal read. Together they pace the frame.
-        crate::player::notify::pump_run_loop(INPUT_WAIT.as_secs_f64());
+        //
+        // The wait is shorter while the visualizer is on screen and the same as
+        // ever otherwise, because 10 fps is plenty for a dashboard and is a
+        // tenth of the wake-ups (TODO 11.5's idle-CPU budget).
+        let frame = if visualizer_visible(&app) {
+            VIZ_FPS
+        } else {
+            INPUT_WAIT
+        };
+        crate::player::notify::pump_run_loop(frame.as_secs_f64());
 
         // 4. The local tick: toast expiry and the poll-due flag.
         app = update(app, Event::Tick).app;
+
+        // 4b. The visualizer's own tick. Separate from the clock above because
+        //     bars need thirty frames a second and the clock needs one, and
+        //     because a tap (TODO 8.3) has to be able to stop without the clock
+        //     noticing (TODO 8.5).
+        if visualizer_visible(&app) && last_viz.elapsed() >= VIZ_FPS {
+            last_viz = Instant::now();
+            app = update(app, Event::VizTick).app;
+        }
 
         if last_clock_tick.elapsed() >= Duration::from_secs(1) {
             last_clock_tick = Instant::now();
@@ -400,8 +588,20 @@ fn event_loop<B: ratatui::backend::Backend>(
         // 6. Draw, and keep the clickable regions from this frame. The next
         //    click is resolved against what is on screen now, not against a
         //    second copy of the layout.
+        //
+        // The theme is rebuilt from the settings every frame rather than once at
+        // startup, which is the only reason `,` can preview a border or an accent
+        // change on the live dashboard before you close the screen.
+        theme.accent = app.settings.accent;
+        theme.border = app.settings.border;
+        let settings_open = app.settings_open;
         if terminal
-            .draw(|f| crate::tui::render::draw_with(f, &app, &theme, &mut regions, &mut images))
+            .draw(|f| {
+                crate::tui::render::draw_with(f, &app, &theme, &mut regions, &mut images);
+                if settings_open {
+                    crate::tui::settings::render(f, f.area(), &app, &theme);
+                }
+            })
             .is_err()
         {
             break;
@@ -430,10 +630,17 @@ fn event_loop<B: ratatui::backend::Backend>(
         }
     }
 
-    // The worker shuts itself down and joins its thread on drop, so no thread is
-    // left holding an AppleScript call when the terminal is restored. TODO 8.5
-    // extends that to proving the process tap leaves no device behind.
-    0
+    // The settings are written on the way out rather than on every key, so
+    // holding `l` down does not mean thirty writes a second -- and a quit is the
+    // one moment every change is definitely meant to stick. The screen's own
+    // `q` saves too, because closing it is an explicit "keep these".
+    //
+    // The terminal is restored first: a save can fail, and a failed save has to be
+    // reportable, which needs a terminal.
+    let pending = app
+        .config_dirty
+        .then(|| app.config.with_settings(&app.settings));
+    (0, pending)
 }
 
 /// Queue commands on the worker.
@@ -644,6 +851,11 @@ fn char_for(k: KeyEvent) -> Option<char> {
         // rather than the loop growing a special case for it (SPEC §4: `esc`
         // closes the overlay).
         KeyCode::Esc => Some('\x1b'),
+        // Backspace arrives as a key, not a character, and the settings screen's
+        // one text field (TODO 5.2) needs it as a character so it does not have
+        // to be the one place that knows about key codes. Either erase works:
+        // macOS terminals send \x7f, the DEC/PC set sends \x08.
+        KeyCode::Backspace => Some('\x7f'),
         KeyCode::Left => Some('h'),
         KeyCode::Right => Some('l'),
         KeyCode::Down => Some('j'),

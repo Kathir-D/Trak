@@ -19,7 +19,7 @@ use ratatui_image::StatefulImage;
 use ratatui_image::protocol::{ImageSource, StatefulProtocol, StatefulProtocolType};
 
 use crate::player::PlaybackState;
-use crate::tui::app::{App, Control, DisplayMode, HISTORY_VIEW, Hit, Tab};
+use crate::tui::app::{App, Control, DisplayMode, HISTORY_VIEW, Hit, Tab, VisualizerStyle};
 use crate::tui::theme::{Theme, format_time, progress_bar};
 
 /// The keys in SPEC §4 that this build deliberately does not offer, and why.
@@ -651,7 +651,11 @@ fn draw_compact(
         ]),
         Line::from(Span::styled(track.artist.clone(), Theme::dim())),
         Line::from(Span::styled(
-            progress_bar(progress(app), area.width.saturating_sub(4) as usize),
+            if app.settings.show_progress {
+                progress_bar(progress(app), area.width.saturating_sub(4) as usize)
+            } else {
+                String::new()
+            },
             theme.accent_style(),
         )),
     ];
@@ -784,12 +788,13 @@ fn draw_now_playing(
         // is the entire point of having one.
         let show_visualizer = app.settings.display_mode == DisplayMode::Visualizer;
         let drawn = app
-            .art_enabled
+            .settings
+            .show_art
             .then(|| app.art.drawable(track))
             .flatten()
             .filter(|_| app.art.error.is_none());
         if show_visualizer {
-            draw_visualizer_placeholder(f, hole, app, theme);
+            draw_visualizer(f, hole, app, theme);
         } else if let Some(art) = drawn {
             f.render_widget(ratatui::widgets::Clear, hole);
             images.draw(f, &art.path, &art.image, hole);
@@ -862,13 +867,18 @@ fn draw_now_playing(
 
     // The bar, as a gradient with a bright head, so the eye finds the position
     // off the colour as well as the length.
+    //
+    // The region is recorded even when the bar is off, so the geometry does not
+    // depend on a display setting: a click on a hidden bar must not seek.
     let bar_row = text_body.y + lines.len() as u16;
-    lines.push(Line::from(crate::tui::theme::gradient_bar(
-        progress(app),
-        title_w,
-        &theme.palette,
-        !app.is_playing(),
-    )));
+    if app.settings.show_progress {
+        lines.push(Line::from(crate::tui::theme::gradient_bar(
+            progress(app),
+            title_w,
+            &theme.palette,
+            !app.is_playing(),
+        )));
+    }
     regions.progress = Some(Rect {
         x: text_body.x,
         y: bar_row,
@@ -1005,50 +1015,74 @@ fn progress(app: &App) -> f64 {
     }
 }
 
-/// Where the real visualizer goes (TODO 8.1). Until then this draws its frame,
-/// its style name and a flat spectrum of bars in the album's own colours, so the
-/// toggle visibly swaps the pane rather than leaving a hole in the layout.
-fn draw_visualizer_placeholder(f: &mut Frame, hole: Rect, app: &App, theme: &Theme) {
+/// The visualizer, in whichever of the four styles the user picked (TODO 8.4).
+///
+/// The four renderers are pure functions over a spectrum, and they hand back
+/// plain text; the colour is applied here, per column, off the album's own
+/// ramp. That split is what makes a visualizer tinted by the cover possible
+/// without four renderers knowing anything about palettes.
+fn draw_visualizer(f: &mut Frame, hole: Rect, app: &App, theme: &Theme) {
     if hole.width == 0 || hole.height == 0 {
         return;
     }
     f.render_widget(ratatui::widgets::Clear, hole);
-    let name = app.settings.visualizer_style.label();
-    if hole.height < 4 || hole.width < 12 {
+
+    let style = app.settings.visualizer_style;
+    let name = style.label();
+    // Too small for the artwork of any of the styles: say which one is active
+    // rather than drawing four bars in a six-cell box, which looks like a bug.
+    if hole.height < 3 || hole.width < 8 {
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(name, Theme::dim()))),
             hole,
         );
         return;
     }
-    // A row of bars, sized from the interpolated position so even the placeholder
-    // moves with the music rather than sitting there inert.
-    let ramp = theme.palette.ramp(hole.width as usize);
-    let bars = (hole.width as usize / 2).max(1);
-    let mut row: Vec<Span> = Vec::with_capacity(bars);
-    for i in 0..bars {
-        let phase =
-            (i as f64 / bars as f64 * std::f64::consts::TAU) + app.interpolated_position() * 0.6;
-        let height = 0.5 + 0.5 * phase.sin().abs();
-        let cells = ((height * (hole.height - 2) as f64).round() as usize).clamp(1, 4);
-        let colour = ramp[(i * 2) % ramp.len()];
-        let top = hole.y + ((hole.height as usize - cells) / 2) as u16;
-        for c in 0..cells {
-            f.render_widget(
-                Paragraph::new(Line::from(Span::styled("▄", Style::default().fg(colour)))),
-                Rect {
-                    x: hole.x + (i * 2) as u16,
-                    y: top + c as u16,
-                    width: 1,
-                    height: 1,
-                },
-            );
+
+    // The style name sits in the top row and the drawing gets what is left, so
+    // `v` always has a visible consequence and the name never overlaps a bar.
+    let (w, h) = (hole.width as usize, hole.height as usize - 1);
+    let lines = match style {
+        VisualizerStyle::Spectrum => crate::visualizer::spectrum(&app.spectrum, w, h),
+        VisualizerStyle::Mirrored => crate::visualizer::mirrored(&app.spectrum, w, h),
+        VisualizerStyle::Waveform => crate::visualizer::waveform(&app.spectrum, w, h),
+        VisualizerStyle::Circular => crate::visualizer::circular(&app.spectrum, w, h),
+    };
+
+    // One colour per column, so a bar is a gradient rather than a flat block and
+    // the whole pane is tinted by the album (SPEC §2, TODO 4.2). The ramp is
+    // asked for the drawing's width, not the pane's, because a gradient that
+    // repeats every few columns reads as stripes.
+    let ramp = theme.palette.ramp(w);
+    for (row, line) in lines.iter().enumerate() {
+        let y = hole.y + 1 + row as u16;
+        if y >= hole.y + hole.height {
+            break;
         }
-        row.push(Span::raw(" "));
+        let mut spans: Vec<Span> = Vec::new();
+        // A cell is one column of the ramp regardless of how many graphemes are
+        // in it, and the renderers guarantee exactly one column per cell, so the
+        // two indexes line up. `chars()` not `char_indices()`: a braille glyph
+        // is one char but three bytes, and walking bytes would colour the wrong
+        // column.
+        for (col, ch) in line.chars().enumerate() {
+            let colour = ramp[col % ramp.len()];
+            spans.push(Span::styled(ch.to_string(), Style::default().fg(colour)));
+        }
+        if spans.is_empty() {
+            continue;
+        }
+        f.render_widget(
+            Paragraph::new(Line::from(spans)),
+            Rect {
+                x: hole.x,
+                y,
+                width: hole.width,
+                height: 1,
+            },
+        );
     }
-    let _ = row;
-    // The style name, dimmed, at the top of the pane: it says what is being drawn
-    // and what `v` will change.
+
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
             name,
@@ -1345,12 +1379,17 @@ fn info_lines<'a>(app: &'a App, theme: &'a Theme) -> Vec<Line<'a>> {
     out.push(dash("disc", t.disc_number.to_string()));
     // Optional means "Spotify did not tell us", which for an advert is a true
     // answer and must print as a dash rather than a 0 (TODO 3.7).
-    out.push(dash(
-        "popularity",
-        t.popularity
-            .map(|p| p.to_string())
-            .unwrap_or_else(|| "—".into()),
-    ));
+    //
+    // The setting is about the *meter* row further down, not about hiding the
+    // number: a person who turned the pretty bar off still wants the fact.
+    if app.settings.show_popularity {
+        out.push(dash(
+            "popularity",
+            t.popularity
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "\u{2014}".into()),
+        ));
+    }
     out.push(dash(
         "play count",
         t.play_count
@@ -1365,6 +1404,14 @@ fn info_lines<'a>(app: &'a App, theme: &'a Theme) -> Vec<Line<'a>> {
             .map(|n| n.to_string())
             .unwrap_or_else(|| "—".into()),
     ));
+    // The `▰▱` meter is the *pretty* form of the popularity number above, and the
+    // setting turns that off rather than the number: a person who dislikes a bar
+    // still wants the fact.
+    if let Some(p) = t.popularity
+        && app.settings.show_popularity
+    {
+        out.push(dash("popularity bar", Theme::volume_meter(p as u8, 10)));
+    }
     out.push(dash("uri", or_dash(t.uri.as_deref().unwrap_or(""))));
     out.push(dash(
         "artwork",
@@ -1391,6 +1438,23 @@ fn or_dash(s: &str) -> String {
 }
 
 fn draw_footer(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+    // The first-run hint outranks everything: a user who has never run trak does
+    // not know it has a settings screen, and the key list cannot say so in the
+    // space it has (TODO 5.4).
+    if let Some(hint) = &app.hint
+        && area.width as usize > hint.chars().count() + 2
+    {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                format!(" {hint} "),
+                Style::default()
+                    .fg(theme.palette.primary)
+                    .add_modifier(Modifier::ITALIC),
+            ))),
+            area,
+        );
+        return;
+    }
     // The headless hint is more important than a key list when the Dock icon is
     // gone, so it takes the left-hand space and the keys move right (TODO 4.7).
     if let Some(hint) = app.headless.hint()
@@ -1557,6 +1621,207 @@ mod tests {
             Event::PlayerState(Box::new(parse(&fixture("playing_track.txt")).unwrap())),
         )
         .app
+    }
+
+    /// The buffer as plain text, which is what most of these assertions want.
+    fn text_at(term: &ratatui::Terminal<ratatui::backend::TestBackend>) -> String {
+        let buf = term.backend().buffer().clone();
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// An app in visualizer mode with a settled spectrum, so the assertions are
+    /// about what is drawn rather than about how far the source has decayed.
+    fn viz_app(style: VisualizerStyle) -> App {
+        let mut app = app_at(100, 30);
+        app.settings.display_mode = DisplayMode::Visualizer;
+        app.settings.visualizer_style = style;
+        for _ in 0..90 {
+            app = update(app, Event::VizTick).app;
+        }
+        app
+    }
+
+    /// The buffer as a grid of symbols, for diffing two frames.
+    fn cells_at(term: &ratatui::Terminal<ratatui::backend::TestBackend>) -> Vec<Vec<String>> {
+        let buf = term.backend().buffer().clone();
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn frame(app: &App) -> Vec<Vec<String>> {
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| draw(f, app, &Theme::default())).unwrap();
+        cells_at(&term)
+    }
+
+    /// TODO 8.4: each of the four styles is reachable from the keyboard, draws
+    /// something of its own, and names itself in the pane so `v` has a visible
+    /// consequence.
+    ///
+    /// "Drew something" is measured by differing from the art-mode frame rather
+    /// than by looking for particular glyphs: braille is a different Unicode
+    /// block from the block characters the other three use, so a test that
+    /// counted known characters would pass three styles and fail the fourth for
+    /// a reason that has nothing to do with the renderer.
+    #[test]
+    fn every_visualizer_style_draws_its_own_thing() {
+        let mut art = viz_app(VisualizerStyle::Spectrum);
+        art.settings.display_mode = DisplayMode::Art;
+        let with_cover = frame(&art);
+
+        let mut drawn = Vec::new();
+        for style in VisualizerStyle::ALL {
+            let cells = frame(&viz_app(style));
+            let text = cells
+                .iter()
+                .map(|r| r.concat())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                text.contains(style.label()),
+                "{style:?} names nothing: {text}"
+            );
+
+            // Every cell that changed between showing the cover and showing this
+            // style, and none of them blank: a style that erased the pane and drew
+            // nothing back would otherwise pass a "did something" test.
+            let mut changed = Vec::new();
+            for (y, (a, b)) in with_cover.iter().zip(&cells).enumerate() {
+                for (x, (a, b)) in a.iter().zip(b).enumerate() {
+                    if a != b {
+                        changed.push((x, y, b.clone()));
+                    }
+                }
+            }
+            assert!(
+                changed.len() > 40,
+                "{style:?} changed only {} cells",
+                changed.len()
+            );
+            assert!(
+                changed.iter().all(|(_, _, s)| s != " "),
+                "{style:?} left the pane emptier than it found it"
+            );
+            drawn.push(cells);
+        }
+        // Four styles, four drawings -- not one drawing drawn four times.
+        for (i, a) in drawn.iter().enumerate() {
+            for (j, b) in drawn.iter().enumerate() {
+                assert!(i == j || a != b, "styles {i} and {j} drew the same");
+            }
+        }
+    }
+
+    /// The visualizer shares the cover's rectangle, so turning it on must not
+    /// change the layout around it (TODO 4.3: `a` swaps what is drawn, not what
+    /// is drawn around).
+    #[test]
+    fn the_visualizer_takes_the_covers_rectangle() {
+        let mut art = app_at(100, 30);
+        art.settings.display_mode = DisplayMode::Art;
+        let mut viz = app_at(100, 30);
+        viz.settings.display_mode = DisplayMode::Visualizer;
+        let mut out = Vec::new();
+        for app in [&art, &viz] {
+            let backend = ratatui::backend::TestBackend::new(100, 30);
+            let mut term = ratatui::Terminal::new(backend).unwrap();
+            term.draw(|f| draw(f, app, &Theme::default())).unwrap();
+            out.push(text_at(&term));
+        }
+        // The title block, the tabs and the footer are all still there, which is
+        // the part of the frame that is not the cover.
+        for needle in ["History", "Info", "Lyrics"] {
+            assert!(out[0].contains(needle), "art lost {needle}");
+            assert!(out[1].contains(needle), "visualizer lost {needle}");
+        }
+    }
+
+    /// TODO 5.3: every setting that the renderer reads has to visibly change the
+    /// dashboard. These are the two that were being carried with nothing reading
+    /// them, which is the failure mode a config layer grows quietly.
+    #[test]
+    fn the_progress_and_popularity_settings_change_the_dashboard() {
+        // The Info tab, because that is where the popularity row lives: this is
+        // a test of a setting, not of which tab happens to be open.
+        let on = {
+            let mut a = viz_app(VisualizerStyle::Spectrum);
+            a.settings.display_mode = DisplayMode::Art;
+            a.tab = Tab::Info;
+            a
+        };
+        let mut off = on.clone();
+        off.settings.show_progress = false;
+        let mut off_pop = on.clone();
+        off_pop.settings.show_popularity = false;
+
+        let (a, b, c) = (frame(&on), frame(&off), frame(&off_pop));
+        assert!(a != b, "show_progress = false changed nothing");
+        assert!(a != c, "show_popularity = false changed nothing");
+
+        // And the specific rows move, rather than the frame merely flickering.
+        let text = cells_to_text(&a);
+        let text_off = cells_to_text(&b);
+        let text_pop = cells_to_text(&c);
+        // The bar is a row of `\u{2500}` with a `\u{25cf}` head, so the row it
+        // occupied stops being occupied. Counting cells rather than lines
+        // because the borders are lines of the same character.
+        let dashes = |t: &str| t.chars().filter(|c| *c == '\u{2500}').count();
+        assert!(
+            dashes(&text).saturating_sub(dashes(&text_off)) >= 20,
+            "turning the bar off left {} of its cells behind",
+            dashes(&text).saturating_sub(dashes(&text_off))
+        );
+        assert!(text.contains("popularity"), "{text}");
+        assert!(
+            text_pop.matches("popularity").count() < text.matches("popularity").count(),
+            "turning popularity off left every row: {text_pop}"
+        );
+    }
+
+    fn cells_to_text(cells: &[Vec<String>]) -> String {
+        cells
+            .iter()
+            .map(|r| r.concat())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// TODO 5.4: a first launch in a clean home says so once, and any key
+    /// dismisses it.
+    #[test]
+    fn the_first_run_hint_shows_once_and_any_key_dismisses_it() {
+        let mut app = app_at(100, 30);
+        assert!(app.hint.is_none(), "not the first run by default");
+        app.hint = Some("press , for settings".to_string());
+
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| draw(f, &app, &Theme::default())).unwrap();
+        assert!(
+            text_at(&term).contains("press , for settings"),
+            "the hint was not shown"
+        );
+
+        let app = update(app, Event::Key('j')).app;
+        assert!(app.hint.is_none(), "j must dismiss it");
+        term.draw(|f| draw(f, &app, &Theme::default())).unwrap();
+        assert!(
+            !text_at(&term).contains("press , for settings"),
+            "the hint came back"
+        );
     }
 
     /// The breakpoints, pinned so the renderer and the tests cannot drift.

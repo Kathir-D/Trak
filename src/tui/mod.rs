@@ -6,6 +6,7 @@
 pub mod app;
 pub mod loop_;
 pub mod render;
+pub mod settings;
 pub mod theme;
 
-pub use loop_::run;
+pub use loop_::{config_screen, run};

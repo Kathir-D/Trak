@@ -85,6 +85,7 @@ pub trait AudioSource: Send {
 pub const BARS: usize = 32;
 
 /// One band's constants: where its wobble starts, and how fast it moves.
+#[derive(Debug, Clone)]
 struct Band {
     phase: f64,
     rate: f64,
@@ -110,6 +111,7 @@ struct Cells {
 /// falling off with frequency), they pulse with a beat at the track's own
 /// tempo, and they hold still when playback is paused. Random noise would pass a
 /// "does it change" test and fail the eye in under a second.
+#[derive(Debug, Clone)]
 pub struct SimulatedSource {
     /// Mixed into every track's constants so two sources with different seeds
     /// never draw the same shape.

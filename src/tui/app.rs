@@ -12,8 +12,11 @@
 use std::time::Instant;
 
 use crate::art;
+use crate::config::{ArtProtocol, VisualizerSource};
 use crate::player::actions::{CommandOutcome, PlayerCommand};
 use crate::player::{PlaybackState, PlayerState, RepeatMode, TrackInfo};
+use crate::tui::theme::{Accent, Border};
+use crate::visualizer::AudioSource;
 
 /// A track played this session. Session-only, cleared on exit (SPEC §2).
 #[derive(Debug, Clone, PartialEq)]
@@ -116,6 +119,10 @@ pub enum Event {
     NotRunning,
     /// Local tick, for interpolating the bar and expiring toasts.
     Tick,
+    /// A frame tick, at the visualizer's frame rate and only while it is on
+    /// screen (TODO 8.4/8.5). Separate from [`Event::Tick`] because the clock
+    /// ticks once a second and a 30 fps bar needs thirty.
+    VizTick,
     /// A lyrics lookup finished.
     Lyrics {
         uri: Option<String>,
@@ -367,31 +374,50 @@ impl VisualizerStyle {
     }
 }
 
-/// Settings the TUI needs that SPEC §8 puts in `config.toml`. Defaults for now;
-/// 5.x loads them.
+/// One field of SPEC §8, and everything the renderer needs to know about it.
+/// Every key in the config file has a field here, so that wiring a setting to
+/// behaviour is a matter of reading a field rather than of threading a new
+/// argument through the renderer.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Settings {
+    // [input]
     pub seek_step: f64,
     pub volume_step: i16,
+    /// On by default. When off the loop does not even ask the terminal for mouse
+    /// events, so a terminal that reports them cannot steal text selection.
+    pub mouse: bool,
+    // [display]
+    /// Whether to fetch and draw the cover at all. Ignored while the mode is the
+    /// visualizer, which draws over the same rectangle.
+    pub show_art: bool,
     pub show_clock: bool,
     pub show_volume: bool,
     pub show_key_hints: bool,
     pub side_pane: bool,
-    /// SPEC §8 `[lyrics] enabled`, on by default.
-    pub lyrics: bool,
-    /// SPEC §8 `[notifications] song_change`, **off** by default (TODO 4.5).
-    pub song_change_notification: bool,
-    /// SPEC §8 `volume.control` (TODO 4.4, R2).
-    pub volume_control: VolumeControl,
-    /// SPEC §8 `[input] mouse`, on by default. When off the loop does not even
-    /// ask the terminal for mouse events.
-    pub mouse: bool,
-    /// Rounded by default (SPEC §2).
-    pub rounded: bool,
+    /// The progress bar under the title block. Off by default only because SPEC
+    /// §8 says so; the bar is the main way to see how far in a track you are.
+    pub show_progress: bool,
+    /// The `▰▱` popularity row on the Info tab.
+    pub show_popularity: bool,
+    /// Which tab opens on launch.
+    pub default_tab: Tab,
+    /// Rounded by default (SPEC §2). Held as the enum rather than as the
+    /// `rounded` bool it used to be, because `double` and `none` are in the file
+    /// too and a bool cannot say which of them was meant.
+    pub border: Border,
+    pub accent: Accent,
+    pub art_protocol: ArtProtocol,
     /// `[display] mode`. `a` toggles it.
     pub display_mode: DisplayMode,
-    /// `[visualizer] style`. `v` cycles it.
+    // [visualizer]
     pub visualizer_style: VisualizerStyle,
+    pub visualizer_source: VisualizerSource,
+    // [lyrics]
+    pub lyrics: bool,
+    // [notifications]
+    pub song_change_notification: bool,
+    // [volume]
+    pub volume_control: VolumeControl,
 }
 
 impl Default for Settings {
@@ -399,18 +425,34 @@ impl Default for Settings {
         Self {
             seek_step: 5.0,
             volume_step: 10,
+            mouse: true,
+            show_art: true,
             show_clock: true,
             show_volume: true,
             show_key_hints: true,
             side_pane: true,
+            show_progress: true,
+            show_popularity: true,
+            default_tab: Tab::History,
+            border: Border::Rounded,
+            accent: Accent::Art,
+            art_protocol: ArtProtocol::Auto,
+            display_mode: DisplayMode::Art,
+            visualizer_style: VisualizerStyle::Spectrum,
+            visualizer_source: VisualizerSource::Auto,
             lyrics: true,
             song_change_notification: false,
             volume_control: VolumeControl::Spotify,
-            mouse: true,
-            rounded: true,
-            display_mode: DisplayMode::Art,
-            visualizer_style: VisualizerStyle::Spectrum,
         }
+    }
+}
+
+impl Settings {
+    /// Rounded corners, the SPEC §2 default. Kept as a question rather than a
+    /// field so a caller asking "is it rounded" cannot be answered with a bool
+    /// that has quietly lost the difference between `double` and `none`.
+    pub fn rounded(&self) -> bool {
+        self.border == Border::Rounded
     }
 }
 
@@ -454,10 +496,29 @@ pub struct App {
     pub busy: Option<PlayerCommand>,
     pub toast: Option<Toast>,
     pub settings: Settings,
+    /// The loaded `config.toml`, kept whole rather than as its settings because
+    /// it carries keys this build does not know about yet. Saving starts from
+    /// here, so a key added by a newer trak, or by hand, survives a save from
+    /// this one instead of being quietly deleted.
+    pub config: crate::config::Config,
+    /// Set when a setting has changed and the file has not been written yet.
+    pub config_dirty: bool,
+    /// The first-run hint, shown until the first key (TODO 5.4). `None` once it
+    /// has been dismissed, and it is never saved: the config file appearing at
+    /// all is what makes the next launch a *not*-first run.
+    pub hint: Option<String>,
+    /// The settings overlay is up (TODO 5.2). Key handling goes to the screen
+    /// while it is, so a stray `q` cannot quit trak from behind a dialog.
+    pub settings_open: bool,
+    /// Which row of the settings overlay has the cursor (TODO 5.2).
+    pub settings_cursor: usize,
+    /// The visualizer's bars and where they come from (TODO 8.4). The source is
+    /// seeded from the track so a new song visibly looks different, and the
+    /// spectrum is kept on the app because the render path must not block.
+    pub viz: crate::visualizer::SimulatedSource,
+    pub spectrum: Vec<f32>,
     /// TODO 4.1: the album art and its fetch state.
     pub art: ArtState,
-    /// `[display] art` (SPEC §8). Off means never fetch, never draw.
-    pub art_enabled: bool,
     /// The lyrics tab (TODO 6.1).
     pub lyrics: LyricsState,
     /// What Sonar is doing right now (TODO 4.6).
@@ -488,7 +549,7 @@ impl App {
         Self {
             state: None,
             history: Vec::new(),
-            tab: Tab::History,
+            tab: Settings::default().default_tab,
             history_cursor: 0,
             history_scroll: 0,
             viewport: 10,
@@ -504,8 +565,16 @@ impl App {
             busy: None,
             toast: None,
             settings: Settings::default(),
+            config: crate::config::Config::default(),
+            config_dirty: false,
+            hint: None,
+            settings_open: false,
+            settings_cursor: 0,
+            // Seeded from the clock rather than a constant so two trak processes
+            // do not draw in lockstep, and so a snapshot test can pin it.
+            viz: crate::visualizer::SimulatedSource::new(0),
+            spectrum: vec![0.0; crate::visualizer::BARS],
             art: ArtState::default(),
-            art_enabled: true,
             // What Sonar is doing right now (TODO 4.6).
             sonar: crate::sonar::SonarState::unknown(),
             // What headless-spotify is doing right now (TODO 4.7).
@@ -626,7 +695,7 @@ impl App {
         Some(past as u32 + 1)
     }
 
-    fn toast(&mut self, text: impl Into<String>) {
+    pub fn toast(&mut self, text: impl Into<String>) {
         self.toast = Some(Toast {
             text: text.into(),
             at: Instant::now(),
@@ -669,6 +738,11 @@ pub fn update(mut app: App, event: Event) -> Updated {
             // A command in flight is still running. Do not stack a poll behind it
             // or the queue grows without bound.
             app.poll_due = app.busy.is_none();
+        }
+
+        Event::VizTick => {
+            app.viz.set_position(app.interpolated_position());
+            app.spectrum = app.viz.spectrum();
         }
 
         Event::Key(c) => handle_key(&mut app, c, &mut commands),
@@ -810,6 +884,15 @@ pub fn update(mut app: App, event: Event) -> Updated {
 }
 
 fn handle_key(app: &mut App, c: char, commands: &mut Vec<PlayerCommand>) {
+    // The first-run hint goes on any key, before anything else reads it, so it
+    // cannot swallow one.
+    app.hint = None;
+
+    if app.settings_open {
+        crate::tui::settings::key(app, c);
+        return;
+    }
+
     if app.show_help {
         // The overlay swallows everything so a stray key cannot fire a write
         // behind it, but the quit keys still work.
@@ -842,9 +925,15 @@ fn handle_key(app: &mut App, c: char, commands: &mut Vec<PlayerCommand>) {
         // what is drawn rather than what is laid out (TODO 4.3).
         'a' => {
             app.settings.display_mode = app.settings.display_mode.next();
+            app.config_dirty = true;
         }
         'v' => {
             app.settings.visualizer_style = app.settings.visualizer_style.next();
+            app.config_dirty = true;
+        }
+        ',' => {
+            app.settings_open = true;
+            crate::tui::settings::open(app);
         }
         '\t' => app.tab = app.tab.next(),
         // Shift-Tab arrives as an unbound sentinel from the event loop.
@@ -1053,13 +1142,21 @@ fn apply_state(app: &mut App, s: PlayerState) {
     } else {
         RepeatMode::Off
     };
-    app.state = Some(s);
     app.last_read = Some(Instant::now());
     // A new track's title starts at its beginning, and the last track's chorus
     // does not follow it: showing the wrong lyrics under a new title is worse
     // than showing none.
     app.marquee_offset = 0;
     app.lyrics = LyricsState::default();
+    // The visualizer follows the music, so a new track gets a new shape and a
+    // pause decays the bars rather than freezing them (TODO 8.4).
+    if track_changed {
+        app.viz.set_track(new_uri.as_deref().unwrap_or(""));
+    }
+    let playing = s.playback == PlaybackState::Playing;
+    app.state = Some(s);
+    app.viz.set_playing(playing);
+    app.viz.set_position(app.interpolated_position());
 }
 
 #[cfg(test)]
@@ -2463,7 +2560,7 @@ mod tests {
         let s = Settings::default();
         assert_eq!(s.seek_step, 5.0);
         assert_eq!(s.volume_step, 10);
-        assert!(s.rounded, "rounded borders are the SPEC default");
+        assert!(s.rounded(), "rounded borders are the SPEC default");
         assert!(s.show_clock && s.show_volume && s.show_key_hints && s.side_pane);
     }
 

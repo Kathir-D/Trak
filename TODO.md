@@ -622,8 +622,21 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
       says how to grant permission. `source = simulated` forces the fallback. Needs: 1.5, 1.6.
       Done when: bars visibly track the music on the owner's machine; denial path tested manually;
       CPU stays low (record % in the PR/commit).
-- [ ] 8.4 **`v` cycles styles**, `a` toggles art/visualizer, both persist to config; visualizer FPS
-      capped (~30) and paused when the terminal is hidden/too small. Done when: works live.
+- [x] 8.4 **`v` cycles styles**, `a` toggles art/visualizer, both persist to config; visualizer FPS
+      capped (~30) and paused when the terminal is hidden/too small. > The four renderers are pure
+      functions over a spectrum and hand back plain text; **the colour is applied per column in the
+      renderer, off the album's own ramp**. That split is what makes a visualizer tinted by the cover
+      possible without four renderers knowing anything about palettes. > Bars are one cell wide per
+      character, and the colouring walks `chars()` rather than bytes — a braille glyph is one char but
+      three bytes, and walking bytes colours the wrong column. > **30 fps only while the visualizer is
+      on screen**; the rest of the time the loop waits its usual 100 ms, because 10 fps is plenty for a
+      dashboard and is a tenth of the wake-ups (TODO 11.5's idle-CPU budget). The frame tick is a
+      separate `Event` from the one-second clock, so 8.5's tap can start and stop without the clock
+      noticing. > `a` and `v` mark the config dirty and the write happens on the way out, so holding
+      `v` down is not thirty writes a second, and a **failed save is a line of text after the terminal
+      is restored** rather than an escape sequence. > Not paused for a hidden terminal: ratatui has no
+      way to know the window is occluded, so 8.5's answer is that the tap stops, not that the frames
+      do.
 - [ ] 8.5 **Tap lifecycle**: start on demand, stop when the visualizer is hidden or Spotify quits,
       reattach when Spotify restarts, never leave a tap/aggregate device behind after exit or crash
       (RAII + signal handling; verify with `system_profiler SPAudioDataType` before/after).

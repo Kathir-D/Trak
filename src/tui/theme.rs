@@ -50,6 +50,29 @@ pub enum Border {
 }
 
 impl Border {
+    /// Every style, in the order a `←`/`→` walk through them. Cycled by the
+    /// settings screen, so the order is the order the user sees.
+    pub const ALL: [Border; 4] = [Border::Rounded, Border::Sharp, Border::Double, Border::None];
+
+    pub fn next(self) -> Self {
+        let i = Self::ALL.iter().position(|b| *b == self).unwrap_or(0);
+        Self::ALL[(i + 1) % Self::ALL.len()]
+    }
+
+    pub fn prev(self) -> Self {
+        let i = Self::ALL.iter().position(|b| *b == self).unwrap_or(0);
+        Self::ALL[(i + Self::ALL.len() - 1) % Self::ALL.len()]
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Rounded => "rounded",
+            Self::Sharp => "sharp",
+            Self::Double => "double",
+            Self::None => "none",
+        }
+    }
+
     #[allow(dead_code, reason = "read by config.toml in TODO 5.1")]
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim() {

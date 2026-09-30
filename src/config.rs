@@ -501,9 +501,14 @@ impl Config {
         settings.volume_control = self.volume.control;
         settings.display_mode = self.display.mode;
         settings.visualizer_style = self.visualizer.style;
-        // 4.4 carries the border as a bool and the file as four styles, so only
-        // rounded survives this hop. TODO 5.2's screen sets the style itself.
-        settings.rounded = self.display.border == Border::Rounded;
+        settings.show_art = self.display.art;
+        settings.border = self.display.border;
+        settings.accent = self.display.accent;
+        settings.art_protocol = self.display.art_protocol;
+        settings.show_progress = self.display.progress;
+        settings.show_popularity = self.display.popularity;
+        settings.default_tab = self.display.default_tab;
+        settings.visualizer_source = self.visualizer.source;
     }
 
     /// This config with the keys [`Settings`] has read back out of it, which is
@@ -511,8 +516,6 @@ impl Config {
     /// replace only what the screen can change, so a key it does not know about
     /// survives a save.
     ///
-    /// Lossy for the border in the same way [`Config::apply`] is: a bool cannot
-    /// carry `double` or `none`.
     pub fn with_settings(&self, settings: &Settings) -> Config {
         let mut next = self.clone();
         next.input.seek_step = settings.seek_step;
@@ -527,11 +530,14 @@ impl Config {
         next.volume.control = settings.volume_control;
         next.display.mode = settings.display_mode;
         next.visualizer.style = settings.visualizer_style;
-        next.display.border = if settings.rounded {
-            Border::Rounded
-        } else {
-            Border::Sharp
-        };
+        next.display.art = settings.show_art;
+        next.display.border = settings.border;
+        next.display.accent = settings.accent;
+        next.display.art_protocol = settings.art_protocol;
+        next.display.progress = settings.show_progress;
+        next.display.popularity = settings.show_popularity;
+        next.display.default_tab = settings.default_tab;
+        next.visualizer.source = settings.visualizer_source;
         next
     }
 
@@ -2157,13 +2163,13 @@ client_id = ""             # empty = Version B
     }
 
     /// The hop the settings screen (TODO 5.2) saves through. Every key both sides
-    /// have survives it; the border is the documented exception, because a bool
-    /// cannot carry `double` or `none`, and the Client ID is the reason the hop
-    /// starts from the config rather than from a default.
+    /// have survives it, the Client ID included -- which is the reason the hop
+    /// starts from the config rather than from a default: a screen that cannot
+    /// edit the Client ID must not delete it on save.
     #[test]
     fn a_config_survives_a_round_trip_through_settings() {
         let mut config = everything();
-        for border in [Border::Rounded, Border::Sharp] {
+        for border in Border::ALL {
             config.display.border = border;
             assert_eq!(
                 config.with_settings(&config.settings()),
@@ -2171,12 +2177,11 @@ client_id = ""             # empty = Version B
                 "{border:?}"
             );
         }
-        config.display.border = Border::Double;
-        let back = config.with_settings(&config.settings());
-        let mut expected = config.clone();
-        expected.display.border = Border::Sharp;
-        assert_eq!(back, expected);
-        assert_eq!(back.spotify, config.spotify, "the Client ID is untouched");
+        assert_eq!(
+            config.with_settings(&config.settings()).spotify,
+            config.spotify,
+            "the Client ID is untouched"
+        );
         // And `apply` moves nothing that is not in both.
         let mut settings = Settings::default();
         config.apply(&mut settings);

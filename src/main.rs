@@ -79,6 +79,12 @@ enum Command {
         #[arg(value_enum)]
         what: Mode,
     },
+    /// Open the settings screen and save it on the way out (SPEC §8, TODO 5.2).
+    ///
+    /// The same screen the TUI's `,` opens, on its own: useful for editing before
+    /// Spotify is ever running, and for reading the settings on a machine where
+    /// launching the dashboard is not what you want.
+    Config,
     /// Print, and for url/uri also copy, the current track's link.
     Share {
         /// `url` for a web link, `uri` for a spotify: URI.
@@ -130,6 +136,14 @@ fn main() -> ExitCode {
 
 /// Both player backends behind one call site, so every command is written once.
 fn run(args: Cli) -> ExitCode {
+    // The settings screen is handled before the player exists: it has no business
+    // talking to Spotify, and `trak config` has to work on a machine where
+    // Spotify is not running or not even installed (COMPAT rule 2 -- the only
+    // launch trak ever performs is the idle card's).
+    if matches!(args.command, Some(Command::Config)) {
+        return ExitCode::from(trak::tui::config_screen() as u8);
+    }
+
     let mut player: AnyPlayer = if args.fake {
         AnyPlayer::Fake(Box::new(trak::player::FakePlayer::playing()))
     } else {
@@ -139,6 +153,8 @@ fn run(args: Cli) -> ExitCode {
     let code = match args.command {
         // Bare `trak` opens the TUI (SPEC §2).
         None => trak::tui::run(),
+        // Unreachable: `config` returned above, before the player was built.
+        Some(Command::Config) => EXIT_OK,
         Some(Command::Status { field }) => status(&player, args.json, style(args.plain), field),
         Some(Command::Play { uri: Some(uri) }) => play(&player, &uri),
         Some(Command::Play { uri: None }) => trak::cli::run_action(&mut player, "play"),
