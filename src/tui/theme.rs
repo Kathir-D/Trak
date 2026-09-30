@@ -3,10 +3,11 @@
 //! Kept in one place so the settings screen, the renderer and the tests all agree
 //! on what "rounded" and "accent green" mean (SPEC §2, §8).
 
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
 use ratatui::widgets::BorderType;
 
-use crate::accent;
+use crate::accent::{self, Palette};
 use crate::player::PlaybackState;
 
 /// The green from the Spotify brand, used when `accent = "green"` (SPEC §2).
@@ -79,15 +80,15 @@ pub struct Theme {
     /// image has been extracted, and for a cover that has no usable colour --
     /// a black-and-white sleeve should leave the accent alone.
     pub art_colour: Option<Color>,
+    /// The whole ramp, so bars and borders can be gradients rather than one flat
+    /// colour (TODO 4.2). Falls back to rotations of the accent, so `green` and
+    /// `terminal` get a gradient too.
+    pub palette: Palette,
 }
 
 impl Default for Theme {
     fn default() -> Self {
-        Self {
-            accent: Accent::Art,
-            border: Border::Rounded,
-            art_colour: None,
-        }
+        Self::new(Accent::Art, Border::Rounded)
     }
 }
 
@@ -97,6 +98,10 @@ impl Theme {
             accent,
             border,
             art_colour: None,
+            palette: Palette::from_accent(match accent {
+                Accent::Terminal => Color::Reset,
+                _ => SPOTIFY_GREEN,
+            }),
         }
     }
 
@@ -116,16 +121,35 @@ impl Theme {
         }
     }
 
-    /// Set the accent from a freshly fetched cover.
+    /// Set the accent and the ramp from a freshly fetched cover.
     ///
-    /// Returns whether the colour was accepted, so the caller can tell the
-    /// difference between "this cover has no colour" and "the colour is
-    /// unchanged" without keeping the old value around.
+    /// Returns whether anything changed, so the caller can tell "this cover has
+    /// no colour" from "the colour is unchanged" without keeping the old value
+    /// around -- and, more usefully, whether a redraw is needed at all.
     pub fn set_art_colour(&mut self, image: &image::DynamicImage) -> bool {
         let found = accent::dominant_colour(image).map(accent::ensure_contrast);
         let usable = found.filter(|c| accent::is_usable(*c));
-        let changed = usable != self.art_colour;
+        let mut next = match usable {
+            Some(c) => Palette {
+                primary: c,
+                secondary: accent::palette(image).secondary,
+                tertiary: accent::palette(image).tertiary,
+            },
+            // No usable colour in the cover: keep whatever ramp is in place. A
+            // black-and-white sleeve should leave the interface alone, and
+            // jumping to a synthetic ramp would be a worse answer than the green
+            // it already had.
+            None => self.palette,
+        };
+        // Every colour in the ramp has to be drawable.
+        for c in [&mut next.primary, &mut next.secondary, &mut next.tertiary] {
+            if !accent::is_usable(*c) {
+                *c = SPOTIFY_GREEN;
+            }
+        }
+        let changed = usable != self.art_colour || next != self.palette;
         self.art_colour = usable;
+        self.palette = next;
         changed
     }
 
@@ -233,6 +257,7 @@ mod tests {
             accent: Accent::Art,
             border: Border::Rounded,
             art_colour: Some(Color::Rgb(200, 40, 40)),
+            palette: Palette::from_accent(SPOTIFY_GREEN),
         };
         assert_eq!(t.accent_colour(), Color::Rgb(200, 40, 40));
 
@@ -249,6 +274,7 @@ mod tests {
                 accent: Accent::Art,
                 border: Border::Rounded,
                 art_colour: Some(unusable),
+                palette: Palette::from_accent(SPOTIFY_GREEN),
             };
             assert_eq!(
                 t.accent_colour(),
@@ -262,12 +288,14 @@ mod tests {
             accent: Accent::Green,
             border: Border::Rounded,
             art_colour: Some(Color::Rgb(200, 40, 40)),
+            palette: Palette::from_accent(SPOTIFY_GREEN),
         };
         assert_eq!(t.accent_colour(), SPOTIFY_GREEN);
         let t = Theme {
             accent: Accent::Terminal,
             border: Border::Rounded,
             art_colour: Some(Color::Rgb(200, 40, 40)),
+            palette: Palette::from_accent(Color::Reset),
         };
         assert_eq!(t.accent_colour(), Color::Reset);
     }
@@ -423,4 +451,75 @@ mod tests {
             );
         }
     }
+}
+
+/// The gradient a bar is drawn with, and the ramp it comes from.
+///
+/// A bar drawn in one colour is a bar. Drawn as a ramp it reads as part of the
+/// album rather than as a widget, and the eye can read the position off the
+/// colour as well as the length — which is the one thing a bar is for.
+pub fn gradient_bar(
+    fraction: f64,
+    width: usize,
+    palette: &crate::accent::Palette,
+    dim: bool,
+) -> Vec<Span<'static>> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let filled = (((fraction.clamp(0.0, 1.0)) * width as f64).round() as usize).min(width);
+    let ramp = palette.ramp(width.max(2));
+
+    // The last three filled cells get the head colour, so the playhead reads as a
+    // bright point travelling along the bar rather than a hard edge. This is the
+    // whimsy that costs nothing: it is three cells.
+    let head_from = filled.saturating_sub(3);
+    let mut spans = Vec::with_capacity(width);
+    for i in 0..width {
+        let (glyph, colour) = if i < filled {
+            let base = ramp[i];
+            let colour = if i >= head_from && filled > 3 {
+                crate::accent::mix(base, Color::White, 0.35)
+            } else {
+                base
+            };
+            ("●", colour)
+        } else {
+            ("─", Color::DarkGray)
+        };
+        let mut style = Style::default().fg(if dim { Color::DarkGray } else { colour });
+        if dim {
+            style = style.add_modifier(Modifier::DIM);
+        }
+        spans.push(Span::styled(glyph, style));
+    }
+    spans
+}
+
+/// A whole line as one ramp, used for the tab-strip underline and the art frame.
+///
+/// The last cell is nudged so the run does not end on exactly the colour the
+/// next element starts with, which is what makes a gradient look like it was
+/// placed rather than assembled.
+pub fn gradient_line<'a>(text: &str, palette: &crate::accent::Palette) -> Line<'a> {
+    let cells = text.chars().count().max(1);
+    let ramp = palette.ramp(cells);
+    let spans: Vec<Span<'a>> = text
+        .chars()
+        .enumerate()
+        .map(|(i, c)| Span::styled(c.to_string(), Style::default().fg(ramp[i % ramp.len()])))
+        .collect();
+    Line::from(spans)
+}
+
+/// A two-tone border: the top and left edges in one colour, the bottom and right
+/// in another. A box with a gradient on its edge looks lit from one side, which
+/// is the cheapest depth a terminal can do.
+pub fn edge_styles(palette: &crate::accent::Palette) -> [Style; 4] {
+    [
+        Style::default().fg(palette.primary), // top
+        Style::default().fg(crate::accent::mix(palette.primary, palette.secondary, 0.4)), // right
+        Style::default().fg(palette.end()),   // bottom
+        Style::default().fg(crate::accent::mix(palette.primary, palette.tertiary, 0.5)), // left
+    ]
 }

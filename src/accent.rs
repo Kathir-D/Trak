@@ -529,3 +529,217 @@ mod tests {
         assert!(luma(0, 255, 0) > luma(0, 0, 255));
     }
 }
+
+/// Three colours taken from one cover, for gradients (TODO 4.2, "gradients
+/// instead of one colour").
+///
+/// One accent is not enough: a bar drawn in a single colour is a bar, and the
+/// whole interface ends up the same hue as one piece of text. A ramp reads as
+/// designed rather than configured, and it costs nothing at render time once the
+/// colours are in the theme.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Palette {
+    /// The accent: what borders, the title and the bar head use.
+    pub primary: Color,
+    /// The far end of the ramp.
+    pub secondary: Color,
+    /// The middle, so a long gradient does not have to go straight from one end
+    /// to the other.
+    pub tertiary: Color,
+}
+
+/// How far apart two hues have to be before a second colour is worth using.
+/// 24° is about where two hues stop reading as "the same colour, lighter".
+const HUE_SEPARATION: f32 = 24.0;
+
+/// How far a synthesised hue is rotated when the cover only offers one. Analogous
+/// rather than complementary: a cover is one photo, so its colours are usually
+/// neighbours, and a complementary jump looks like a different album.
+const SYNTHETIC_ROTATION: f32 = 38.0;
+
+impl Palette {
+    /// A palette with no art behind it, so `accent = "green"` still gets a
+    /// gradient. The Spotify green plus two rotations of it, which is an
+    /// analogous ramp through teal to blue.
+    pub fn from_accent(primary: Color) -> Palette {
+        match primary {
+            Color::Rgb(r, g, b) => Palette {
+                primary,
+                secondary: rotate(r, g, b, SYNTHETIC_ROTATION),
+                tertiary: rotate(r, g, b, -SYNTHETIC_ROTATION),
+            },
+            // A terminal palette has no colours to rotate; one flat colour is the
+            // honest answer, and `ramp` then returns it unchanged.
+            other => Palette {
+                primary: other,
+                secondary: other,
+                tertiary: other,
+            },
+        }
+    }
+
+    /// `len` colours from `primary` through `tertiary` to `secondary`.
+    ///
+    /// Interpolated in HSL rather than RGB: halfway between a pink and a blue in
+    /// RGB is a muddy grey, and halfway between them in hue is the colour you
+    /// would have picked.
+    pub fn ramp(&self, len: usize) -> Vec<Color> {
+        if len == 0 {
+            return Vec::new();
+        }
+        if self.primary == self.secondary && self.secondary == self.tertiary {
+            return vec![self.primary; len];
+        }
+        (0..len)
+            .map(|i| {
+                let t = if len == 1 {
+                    0.0
+                } else {
+                    i as f32 / (len - 1) as f32
+                };
+                // Two halves: primary -> tertiary, then tertiary -> secondary.
+                if t <= 0.5 {
+                    mix(self.primary, self.tertiary, t * 2.0)
+                } else {
+                    mix(self.tertiary, self.secondary, (t - 0.5) * 2.0)
+                }
+            })
+            .collect()
+    }
+
+    /// The colour at the far end of the ramp, for a single span that has to be
+    /// one colour.
+    pub fn end(&self) -> Color {
+        self.secondary
+    }
+}
+
+/// Interpolate two colours in HSL, taking the short way round the hue circle.
+pub fn mix(a: Color, b: Color, t: f32) -> Color {
+    let (Color::Rgb(r1, g1, b1), Color::Rgb(r2, g2, b2)) = (a, b) else {
+        return a;
+    };
+    let t = t.clamp(0.0, 1.0);
+    let (h1, s1, l1) = hsl(r1, g1, b1);
+    let (h2, s2, l2) = hsl(r2, g2, b2);
+    // The short way round, so a ramp never sweeps through red because the two
+    // ends happen to sit either side of 0°.
+    let mut delta = (h2 - h1) % 360.0;
+    if delta > 180.0 {
+        delta -= 360.0;
+    }
+    if delta < -180.0 {
+        delta += 360.0;
+    }
+    let h = (h1 + delta * t).rem_euclid(360.0);
+    let s = s1 + (s2 - s1) * t;
+    let l = l1 + (l2 - l1) * t;
+    from_hsl(h, s.clamp(0.0, 1.0), l.clamp(0.0, 1.0))
+}
+
+/// Rotate a colour's hue by `degrees`, keeping its saturation and lightness.
+fn rotate(r: u8, g: u8, b: u8, degrees: f32) -> Color {
+    let (h, s, l) = hsl(r, g, b);
+    from_hsl((h + degrees).rem_euclid(360.0), s, l)
+}
+
+/// HSL back to RGB. Written out rather than pulled from a crate: `image` has no
+/// HSL conversion and this is twenty lines.
+fn from_hsl(h: f32, s: f32, l: f32) -> Color {
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let h6 = h / 60.0;
+    let x = c * (1.0 - (h6 % 2.0 - 1.0).abs());
+    let (r, g, b) = match h6 as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = l - c / 2.0;
+    Color::Rgb(
+        (((r + m) * 255.0).round().clamp(0.0, 255.0)) as u8,
+        (((g + m) * 255.0).round().clamp(0.0, 255.0)) as u8,
+        (((b + m) * 255.0).round().clamp(0.0, 255.0)) as u8,
+    )
+}
+
+/// The ramp for a cover: up to three genuinely different hues, and synthesised
+/// rotations when the cover only has one.
+///
+/// Every colour goes through `is_usable`, so a palette can never contain a
+/// colour the interface should not draw.
+pub fn palette(image: &image::DynamicImage) -> Palette {
+    let bins = hue_bins(image);
+    let primary = bins
+        .first()
+        .map(|bin| bin.1)
+        .unwrap_or(SPOTIFY_GREEN_LITERAL);
+    Palette {
+        primary,
+        secondary: pick_separate(&bins, primary, 1)
+            .unwrap_or_else(|| rotate_rgb(primary, SYNTHETIC_ROTATION)),
+        tertiary: pick_separate(&bins, primary, 2)
+            .unwrap_or_else(|| rotate_rgb(primary, -SYNTHETIC_ROTATION)),
+    }
+}
+
+/// A hue, the colour that won it, and how strongly it was represented.
+type Bin = (f32, Color, f32);
+
+/// Bucket the usable pixels of a cover by hue, keeping the best colour in each.
+fn hue_bins(image: &image::DynamicImage) -> Vec<Bin> {
+    let small = image::imageops::resize(&image.to_rgba8(), SAMPLE, SAMPLE, FilterType::Triangle);
+    let mut bins: Vec<Bin> = Vec::new();
+    for px in small.as_raw().chunks_exact(4) {
+        let [r, g, b, a] = [px[0], px[1], px[2], px[3]];
+        if a < 128 {
+            continue;
+        }
+        let (h, s, _l) = hsl(r, g, b);
+        let y = luma(r, g, b);
+        if s < MIN_SATURATION || y < MIN_LUMA || y > MAX_LUMA {
+            continue;
+        }
+        let weight = s * y;
+        let colour = Color::Rgb(r, g, b);
+        match bins.iter_mut().find(|bin| {
+            let d = (bin.0 - h).abs();
+            d.min(360.0 - d) < HUE_SEPARATION
+        }) {
+            Some(bin) if weight > bin.2 => *bin = (bin.0, colour, weight),
+            Some(_) => {}
+            None => bins.push((h, colour, weight)),
+        }
+    }
+    bins.sort_by(|a, b| b.2.total_cmp(&a.2));
+    bins
+}
+
+/// The best colour at least `want` bins away from `primary`, so the ramp has
+/// somewhere to go.
+fn pick_separate(bins: &[Bin], primary: Color, want: u32) -> Option<Color> {
+    let Color::Rgb(pr, pg, pb) = primary else {
+        return None;
+    };
+    let (ph, _, _) = hsl(pr, pg, pb);
+    bins.iter()
+        .filter(|bin| {
+            let d = (bin.0 - ph).abs();
+            d.min(360.0 - d) >= HUE_SEPARATION * want as f32
+        })
+        .map(|bin| bin.1)
+        .next()
+}
+
+fn rotate_rgb(colour: Color, degrees: f32) -> Color {
+    match colour {
+        Color::Rgb(r, g, b) => rotate(r, g, b, degrees),
+        other => other,
+    }
+}
+
+/// The Spotify green as a literal, so this module does not depend on the theme's
+/// copy of it.
+const SPOTIFY_GREEN_LITERAL: Color = Color::Rgb(0x1D, 0xB9, 0x54);
