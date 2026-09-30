@@ -421,9 +421,13 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
       and a lookup that lands after the user has skipped is dropped: showing the wrong chorus under a
       new title is worse than showing none. > Rest of phase 6 still owed: `L` for full-screen,
       translations, caching to disk, and the other providers.
-- [ ] 4.3 **Art / visualizer toggle plumbing** (`a`): `display.mode`. With `visualizer`, art is not
-      drawn but is still fetched for colour. Visualizer content arrives in phase 8; until then show a
-      placeholder pane. Done when: toggling swaps the pane and persists in config (after 5.x).
+- [x] 4.3 **Art / visualizer toggle plumbing** (`a`): `display.mode`. With `visualizer`, art is not
+      drawn but is still fetched for colour. > The two share **one rectangle**, so `a` swaps what is
+      drawn rather than what is laid out and the layout cannot jump. > The placeholder is not a
+      "coming soon" box: it draws a row of bars sized from the interpolated position, so even the
+      stand-in moves with the music instead of sitting there inert, and it names the style `v` would
+      change. > `v` cycles the four styles of SPEC §8 and the choice is carried now, though 8.1 draws
+      them. > Persisting to config lands with 5.x, which is what reads these.
 - [ ] 4.4 **System-volume fallback** (R2): setting `volume.control = "spotify" | "system"`, auto-
       suggested when read-back fails; `osascript -e 'set volume output volume N'`. Done when: works and
       the notice explains how to switch.

@@ -19,7 +19,7 @@ use ratatui_image::StatefulImage;
 use ratatui_image::protocol::{ImageSource, StatefulProtocol, StatefulProtocolType};
 
 use crate::player::PlaybackState;
-use crate::tui::app::{App, Control, HISTORY_VIEW, Hit, Tab};
+use crate::tui::app::{App, Control, DisplayMode, HISTORY_VIEW, Hit, Tab};
 use crate::tui::theme::{Theme, format_time, progress_bar};
 
 /// The keys in SPEC §4 that this build deliberately does not offer, and why.
@@ -779,12 +779,18 @@ fn draw_now_playing(
             width: hole_w.saturating_sub(2),
             height: hole_h,
         };
+        // The visualizer takes the same rectangle (TODO 4.3). The cover is still
+        // fetched and still drives the accent: a visualizer tinted by the album
+        // is the entire point of having one.
+        let show_visualizer = app.settings.display_mode == DisplayMode::Visualizer;
         let drawn = app
             .art_enabled
             .then(|| app.art.drawable(track))
             .flatten()
             .filter(|_| app.art.error.is_none());
-        if let Some(art) = drawn {
+        if show_visualizer {
+            draw_visualizer_placeholder(f, hole, app, theme);
+        } else if let Some(art) = drawn {
             f.render_widget(ratatui::widgets::Clear, hole);
             images.draw(f, &art.path, &art.image, hole);
         } else if app.art.loading {
@@ -997,6 +1003,67 @@ fn progress(app: &App) -> f64 {
         Some(s) => s.progress(),
         None => 0.0,
     }
+}
+
+/// Where the real visualizer goes (TODO 8.1). Until then this draws its frame,
+/// its style name and a flat spectrum of bars in the album's own colours, so the
+/// toggle visibly swaps the pane rather than leaving a hole in the layout.
+fn draw_visualizer_placeholder(f: &mut Frame, hole: Rect, app: &App, theme: &Theme) {
+    if hole.width == 0 || hole.height == 0 {
+        return;
+    }
+    f.render_widget(ratatui::widgets::Clear, hole);
+    let name = app.settings.visualizer_style.label();
+    if hole.height < 4 || hole.width < 12 {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(name, Theme::dim()))),
+            hole,
+        );
+        return;
+    }
+    // A row of bars, sized from the interpolated position so even the placeholder
+    // moves with the music rather than sitting there inert.
+    let ramp = theme.palette.ramp(hole.width as usize);
+    let bars = (hole.width as usize / 2).max(1);
+    let mut row: Vec<Span> = Vec::with_capacity(bars);
+    for i in 0..bars {
+        let phase = (i as f64 / bars as f64 * std::f64::consts::TAU)
+            + app.interpolated_position() * 0.6;
+        let height = 0.5 + 0.5 * phase.sin().abs();
+        let cells = ((height * (hole.height - 2) as f64).round() as usize).clamp(1, 4);
+        let colour = ramp[(i * 2) % ramp.len()];
+        let top = hole.y + ((hole.height as usize - cells) / 2) as u16;
+        for c in 0..cells {
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    "▄",
+                    Style::default().fg(colour),
+                ))),
+                Rect {
+                    x: hole.x + (i * 2) as u16,
+                    y: top + c as u16,
+                    width: 1,
+                    height: 1,
+                },
+            );
+        }
+        row.push(Span::raw(" "));
+    }
+    let _ = row;
+    // The style name, dimmed, at the top of the pane: it says what is being drawn
+    // and what `v` will change.
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            name,
+            Theme::dim().add_modifier(Modifier::ITALIC),
+        ))),
+        Rect {
+            x: hole.x,
+            y: hole.y,
+            width: hole.width,
+            height: 1,
+        },
+    );
 }
 
 fn draw_tabs(f: &mut Frame, area: Rect, app: &App, theme: &Theme, regions: &mut Regions) {

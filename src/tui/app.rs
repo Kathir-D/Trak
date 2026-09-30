@@ -261,6 +261,76 @@ pub struct Toast {
     pub at: Instant,
 }
 
+/// What fills the art pane (SPEC §8 `[display] mode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisplayMode {
+    /// The cover.
+    Art,
+    /// The visualizer. The cover is still fetched and its colour still drives the
+    /// accent -- a visualizer tinted by the album is the whole point.
+    Visualizer,
+}
+
+impl DisplayMode {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim() {
+            "art" => Some(Self::Art),
+            "visualizer" => Some(Self::Visualizer),
+            _ => None,
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::Art => Self::Visualizer,
+            Self::Visualizer => Self::Art,
+        }
+    }
+}
+
+/// The visualizer styles SPEC §8 offers (TODO 8.1 draws them; 4.3 only carries
+/// the choice).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VisualizerStyle {
+    Spectrum,
+    Mirrored,
+    Waveform,
+    Circular,
+}
+
+impl VisualizerStyle {
+    pub const ALL: [VisualizerStyle; 4] = [
+        VisualizerStyle::Spectrum,
+        VisualizerStyle::Mirrored,
+        VisualizerStyle::Waveform,
+        VisualizerStyle::Circular,
+    ];
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim() {
+            "spectrum" => Some(Self::Spectrum),
+            "mirrored" => Some(Self::Mirrored),
+            "waveform" => Some(Self::Waveform),
+            "circular" => Some(Self::Circular),
+            _ => None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Spectrum => "spectrum",
+            Self::Mirrored => "mirrored",
+            Self::Waveform => "waveform",
+            Self::Circular => "circular",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        let i = Self::ALL.iter().position(|s| *s == self).unwrap_or(0);
+        Self::ALL[(i + 1) % Self::ALL.len()]
+    }
+}
+
 /// Settings the TUI needs that SPEC §8 puts in `config.toml`. Defaults for now;
 /// 5.x loads them.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -278,6 +348,10 @@ pub struct Settings {
     pub mouse: bool,
     /// Rounded by default (SPEC §2).
     pub rounded: bool,
+    /// `[display] mode`. `a` toggles it.
+    pub display_mode: DisplayMode,
+    /// `[visualizer] style`. `v` cycles it.
+    pub visualizer_style: VisualizerStyle,
 }
 
 impl Default for Settings {
@@ -292,6 +366,8 @@ impl Default for Settings {
             lyrics: true,
             mouse: true,
             rounded: true,
+            display_mode: DisplayMode::Art,
+            visualizer_style: VisualizerStyle::Spectrum,
         }
     }
 }
@@ -686,6 +762,14 @@ fn handle_key(app: &mut App, c: char, commands: &mut Vec<PlayerCommand>) {
     match c {
         'q' | 'Q' => app.should_quit = true,
         '?' => app.show_help = true,
+        // The art pane and the visualizer share one rectangle, so this swaps
+        // what is drawn rather than what is laid out (TODO 4.3).
+        'a' => {
+            app.settings.display_mode = app.settings.display_mode.next();
+        }
+        'v' => {
+            app.settings.visualizer_style = app.settings.visualizer_style.next();
+        }
         '\t' => app.tab = app.tab.next(),
         // Shift-Tab arrives as an unbound sentinel from the event loop.
         'Z' => app.tab = app.tab.prev(),
