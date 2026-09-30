@@ -597,12 +597,26 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
 
 ## Phase 8 — Visualizer
 
-- [ ] 8.1 **`AudioSource` trait + simulated source**: smooth pseudo-random bars that respond to
-      play / pause / track change (decay to zero when paused). Done when: deterministic seeded tests.
-- [ ] 8.2 **Renderers** (pure fns): `spectrum`, `mirrored`, `waveform` (braille), `circular`; scale to
-      any `Rect` (including tiny), accent colour gradient, no flicker. Study scope-tui for the braille
-      approach (credit in THIRD-PARTY-NOTICES if code is borrowed). Done when: golden-buffer tests per
-      style at 3 sizes.
+- [x] 8.1 **`AudioSource` trait + simulated source**. > **Simulated is the shippable default, not
+      a placeholder**: 1.5 never found a process-only tap, so 8.3 is blocked and something still has to
+      draw. > `Send` but deliberately **not** `Sync` — the source is owned by its own worker thread, and
+      requiring `Sync` would commit 8.3 to locking a ring buffer it has no reason to lock. > 28 tests,
+      deterministic from a seed. > Decay is driven by **call count, not wall-clock** — the trait has to
+      stay clock-free to be testable — and 8.4's 30 fps cap turns that into a real 1.3 s fade. > One
+      file rather than the `viz/{source,dsp,render}.rs` in ARCHITECTURE.md: there is no dsp layer to
+      separate out until 8.3 lands a real second implementation, so ARCHITECTURE.md is corrected in the
+      same commit.
+- [x] 8.2 **Renderers** (pure fns)**: `spectrum`, `mirrored`, `waveform` (braille), `circular`. All
+      are `fn(&[f32], width, height) -> Vec<String>` — no I/O, no terminal, no panics at any size
+      including 0 and 1. `BARS = 32`, matching what 1.6 chose for `cavacore`, so the simulated and the
+      real source draw the same shape. > Bars are **one cell wide per character**: TODO 3.4 recorded
+      that a wide glyph in a bar tears the layout, and every returned line is asserted to be exactly
+      the requested width. > Braille earns its keep: `circular`, walking each band along its own ray,
+      put a dot on the centre line where no cell can hold one at an even width, so it works cell-first
+      and a flat spectrum is now exactly symmetric at both parities. The symmetry test found that, not
+      looking at it did. > The tests assert a flat spectrum looks flat and a peak looks like a peak — a
+      renderer that only does not panic is a renderer that is wrong. > Not borrowed from scope-tui; the
+      braille dot maths is written from the Unicode 2x4 grid, so THIRD-PARTY-NOTICES is unchanged.
 - [ ] 8.3 **Real audio source** from the spike: tap Spotify's process, mono-mix, ring buffer, cavacore
       → bars, on its own thread; auto-fallback to simulated on denial/error with a one-time toast that
       says how to grant permission. `source = simulated` forces the fallback. Needs: 1.5, 1.6.
