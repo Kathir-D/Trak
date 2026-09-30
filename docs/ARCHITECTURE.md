@@ -41,10 +41,11 @@ player/
   fake.rs          in-memory Player for tests
 history.rs         session play history (ring buffer of TrackInfo with URI)
 art.rs             fetch + cache artwork URL, decode, dominant colour, ratatui-image protocol picker
-viz/
-  source.rs        AudioSource trait; tap.rs (cidre process tap) and sim.rs (simulated)
-  dsp.rs           cavacore wrapper → bars; waveform ring buffer
-  render.rs        spectrum / mirrored / waveform / circular as pure fns
+visualizer.rs     AudioSource trait + SimulatedSource + the four renderers (spectrum / mirrored /
+                  waveform / circular) as pure fns. > **One file, not `viz/{source,dsp,render}.rs`**:
+                  the tap half of the source never existed, because 1.5 could not find a way to tap
+                  Spotify's process alone, so there is no dsp layer to separate out yet. Split it when
+                  8.3 lands a real tap and there is a real second implementation to separate from.
 lyrics.rs          LRCLIB client + LRC parser + "current line for position"
 config.rs          load/save/defaults/migrate ~/.config/trak/config.toml
 web/  (A)          auth.rs (PKCE, loopback server), api.rs (rspotify wrapper), token.rs (keychain/file)

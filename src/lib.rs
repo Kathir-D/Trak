@@ -13,6 +13,7 @@ pub mod lyrics;
 pub mod player;
 pub mod sonar;
 pub mod tui;
+pub mod visualizer;
 
 #[cfg(test)]
 mod testutil;
