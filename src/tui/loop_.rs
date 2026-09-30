@@ -355,6 +355,10 @@ fn char_for(k: KeyEvent) -> Option<char> {
         KeyCode::Enter => Some('\n'),
         KeyCode::Tab if k.modifiers.contains(KeyModifiers::SHIFT) => Some('Z'),
         KeyCode::Tab => Some('\t'),
+        // The escape character itself, so `update` can bind it as a real key
+        // rather than the loop growing a special case for it (SPEC §4: `esc`
+        // closes the overlay).
+        KeyCode::Esc => Some('\x1b'),
         KeyCode::Left => Some('h'),
         KeyCode::Right => Some('l'),
         KeyCode::Down => Some('j'),
@@ -444,6 +448,16 @@ mod tests {
         assert_eq!(char_for(key(KeyCode::Up, KeyModifiers::NONE)), Some('k'));
     }
 
+    /// SPEC §4: `esc` closes the overlay, so the loop has to hand it to `update`
+    /// as the character it binds.
+    #[test]
+    fn the_escape_key_reaches_update() {
+        assert_eq!(
+            char_for(key(KeyCode::Esc, KeyModifiers::NONE)),
+            Some('\x1b')
+        );
+    }
+
     /// Acting on a release as well as a press would double every keypress.
     #[test]
     fn key_release_events_are_ignored() {
@@ -463,7 +477,7 @@ mod tests {
     #[test]
     fn a_key_trak_has_no_binding_for_is_ignored() {
         assert_eq!(char_for(key(KeyCode::F(5), KeyModifiers::NONE)), None);
-        assert_eq!(char_for(key(KeyCode::Esc, KeyModifiers::NONE)), None);
+        assert_eq!(char_for(key(KeyCode::Home, KeyModifiers::NONE)), None);
     }
 
     #[test]

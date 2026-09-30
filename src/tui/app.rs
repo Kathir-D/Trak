@@ -954,6 +954,21 @@ mod tests {
         assert!(!app.show_help);
     }
 
+    /// SPEC §4: `esc` closes the overlay, and is inert everywhere else.
+    #[test]
+    fn esc_closes_the_overlay_and_is_inert_elsewhere() {
+        let (app, _) = press(with_track(), '?');
+        assert!(app.show_help);
+        let (app, cmds) = press(app, '\x1b');
+        assert!(!app.show_help, "esc closes it");
+        assert!(cmds.is_empty(), "and fires nothing behind it");
+
+        let (app, cmds) = press(with_track(), '\x1b');
+        assert!(cmds.is_empty());
+        assert!(!app.should_quit, "esc must not quit");
+        assert_eq!(app.tab, Tab::History, "esc must not change anything");
+    }
+
     #[test]
     fn q_still_quits_from_the_help_overlay() {
         let (app, _) = press(with_track(), '?');
@@ -1058,6 +1073,80 @@ mod tests {
         let (app, cmds) = press(app, 'c');
         assert!(cmds.is_empty());
         assert!(app.toast.is_none());
+    }
+
+    /// Everything about the app that a keypress could change.
+    ///
+    /// A struct rather than a tuple: std only derives `Debug` and `PartialEq`
+    /// for tuples up to twelve elements, and comparing three or four fields is
+    /// how a test ends up passing while a key quietly starts doing something.
+    /// **A new state field belongs in here.**
+    #[derive(Debug, PartialEq)]
+    struct Fingerprint {
+        loaded: bool,
+        tab: Tab,
+        history: usize,
+        cursor: usize,
+        cursor_moved: bool,
+        help: bool,
+        user_volume: Option<u8>,
+        read_volume: u8,
+        volume_hidden: bool,
+        muted: bool,
+        pre_mute_volume: u8,
+        repeat: RepeatMode,
+        busy: bool,
+        toast: bool,
+        quit: bool,
+        poll_due: bool,
+        read_at: bool,
+    }
+
+    fn fingerprint(app: &App) -> Fingerprint {
+        Fingerprint {
+            loaded: app.state.is_some(),
+            tab: app.tab,
+            history: app.history.len(),
+            cursor: app.history_cursor,
+            cursor_moved: app.cursor_moved,
+            help: app.show_help,
+            user_volume: app.user_volume,
+            read_volume: app.read_volume,
+            volume_hidden: app.volume_hidden,
+            muted: app.muted,
+            pre_mute_volume: app.pre_mute_volume,
+            repeat: app.repeat,
+            busy: app.busy.is_some(),
+            toast: app.toast.is_some(),
+            quit: app.should_quit,
+            poll_due: app.poll_due,
+            read_at: app.last_read.is_some(),
+        }
+    }
+
+    /// Every key the help overlay excuses as "not built yet" must genuinely do
+    /// nothing at all. An excuse that has quietly become false would let a key
+    /// fall out of the help without anything failing.
+    #[test]
+    fn every_excused_key_really_is_inert() {
+        let excused: Vec<String> = crate::tui::render::NOT_YET
+            .iter()
+            .map(|(k, _)| k.to_string())
+            .collect();
+        assert!(!excused.is_empty(), "the excuse list should not be empty");
+        for key in excused {
+            let want = fingerprint(&with_track());
+            let (app, cmds) = press(with_track(), key.chars().next().unwrap());
+            assert!(
+                cmds.is_empty(),
+                "`{key}` is excused as unbound but queued {cmds:?}"
+            );
+            assert_eq!(
+                fingerprint(&app),
+                want,
+                "`{key}` is excused as unbound but changed the app"
+            );
+        }
     }
 
     /// A read-back that says the write took.

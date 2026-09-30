@@ -16,6 +16,41 @@ use crate::player::PlaybackState;
 use crate::tui::app::{App, HISTORY_VIEW, Tab};
 use crate::tui::theme::{Theme, format_time, progress_bar};
 
+/// The keys in SPEC §4 that this build deliberately does not offer, and why.
+///
+/// Shared by the two tests that hold it to account: the help overlay must not
+/// claim a key it does not have, and `update` must genuinely do nothing when one
+/// of them is pressed. `#[cfg(test)]` because it exists only to be checked.
+#[cfg(test)]
+/// The keys in SPEC §4 that this build deliberately does not offer, and why.
+///
+/// The test below fails for any SPEC key that is neither in the help overlay
+/// nor here, so adding a key to the SPEC cannot quietly leave the help stale
+/// — and a key cannot be quietly *claimed* here either, because dropping one
+/// out of this list fails the test too.
+///
+/// The Version A rows (`/`, `f`, `A`, `o`) are filtered out by the version
+/// column, so they are not excused here: a key only needs an excuse if the
+/// SPEC promises it to this build.
+pub(crate) const NOT_YET: &[(&str, &str)] = &[
+    (
+        "4",
+        "Version B has three tabs; 4-6 arrive with the Version A tabs",
+    ),
+    (
+        "5",
+        "Version B has three tabs; 4-6 arrive with the Version A tabs",
+    ),
+    (
+        "6",
+        "Version B has three tabs; 4-6 arrive with the Version A tabs",
+    ),
+    ("a", "the art / visualizer toggle is TODO 4.3"),
+    ("v", "the visualizer style cycle is TODO 4.3"),
+    ("L", "full-screen lyrics is TODO 4.4"),
+    (",", "the settings screen is TODO 5.x"),
+];
+
 /// Which layout the terminal is wide enough for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Layout_ {
@@ -596,18 +631,32 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-fn draw_help(f: &mut Frame, area: Rect) {
+/// How wide the key column of the help overlay is. The keys are what the SPEC
+/// parity test reads, so the width is a constant rather than a `{:>16}` buried
+/// in a format string.
+const HELP_KEY_WIDTH: usize = 16;
+
+/// Where the help overlay sits. Shared with the parity test so it reads the same
+/// cells the renderer wrote instead of guessing.
+fn help_popup(area: Rect) -> Rect {
     // A centred overlay. Clear first so it reads as a panel over the app.
     let w = (area.width * 3 / 5).clamp(30, 60);
     let h = (area.height * 3 / 5).clamp(9, 24);
-    let popup = Rect {
+    Rect {
         x: area.x + (area.width.saturating_sub(w)) / 2,
         y: area.y + (area.height.saturating_sub(h)) / 2,
         width: w,
         height: h,
-    };
+    }
+}
+
+fn draw_help(f: &mut Frame, area: Rect) {
+    let popup = help_popup(area);
     f.render_widget(Clear, popup);
 
+    // Only keys that do something today. Listing one that is not bound yet
+    // would be a small lie, and `the_help_overlay_matches_the_spec_table` fails
+    // the build if a key here is not either bound or listed in SPEC §4.
     let rows = vec![
         line("space", "play / pause"),
         line("n / p", "next / previous track"),
@@ -615,16 +664,14 @@ fn draw_help(f: &mut Frame, area: Rect) {
         line("+ / -", "volume up / down"),
         line("m", "mute (saves the volume you had)"),
         line("s", "toggle shuffle"),
-        line("r", "cycle repeat: off → all → one"),
-        line("a", "toggle album art / visualizer"),
-        line("v", "cycle visualizer style"),
+        line("r", "repeat: off → all → one     R  replay"),
         line("c", "copy the share link"),
-        line("L", "full-screen lyrics"),
-        line(",", "settings"),
-        line("j / k", "move in a list"),
+        line("j / k  ↑ ↓", "move in a list"),
         line("enter", "play the selected item"),
-        line("tab", "next tab     1 2 3  jump to a tab"),
-        line("?", "close this   q  quit"),
+        line("tab", "next tab    shift-tab  back"),
+        line("1 2 3", "jump to a tab"),
+        line("? / esc", "close this"),
+        line("q / ctrl-c", "quit"),
     ];
 
     f.render_widget(
@@ -642,7 +689,10 @@ fn draw_help(f: &mut Frame, area: Rect) {
 
 fn line(k: &str, v: &str) -> Line<'static> {
     Line::from(vec![
-        Span::styled(format!("{k:<16}"), Style::default().fg(Color::Cyan)),
+        Span::styled(
+            format!("{k:<HELP_KEY_WIDTH$}"),
+            Style::default().fg(Color::Cyan),
+        ),
         Span::raw(v.to_string()),
     ])
 }
@@ -786,50 +836,6 @@ mod tests {
     }
 
     /// The help overlay's text, checked as a snapshot. The `?` overlay must list
-    /// the keys SPEC §4 defines, or a user cannot discover them.
-    #[test]
-    fn the_help_overlay_lists_every_key_the_spec_defines() {
-        let backend = ratatui::backend::TestBackend::new(100, 30);
-        let mut term = ratatui::Terminal::new(backend).unwrap();
-        let mut app = app_at(100, 30);
-        app.show_help = true;
-        let theme = Theme::default();
-        term.draw(|f| draw(f, &app, &theme)).unwrap();
-
-        let buf = term.backend().buffer().clone();
-        let text = (0..30)
-            .map(|y| {
-                (0..100)
-                    .map(|x| buf[(x, y)].symbol().to_string())
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        for key in [
-            "space",
-            "n / p",
-            "h / l",
-            "+ / -",
-            "m",
-            "shuffle",
-            "repeat",
-            "art",
-            "visualizer",
-            "copy",
-            "lyrics",
-            "settings",
-            "move in a list",
-            "selected item",
-            "tab",
-            "quit",
-        ] {
-            assert!(
-                text.contains(key),
-                "the help overlay is missing {key:?}:\n{text}"
-            );
-        }
-    }
 
     #[test]
     fn the_help_overlay_is_centred_and_does_not_fill_the_screen() {
@@ -1074,6 +1080,134 @@ mod tests {
         let text = text_of(&mut term, &app, 100, 30);
         assert!(text.contains("40%"), "{text}");
         assert!(!text.contains("100%"), "not the raw read: {text}");
+    }
+
+    /// Every key the SPEC promises for Version B, read out of the SPEC itself.
+    ///
+    /// Parsed from `docs/SPEC.md` rather than copied into a list, because a
+    /// copied list is a list that goes stale: this is the check that the help
+    /// overlay cannot drift from the table it claims to mirror.
+    fn spec_keys() -> Vec<String> {
+        let spec = include_str!("../../docs/SPEC.md");
+        let section = spec
+            .split_once("\n## 4. Keys")
+            .expect("SPEC §4 exists")
+            .1
+            .split_once("\n## 5.")
+            .expect("SPEC §5 follows §4")
+            .0;
+        let mut keys = Vec::new();
+        for row in section.lines().filter(|l| l.starts_with("|")) {
+            let cells: Vec<&str> = row.trim_matches('|').split("|").map(str::trim).collect();
+            // | key | action | version |
+            if cells.len() != 3 || cells[0] == "Key" || set_contains(cells[0], &["---"]) {
+                continue;
+            }
+            // Only the keys this build promises. The Version A rows are not
+            // trak's problem until Version A exists.
+            if cells[2] != "both" {
+                continue;
+            }
+            for cell in cells[0].split('`') {
+                for token in cell.split('/') {
+                    // `Shift-Tab` is the same key as `Tab`, but `L` is not `l`,
+                    // so the shift- prefix goes and the case stays.
+                    let t = token.trim();
+                    let t = t
+                        .strip_prefix("shift-")
+                        .or_else(|| t.strip_prefix("Shift-"))
+                        .unwrap_or(t);
+                    // A range like 1–6 only needs its ends checked. The en dash
+                    // only; a plain '-' is part of the key (`ctrl-c`).
+                    for end in t.split('\u{2013}') {
+                        let e = end.trim();
+                        if !e.is_empty() {
+                            keys.push(e.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        keys.sort();
+        keys.dedup();
+        keys
+    }
+
+    fn set_contains(haystack: &str, needles: &[&str]) -> bool {
+        needles.iter().all(|n| haystack.contains(n))
+    }
+
+    /// SPEC §4 says "keep this table and the `?` help overlay in sync". This is
+    /// that check, and it reads the SPEC rather than a copy of it.
+    #[test]
+    fn the_help_overlay_matches_the_spec_table() {
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        let mut app = app_at(100, 30);
+        app.show_help = true;
+        // Tall enough for every row the overlay has.
+        let theme = Theme::default();
+        term.draw(|f| draw(f, &app, &theme)).unwrap();
+        // Only the overlay's key column, never the whole screen: a one-letter
+        // key such as `m` appears somewhere on any 100x30 screen, so searching
+        // the whole buffer would pass no matter what the overlay said.
+        let popup = help_popup(Rect {
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 30,
+        });
+        let buf = term.backend().buffer().clone();
+        let rows: Vec<String> = (0..popup.height)
+            .map(|i| {
+                let y = popup.y + 1 + i as u16;
+                (popup.x + 1..popup.x + 1 + HELP_KEY_WIDTH as u16)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .filter(|row| !row.trim().is_empty())
+            .collect();
+        // Whitespace tokens, compared exactly and case-sensitively. A substring
+        // search is not good enough in either direction: `a` is "inside" `tab`,
+        // and `L` is not the same key as `l`.
+        let help: Vec<&str> = rows
+            .iter()
+            .flat_map(|r| r.split_whitespace())
+            .filter(|t| *t != "/")
+            .collect();
+
+        let spec = spec_keys();
+        assert!(
+            spec.len() > 10,
+            "the SPEC table should have parsed: {spec:?}"
+        );
+        let mut missing = Vec::new();
+        let help_lower: Vec<String> = help.iter().map(|t| t.to_lowercase()).collect();
+        for key in spec {
+            let in_help = help_lower.contains(&key.to_lowercase());
+            let excused = NOT_YET.iter().any(|(k, _)| *k == key);
+            assert!(
+                in_help || excused,
+                "SPEC §4 lists `{key}` and the help overlay neither offers it nor \
+                 excuses it in NOT_YET"
+            );
+            if !in_help {
+                missing.push(key);
+            }
+        }
+        assert!(
+            missing.iter().all(|k| NOT_YET.iter().any(|(n, _)| n == k)),
+            "every missing key must be excused: {missing:?}"
+        );
+
+        // And the other direction: an excuse for a key the help *does* offer is
+        // stale, and would let a key quietly fall out of the help later.
+        for (key, why) in NOT_YET {
+            assert!(
+                !help.contains(key),
+                "NOT_YET excuses `{key}` ({why}) but the help overlay offers it"
+            );
+        }
     }
 
     fn text_of(
