@@ -1027,18 +1027,15 @@ fn draw_visualizer_placeholder(f: &mut Frame, hole: Rect, app: &App, theme: &The
     let bars = (hole.width as usize / 2).max(1);
     let mut row: Vec<Span> = Vec::with_capacity(bars);
     for i in 0..bars {
-        let phase = (i as f64 / bars as f64 * std::f64::consts::TAU)
-            + app.interpolated_position() * 0.6;
+        let phase =
+            (i as f64 / bars as f64 * std::f64::consts::TAU) + app.interpolated_position() * 0.6;
         let height = 0.5 + 0.5 * phase.sin().abs();
         let cells = ((height * (hole.height - 2) as f64).round() as usize).clamp(1, 4);
         let colour = ramp[(i * 2) % ramp.len()];
         let top = hole.y + ((hole.height as usize - cells) / 2) as u16;
         for c in 0..cells {
             f.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    "▄",
-                    Style::default().fg(colour),
-                ))),
+                Paragraph::new(Line::from(Span::styled("▄", Style::default().fg(colour)))),
                 Rect {
                     x: hole.x + (i * 2) as u16,
                     y: top + c as u16,
@@ -1394,6 +1391,36 @@ fn or_dash(s: &str) -> String {
 }
 
 fn draw_footer(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+    // The headless hint is more important than a key list when the Dock icon is
+    // gone, so it takes the left-hand space and the keys move right (TODO 4.7).
+    if let Some(hint) = app.headless.hint()
+        && area.width as usize > hint.chars().count() + 24
+    {
+        let left = Rect {
+            width: (area.width as usize - 1 - hint.chars().count()) as u16,
+            ..area
+        };
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                format!(" {hint} "),
+                Style::default()
+                    .fg(theme.palette.primary)
+                    .add_modifier(Modifier::ITALIC),
+            ))),
+            left,
+        );
+        let rest = Rect {
+            x: area.x + left.width,
+            width: area.width - left.width,
+            ..area
+        };
+        draw_footer_keys(f, rest, app, theme);
+        return;
+    }
+    draw_footer_keys(f, area, app, theme);
+}
+
+fn draw_footer_keys(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     if !app.settings.show_key_hints {
         f.render_widget(Paragraph::new(""), area);
         return;

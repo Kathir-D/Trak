@@ -121,6 +121,10 @@ pub enum Event {
         uri: Option<String>,
         result: Result<crate::lyrics::Lyrics, crate::lyrics::LyricsError>,
     },
+    /// Sonar's state file was re-read (TODO 4.6).
+    Sonar(crate::sonar::SonarState),
+    /// headless-spotify answered, once (TODO 4.7).
+    Headless(crate::headless::Headless),
     /// An image finished downloading and decoding, or failed to.
     Art {
         url: String,
@@ -418,6 +422,10 @@ pub struct App {
     pub art_enabled: bool,
     /// The lyrics tab (TODO 6.1).
     pub lyrics: LyricsState,
+    /// What Sonar is doing right now (TODO 4.6).
+    pub sonar: crate::sonar::SonarState,
+    /// What headless-spotify is doing right now (TODO 4.7).
+    pub headless: crate::headless::Headless,
     pub should_quit: bool,
     /// Local clock, for the header.
     pub clock: String,
@@ -460,6 +468,10 @@ impl App {
             settings: Settings::default(),
             art: ArtState::default(),
             art_enabled: true,
+            // What Sonar is doing right now (TODO 4.6).
+            sonar: crate::sonar::SonarState::unknown(),
+            // What headless-spotify is doing right now (TODO 4.7).
+            headless: crate::headless::Headless::unknown(),
             lyrics: LyricsState::default(),
             should_quit: false,
             clock: String::new(),
@@ -658,6 +670,19 @@ pub fn update(mut app: App, event: Event) -> Updated {
             }
         }
 
+        Event::Sonar(state) => {
+            // A duck that has just begun is the one thing the user needs to know
+            // about before reaching for the volume keys, which are refused while
+            // it lasts.
+            let was_ducking = app.sonar.is_ducking();
+            app.sonar = state;
+            if app.sonar.is_ducking() && !was_ducking {
+                app.toast(app.sonar.notice());
+            }
+        }
+
+        Event::Headless(h) => app.headless = h,
+
         Event::Art { url, result } => {
             // The slot is free whatever happened. Clearing this only on the happy
             // path is how one skipped track leaves art permanently disabled: a
@@ -783,6 +808,14 @@ fn handle_key(app: &mut App, c: char, commands: &mut Vec<PlayerCommand>) {
         }
         'k' => {
             app.select(app.history_cursor.saturating_sub(1));
+        }
+        // COMPAT rule 3: while Sonar is fading the volume, trak must not write a
+        // volume at all. A relative step is computed from the *live* volume, which
+        // mid-fade is Sonar's own value, so even pressing `-` would write a
+        // mid-fade number back. The mute is named in the rule and is disabled
+        // with the rest.
+        _ if app.sonar.is_ducking() && matches!(c, 'm' | '+' | '=' | '-' | '_') => {
+            app.toast("Sonar is adjusting the volume — leave it alone for a moment");
         }
         _ if busy => {}
         // `enter` plays the selected history row (SPEC §4). It only means that on
@@ -1848,6 +1881,131 @@ mod tests {
             path: path.into(),
             image: image::DynamicImage::ImageRgb8(image::RgbImage::new(2, 2)),
         }
+    }
+
+    /// COMPAT rule 3 in one test: while Sonar owns the volume, trak must not
+    /// write one. Not the mute alone -- a *relative* step is computed from the
+    /// live volume, which mid-fade is Sonar's own value, so pressing `-` would
+    /// write a mid-fade number back and trak would be undoing Sonar's fade.
+    #[test]
+    fn no_volume_write_while_sonar_is_ducking() {
+        for key in ['m', '+', '=', '-', '_'] {
+            let mut app = with_track();
+            app.sonar = crate::sonar::SonarState {
+                phase: crate::sonar::SonarPhase::Ducking,
+                since: None,
+            };
+            let want = fingerprint(&app);
+            let (app, cmds) = press(app, key);
+            assert!(cmds.is_empty(), "{key:?} wrote to Spotify during a duck");
+            assert!(!app.muted, "{key:?} muted anyway");
+            assert_eq!(app.user_volume, want.user_volume, "{key:?} moved the meter");
+            assert_eq!(app.read_volume, want.read_volume, "{key:?}");
+            assert_eq!(app.tab, want.tab, "{key:?}");
+            // The one thing it may do is say why it did nothing: a key that
+            // silently stops working looks like a broken keyboard.
+            let t = app.toast.as_ref().expect("an explanation");
+            assert!(!t.text.contains('\n'), "{t:?}");
+            assert!(t.text.contains("Sonar"), "{t:?}");
+        }
+    }
+
+    /// The moment a duck begins is worth saying out loud, because it is the
+    /// reason the volume keys just stopped working -- and it says it once, not
+    /// every time the state file is re-read.
+    #[test]
+    fn a_new_duck_says_so_once() {
+        let app = with_track();
+        assert!(!app.sonar.is_ducking());
+        let ducking = crate::sonar::SonarState {
+            phase: crate::sonar::SonarPhase::Ducking,
+            since: None,
+        };
+        let app = update(app, Event::Sonar(ducking)).app;
+        assert!(app.sonar.is_ducking());
+        let t = app.toast.as_ref().expect("a toast");
+        assert!(!t.text.contains('\n'), "{t:?}");
+
+        let toasts_before = fingerprint(&app).toast;
+        let app = update(app, Event::Sonar(ducking)).app;
+        assert_eq!(
+            fingerprint(&app).toast,
+            toasts_before,
+            "and it does not nag"
+        );
+    }
+
+    /// A duck that has finished must hand the volume keys back.
+    #[test]
+    fn the_volume_comes_back_when_the_duck_ends() {
+        let mut app = with_track();
+        app.sonar = crate::sonar::SonarState {
+            phase: crate::sonar::SonarPhase::Ducking,
+            since: None,
+        };
+        let (app, cmds) = press(app, '-');
+        assert!(cmds.is_empty(), "refused while ducking");
+        let app = update(
+            app,
+            Event::Sonar(crate::sonar::SonarState {
+                phase: crate::sonar::SonarPhase::Idle,
+                since: None,
+            }),
+        )
+        .app;
+        let (_, cmds) = press(app, '-');
+        assert_eq!(
+            cmds,
+            vec![PlayerCommand::VolumeStep(-10)],
+            "and it works again"
+        );
+    }
+
+    /// Nothing here is fatal. A missing Sonar, a missing headless-spotify, a
+    /// state file from a future version: all of it is a state trak shows.
+    #[test]
+    fn a_missing_sibling_is_not_an_error() {
+        let app = with_track();
+        assert!(!app.sonar.is_known());
+        assert!(app.sonar.badge().is_none());
+        assert!(!app.headless.installed);
+        assert!(app.headless.badge().is_none());
+        assert!(app.headless.hint().is_none());
+    }
+
+    /// A sibling that *is* there gets a badge, and the badge is not a guess.
+    #[test]
+    fn a_present_sibling_gets_a_badge() {
+        let mut app = with_track();
+        app.sonar = crate::sonar::SonarState {
+            phase: crate::sonar::SonarPhase::Idle,
+            since: None,
+        };
+        assert_eq!(app.sonar.badge(), Some("sonar"));
+        app.headless = crate::headless::Headless {
+            installed: true,
+            hidden: Some(true),
+            running: Some(true),
+            schema: Some(1),
+        };
+        assert_eq!(app.headless.badge(), Some("headless"));
+        assert!(app.headless.hint().is_some());
+    }
+
+    /// The badge says a sibling is there; the notice says what it is doing. Only
+    /// one of those belongs on one line of a header.
+    #[test]
+    fn the_badge_is_short_and_the_notice_is_one_line() {
+        let s = crate::sonar::SonarState {
+            phase: crate::sonar::SonarPhase::Resuming,
+            since: None,
+        };
+        let badge = s.badge().expect("a badge");
+        assert!(
+            badge.chars().count() <= 8,
+            "a badge has to fit a header: {badge:?}"
+        );
+        assert!(!s.notice().contains('\n'), "{}", s.notice());
     }
 
     /// A read-back that says the write took.

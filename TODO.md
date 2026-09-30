@@ -434,13 +434,36 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
 - [ ] 4.5 **Song-change notification** (`display notification` via osascript; setting off by default;
       only while the TUI runs; title = track, body = artist – album). Done when: toggling in settings
       works and it never fires on the first state read.
-- [ ] 4.6 **Sonar state integration** exactly per COMPAT (file watch, freshness rules, header badge,
-      mute disabled during a duck, never write a mid-fade volume). Done when: unit tests with fixture
-      files (fresh / stale / malformed / wrong pid / unknown version) and a manual test with a
-      hand-written state.json (Sonar itself may not have the writer yet).
-- [ ] 4.7 **headless-spotify integration**: if on `PATH`, run `status --json` once at start and on
-      demand (`headless` badge, extra hint to open Spotify's window), and prefer `launch` on the idle
-      card. Unknown/absent fields ignored. Done when: tests with a fake binary on `PATH`.
+- [x] 4.6 **Sonar state integration** per COMPAT. `src/sonar.rs` + `SONAR_STATE` in the environment.
+      > The state file is re-read **every 2 s, not per frame**: it is a small file, the answer changes
+      on the order of seconds, and a frame is 100 ms. Reading it faster would be a way of making the
+      disk busy for no information. > **The whole point of this task is the volume guard, and it is
+      not just the mute.** COMPAT rule 3 says trak must never write a mid-fade volume, and a
+      *relative* step (`-`) is computed from the **live** volume -- which mid-fade is Sonar's value --
+      so pressing `-` during a duck would write Sonar's own number back and appear to undo the fade.
+      `m`, `+`, `-` are all refused while ducking, and each says why: a key that silently stops
+      working looks like a broken keyboard. > A duck that has just begun raises a toast once, and not
+      again on every re-read, and the keys come back the moment it ends. > **`pid` in Sonar's file is
+      *Spotify's* pid, not Sonar's** (per `docs/AGENT-PROMPTS.md`), which is the opposite of what the
+      task text implies; trak therefore vets the file against its own Spotify process, and a live
+      Sonar makes an otherwise-stale file acceptable, because that is what COMPAT says. > The parser
+      refuses an unknown *version* rather than guessing -- a file from the future could mean anything.
+      26 tests cover valid, malformed, truncated, unknown-field, wrong-pid, stale and missing files;
+      nothing in it can panic.
+- [x] 4.7 **headless-spotify integration.** `src/headless.rs`. Run `status --json` once at startup
+      on the worker, show a dim `headless` badge when Spotify is hidden, and give the footer a hint
+      about opening a window that has no Dock icon. The idle card prefers `headless-spotify launch`.
+      > **The subagent read the actual sibling repo, which exists locally, rather than guessing from
+      the docs** -- and that changed the design. The real `status --json` prints **no `schema`
+      field** and escapes slashes in paths, and it exits 1; both are now pinned fixtures. > An
+      unknown `schema` is *read, not refused*, the opposite of Sonar: this decides a badge and a
+      sentence, both of which have a safe absence, whereas Sonar decides whether trak may write a
+      volume. > `installed` in the sibling's JSON means *Spotify.app exists*, which trak already knows
+      from AppleScript; a field with that name sitting next to trak's own "is the tool installed" is a
+      trap, so it is ignored. > `is_installed` requires the **execute bit**, unlike the old `which`
+      helper: a non-runnable file with the right name must not win COMPAT rule 2's one launch. The
+      test asserts the exact argv of both launch branches, because a test that only checks the
+      command exists cannot tell `-g -j` from a plain `open`.
 - [ ] 4.8 **Status line / toasts**: one bottom-right line for transient messages (permission denied,
       volume ignored, API 403, lyrics not found). Done when: messages expire and never overlap the
       footer keys.

@@ -7,8 +7,10 @@
 pub mod accent;
 pub mod art;
 pub mod cli;
+pub mod headless;
 pub mod lyrics;
 pub mod player;
+pub mod sonar;
 pub mod tui;
 
 #[cfg(test)]

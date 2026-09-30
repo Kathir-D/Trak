@@ -47,6 +47,11 @@ const INPUT_WAIT: Duration = Duration::from_millis(100);
 /// time; fast enough that the title does not feel stuck.
 const SCROLL_EVERY: Duration = Duration::from_millis(220);
 
+/// How often Sonar's state file is re-read. COMPAT's test matrix calls this
+/// "fresh, every few seconds"; a duck lasts a few seconds, so anything slower
+/// would show the badge after the duck had finished.
+const SONAR_EVERY: Duration = Duration::from_secs(2);
+
 const POLL_PLAYING: Duration = Duration::from_secs(3);
 const POLL_IDLE: Duration = Duration::from_secs(5);
 
@@ -174,6 +179,10 @@ fn event_loop<B: ratatui::backend::Backend>(
     // before any event is read (TODO 1.4's ordering requirement).
     //
     let mut images = crate::tui::render::Images::from_terminal();
+    // Ask headless-spotify once, at startup, rather than per frame (TODO 4.7).
+    if crate::headless::is_installed() && !worker.is_busy() {
+        worker.submit(|_| WorkerResult::Headless(headless_status()));
+    }
     let mut scrubbing = false;
 
     // `None` means "never polled", which is due straight away. Starting the
@@ -182,6 +191,7 @@ fn event_loop<B: ratatui::backend::Backend>(
     let mut last_poll: Option<Instant> = None;
     let mut last_clock_tick = Instant::now();
     let mut last_scroll = Duration::ZERO;
+    let mut last_sonar = Instant::now() - SONAR_EVERY;
 
     loop {
         // 1. Finished writes first, so a completed command is applied before the
@@ -204,6 +214,8 @@ fn event_loop<B: ratatui::backend::Backend>(
                     next
                 }
                 WorkerResult::Command(outcome) => update(app, Event::CommandDone(outcome)).app,
+                WorkerResult::Sonar(state) => update(app, Event::Sonar(state)).app,
+                WorkerResult::Headless(h) => update(app, Event::Headless(h)).app,
                 WorkerResult::Lyrics { uri, result } => {
                     update(app, Event::Lyrics { uri, result }).app
                 }
@@ -298,6 +310,15 @@ fn event_loop<B: ratatui::backend::Backend>(
                     WorkerResult::Lyrics { uri, result }
                 });
             }
+        }
+
+        // 2d. Sonar's state file (TODO 4.6). Read on a timer rather than per
+        //     frame: it is a small file and the answer changes on the order of
+        //     seconds, while a frame is 100 ms. Reading it more often than that
+        //     would be a way of making the disk busy for no information.
+        if last_sonar.elapsed() >= SONAR_EVERY && !worker.is_busy() {
+            last_sonar = Instant::now();
+            worker.submit(|_| WorkerResult::Sonar(sonar_state()));
         }
 
         // 3. Terminal input. The wait is a run-loop pump, not a sleep:
@@ -467,6 +488,64 @@ fn run_one(
     }
 }
 
+/// Read Sonar's state file, or `unknown` when there is nothing usable there.
+///
+/// `read_state_trusted` is what trak uses: it vets the file against *this* Spotify's
+/// process id, so a state file left behind by a Sonar that has since been
+/// restarted -- or by one watching a different Spotify -- is not believed.
+/// Run `headless-spotify status --json` once and read the answer.
+///
+/// A failure is not an error worth a toast: the sibling may be absent, may be a
+/// version trak does not understand, or may simply not be running. `unknown()`
+/// is the right answer to all three.
+fn headless_status() -> crate::headless::Headless {
+    let out = std::process::Command::new(crate::headless::PROGRAM)
+        .args(["status", "--json"])
+        .output();
+    match out {
+        Ok(o) => crate::headless::Headless::from_status(true, &o.stdout),
+        Err(_) => crate::headless::Headless::unknown(),
+    }
+}
+
+fn sonar_state() -> crate::sonar::SonarState {
+    let path = sonar_state_path();
+    let spotify_pid = std::process::Command::new("/bin/pgrep")
+        .args(["-x", "Spotify"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .next()
+                .and_then(|l| l.trim().parse().ok())
+        });
+    crate::sonar::read_state_trusted(
+        &path,
+        crate::sonar::Trust::Checked {
+            spotify_pid,
+            sonar_alive: true,
+        },
+    )
+}
+
+/// Where Sonar is expected to leave its state. `SONAR_STATE` wins so the tests
+/// and a second instance can point it elsewhere; COMPAT's documented default is
+/// under the user's Library.
+fn sonar_state_path() -> std::path::PathBuf {
+    if let Some(p) = std::env::var_os("SONAR_STATE") {
+        return std::path::PathBuf::from(p);
+    }
+    let home = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default();
+    home.join("Library")
+        .join("Application Support")
+        .join("Sonar")
+        .join("state.json")
+}
+
 /// Turn a crossterm mouse event into one the app can act on.
 ///
 /// The hit test uses the regions the previous frame recorded. While a drag is in
@@ -557,25 +636,13 @@ fn char_for(k: KeyEvent) -> Option<char> {
 /// bounce. This is the single launch trak ever performs (COMPAT rule 2), and only
 /// because the user pressed enter on the idle card.
 fn launch_spotify() -> Result<(), crate::player::PlayerError> {
-    let mut cmd = if which("headless-spotify").is_some() {
-        let mut c = std::process::Command::new("headless-spotify");
-        c.arg("launch");
-        c
-    } else {
-        let mut c = std::process::Command::new("open");
-        c.args(["-g", "-j", "-a", "Spotify"]);
-        c
-    };
-    cmd.spawn()
+    // `headless-spotify launch` when the sibling is installed (TODO 4.7): it is
+    // the supported way to start Spotify without a Dock icon, and COMPAT rule 2
+    // asks for exactly that.
+    crate::headless::launch_command()
+        .spawn()
         .map(|_| ())
         .map_err(|e| crate::player::PlayerError::Script(format!("launching Spotify: {e}")))
-}
-
-fn which(program: &str) -> Option<std::path::PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|d| d.join(program))
-        .find(|p| p.is_file())
 }
 
 fn clock_string() -> String {
@@ -672,38 +739,24 @@ mod tests {
         assert!(c.is_empty() || (c.len() == 5 && c.contains(':')), "{c:?}");
     }
 
+    /// COMPAT rule 2: the launch must not focus Spotify or bounce the Dock. This
+    /// asserts the exact argv of *both* branches, because a test that only checks
+    /// "the command exists" cannot tell a correct `-g -j` from a plain `open`.
     #[test]
-    fn which_finds_a_program_on_this_path() {
-        assert!(which("sh").is_some(), "sh is always on PATH");
-        assert!(which("definitely-not-a-real-program-xyz").is_none());
+    fn the_launch_command_is_backgrounded_in_both_branches() {
+        let headless = crate::headless::launch_command_for(true);
+        assert_eq!(headless.get_program(), "headless-spotify");
+        assert_eq!(collect_args(&headless), vec!["launch"]);
+
+        let plain = crate::headless::launch_command_for(false);
+        assert_eq!(plain.get_program(), "open");
+        assert_eq!(collect_args(&plain), vec!["-g", "-j", "-a", "Spotify"]);
     }
 
-    /// The launch must not focus Spotify or bounce the Dock (COMPAT rule 2).
-    #[test]
-    fn the_launch_command_is_backgrounded() {
-        // Building it without running it: `which` picks headless-spotify when it
-        // is on PATH, which is what the owner's machine has.
-        let headless = which("headless-spotify").is_some();
-        let cmd = if headless {
-            let mut c = std::process::Command::new("headless-spotify");
-            c.arg("launch");
-            c
-        } else {
-            let mut c = std::process::Command::new("open");
-            c.args(["-g", "-j", "-a", "Spotify"]);
-            c
-        };
-        let rendered = format!("{:?}", cmd);
-        if !headless {
-            assert!(
-                rendered.contains("-g"),
-                "must not focus Spotify: {rendered}"
-            );
-            assert!(
-                rendered.contains("-j"),
-                "must not hide other apps: {rendered}"
-            );
-        }
+    fn collect_args(cmd: &std::process::Command) -> Vec<String> {
+        cmd.get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
     }
 
     #[test]

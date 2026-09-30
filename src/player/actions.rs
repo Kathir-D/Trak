@@ -196,6 +196,11 @@ pub enum WorkerResult {
         url: String,
         result: Result<LoadedArt, crate::art::ArtError>,
     },
+    /// Sonar's state file was re-read. Not a Spotify job; it runs here so the
+    /// render loop never waits on the filesystem (TODO 4.6).
+    Sonar(crate::sonar::SonarState),
+    /// headless-spotify answered (TODO 4.7).
+    Headless(crate::headless::Headless),
     /// A lyrics lookup finished. Not a Spotify job either; it runs here so the
     /// render loop never waits on a network round trip (TODO 6.1).
     Lyrics {
