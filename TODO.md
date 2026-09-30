@@ -211,7 +211,9 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
       search term is rejected before it reaches AppleScript. > The search half still needs 7.12; it
       prints the Client ID steps and exits 2, which shpotify also did. `album|artist|list` subcommands
       are still to add — they only make sense with search.
-- [ ] 2.8 **`trak` (no args) → TUI entry; `trak config` → settings entry.** > Bare `trak` exists
+- [x] 2.8 **`trak` (no args) → TUI entry; `trak config` → settings entry.** > Handled **before the
+      player is built**, so it works on a machine where Spotify is not installed and so it cannot
+      launch Spotify (COMPAT rule 2). > With no terminal it prints the settings as TOML and exits 2. > Bare `trak` exists
       and says what does work, exit 2. Replaced by the TUI in 3.1. `trak config` not added yet.
 - [ ] 2.9 Update README "Usage" with real, copy-pasted output of each command. Done when: matches
       the binary.
@@ -498,16 +500,26 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
       touch a real config. > `[volume] control` is in the file although SPEC §8's block does not show
       it: 4.4 pins it there, and without it the setting would be unreachable from disk. SPEC §8 wants
       that line added.
-- [ ] 5.2 **Settings screen** (`trak config` and `,` overlay): grouped checklist (Display, Theme,
-      Visualizer, Input, Notifications, Spotify API) with `space` toggle, `←/→` change enum values,
-      `enter` for text/guided flows, `q`/`esc` save-and-close; live preview: changes apply instantly to
-      the running TUI. `trak config` standalone shows the same screen full-size. Done when: every key in
-      SPEC §8 is editable, invalid states are impossible from the UI, snapshot tests of the screen.
-- [ ] 5.3 **Wire every setting** to real behaviour (art/mode, progress, volume, popularity, hints,
-      clock, side pane, default tab, border, accent, art protocol, viz style/source, mouse, steps,
-      notifications, lyrics). Done when: a test per setting flips it and asserts the render changes.
-- [ ] 5.4 **First-run experience**: no config → defaults, a one-time dismissible hint about
-      `trak config` and the optional Client ID. Done when: first launch in a clean `HOME` shows it once.
+- [x] 5.2 **Settings screen** (`trak config` and `,` overlay). > **One screen, two ways in** — `,
+      ` and `trak config` are the same code, so a setting cannot be editable in one and not the
+      other. > The theme is rebuilt from the settings every frame rather than once at startup; that is
+      the only reason the border and the accent can be previewed live. > **The Client ID field has no
+      shape validation on purpose**: 7.3 owns that, and a validation rule written twice would be one
+      of them wrong. > 35 tests, one of which parses the TOML block out of `docs/SPEC.md` at test
+      time, so the check cannot pass by falling behind a copied list.
+- [x] 5.3 **Wire every setting** to real behaviour. > `Settings` now carries a field for **every** key
+      in SPEC §8, so wiring a setting is reading a field rather than threading a new argument through
+      the renderer. The border moved from a `rounded: bool` to the real enum, because `double` and
+      `none` are in the file too and a bool cannot say which was meant. > `show_progress` and
+      `show_popularity` were being carried with **nothing reading them** — the exact failure a config
+      layer grows quietly — so both are wired and asserted; popularity turns off the `▰▱` meter row
+      and not the number, because a person who dislikes a bar still wants the fact. > `input.mouse`
+      has no render effect by nature — it is decided once in `run()` — so it is covered there.
+- [x] 5.4 **First-run experience**. > First run is **a fact to remember, not a state to model**: the
+      loader already distinguishes a missing file from an empty one, and the hint is never saved — the
+      config file appearing at all is what makes the next launch a *not*-first run. > The hint
+      outranks the key list in the footer, because a user who has never run trak does not know it has
+      a settings screen and the key list cannot say so in the space it has.
 
 ---
 
