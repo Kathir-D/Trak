@@ -23,6 +23,7 @@ use crossterm::terminal::{
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
+use crate::art;
 use crate::player::AppleScriptPlayer;
 use crate::player::PlayerCommand;
 use crate::player::actions::Worker;
@@ -163,6 +164,9 @@ fn event_loop<B: ratatui::backend::Backend>(
     // in progress. A drag keeps seeking after the pointer leaves the bar, which
     // is the whole point of being able to scrub.
     let mut regions = crate::tui::render::Regions::default();
+    // The protocol is negotiated once, here, after the alternate screen is up and
+    // before any event is read (TODO 1.4's ordering requirement).
+    let mut images = crate::tui::render::Images::from_terminal();
     let mut scrubbing = false;
 
     // `None` means "never polled", which is due straight away. Starting the
@@ -192,6 +196,7 @@ fn event_loop<B: ratatui::backend::Backend>(
                     next
                 }
                 WorkerResult::Command(outcome) => update(app, Event::CommandDone(outcome)).app,
+                WorkerResult::Art { url, result } => update(app, Event::Art { url, result }).app,
             };
         }
 
@@ -220,6 +225,25 @@ fn event_loop<B: ratatui::backend::Backend>(
             }
         }
 
+        // 2b. Album art (TODO 4.1). One download per track, on the worker, and
+        //     only when the track has artwork we do not already have. The cache
+        //     makes a rewind through the history free.
+        if app.art_enabled
+            && let Some(track) = app.track()
+            && let Some(url) = track.artwork_url.clone()
+            && app.art.wants(track)
+            && app.art.begin(&url)
+        {
+            worker.submit(move |_| {
+                use crate::player::actions::{LoadedArt, WorkerResult};
+                // The result is a decoded image or a reason, not a PlayerError: a
+                // missing cover is not a Spotify failure.
+                let result = art::fetch(&url)
+                    .and_then(|path| art::decode(&path).map(|image| LoadedArt { path, image }));
+                WorkerResult::Art { url, result }
+            });
+        }
+
         // 3. Terminal input. The wait is a run-loop pump, not a sleep:
         //    NSDistributedNotificationCenter only delivers on the main run loop,
         //    so a plain sleep here would leave the observer registered and silent.
@@ -243,6 +267,10 @@ fn event_loop<B: ratatui::backend::Backend>(
                 }
                 Ok(TermEvent::Resize(_, _)) => {
                     app = update(app, Event::Resize).app;
+                    // Kitty's encoded state is only valid for the size it was
+                    // encoded at, so a resize has to throw it away or the art is
+                    // drawn at the wrong size until the next track.
+                    images.invalidate();
                     // ratatui handles the buffer; a redraw picks the new size up.
                 }
                 Ok(_) => {}
@@ -290,7 +318,7 @@ fn event_loop<B: ratatui::backend::Backend>(
         //    click is resolved against what is on screen now, not against a
         //    second copy of the layout.
         if terminal
-            .draw(|f| crate::tui::render::draw_with(f, &app, &theme, &mut regions))
+            .draw(|f| crate::tui::render::draw_with(f, &app, &theme, &mut regions, &mut images))
             .is_err()
         {
             break;

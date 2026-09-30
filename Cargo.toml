@@ -28,6 +28,9 @@ objc2-foundation = { version = "0.3", features = [
     "NSArray",
     "NSObject",
 ] }
+ratatui-image = "8.0.1"
+image = "0.25"
+ureq = "3"
 # Spotify is read and written through AppleScript only, so osascript is the
 # transport. objc2-foundation carries the PlaybackStateChanged observer
 # (docs/APPLESCRIPT.md section 9): a plain CLI can receive it, no bundle needed.
@@ -40,6 +43,7 @@ name = "notify-probe"
 
 [dev-dependencies]
 assert_cmd = "2"
+filetime = "0.2.29"
 predicates = "3"
 unicode-width = "0.2"
 

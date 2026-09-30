@@ -14,8 +14,6 @@ Run `cargo license` (or read `Cargo.lock`) before each release to check nothing 
 
 | Crate / project | License | Used for |
 | --- | --- | --- |
-| [ratatui](https://github.com/ratatui/ratatui) | MIT | TUI rendering |
-| [ratatui-image](https://github.com/ratatui/ratatui-image) | MIT | Album art (Kitty / iTerm2 / sixel / half-blocks) |
 | [cavacore](https://github.com/TornaxO7/cavacore-rs) (port of [cava](https://github.com/karlstav/cava)) | MIT | Visualizer spectrum maths |
 | [cidre](https://github.com/yury/cidre) | MIT | Core Audio process tap (real-audio visualizer) |
 | [rspotify](https://github.com/ramsayleung/rspotify) | MIT | Spotify Web API + PKCE (Version A) |
@@ -31,7 +29,23 @@ Run `cargo license` (or read `Cargo.lock`) before each release to check nothing 
 
 ## Dependencies
 
-_None yet._
+All MIT or MIT/Apache-2.0, checked against the crate metadata in `Cargo.lock`.
+
+| Crate | Version | License | Used for | Note |
+| --- | --- | --- | --- | --- |
+| [clap](https://github.com/clap-rs/clap) | 4 | MIT/Apache-2.0 | CLI parsing | the derive API, so the shpotify commands are one table |
+| [thiserror](https://github.com/dtolnay/thiserror) | 2 | MIT/Apache-2.0 | typed errors | the binary edge is the only place `anyhow` would be allowed |
+| [ratatui](https://github.com/ratatui/ratatui) | 0.29 | MIT | TUI rendering | |
+| [crossterm](https://github.com/crossterm-rs/crossterm) | 0.28 | MIT | terminal and input events | mouse capture, bracketed paste, the run-loop-safe read |
+| [objc2](https://github.com/madsmtm/objc2) | 0.6 | MIT | Objective-C runtime | the `PlaybackStateChanged` observer; no app bundle needed |
+| [objc2-foundation](https://github.com/madsmtm/objc2) | 0.3 | MIT | Foundation bindings | only the notification classes, nothing else |
+| [ratatui-image](https://github.com/ratatui/ratatui-image) | 8.0.1 | MIT | Album art | Kitty / iTerm2 / sixel / half-blocks; `Picker::from_query_stdio()` also reports the cell size (TODO 1.4) |
+| [image](https://github.com/image-rs/image) | 0.25 | MIT/Apache-2.0 | decoding cover art | `load_from_memory`, not `open`: the cache is called `.img` and the format is read from the content |
+| [ureq](https://github.com/algesten/ureq) | 3 | MIT/Apache-2.0 | fetching cover art | blocking, on the worker thread; default features are rustls + webpki-roots, so there is no OpenSSL and no system trust store to go stale |
+| [assert_cmd](https://github.com/assert-rs/assert_cmd) | 2 | MIT/Apache-2.0 | CLI tests (dev only) | |
+| [predicates](https://github.com/assert-rs/predicates) | 3 | MIT/Apache-2.0 | CLI test assertions (dev only) | |
+| [unicode-width](https://github.com/unicode-rs/unicode-width) | 0.2 | MIT/Apache-2.0 | asserting bars are one cell per character (dev only) | |
+| [filetime](https://github.com/alsdy/filetime) | 0.2 | MIT/Apache-2.0 | setting file times in the cache-pruning test (dev only) | |
 
 ## Verified during the Phase 1 spikes
 

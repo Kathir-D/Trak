@@ -350,11 +350,36 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
 
 ## Phase 4 — Now Playing richness and integrations
 
-- [ ] 4.1 **Album art**: fetch `artwork url` (cache on disk under `~/Library/Caches/trak/`, bounded),
-      decode, render with `ratatui-image` (auto protocol; half-blocks fallback), correct aspect ratio
-      in cells, re-render on resize, never block the UI. Needs: 1.4. Done when: art shows for the
-      current track in the owner's terminal and in half-blocks mode; snapshot test of the half-block
-      path; art disappears cleanly when the terminal shrinks below the breakpoint.
+- [x] 4.1 **Album art.** `src/art.rs` (fetch + cache) and `render::Images` (protocol + draw).
+      > **Cache**: `~/Library/Caches/trak/<fnv>.img`, bounded to 64 files by mtime, written to a
+      `.part` file and renamed so a killed fetch cannot leave a half-written file the length check
+      would accept. **A zero-length file counts as a miss** — otherwise one interrupted download is a
+      permanent hole. Only `https` on Spotify's own image hosts is fetched; a 10 s timeout and an
+      8 MB cap are enforced on the *bytes read*, not on `Content-Length`, because a response can lie
+      about its length. > **Decode from the bytes, not with `image::open`.** That infers the format
+      from the file extension, and the cache is deliberately `.img` because it will not claim to
+      know whether Spotify sent a JPEG or a WebP. This was a real bug found by running it: a 239 KB
+      640×640 JPEG downloaded correctly, cached correctly, and then never drew, because the decode
+      failed on the extension. > **Fetch and decode both happen on the player worker**; only the
+      resize happens on the render thread. > **The image is sized in cells and scaled here, not left
+      to the protocol**: `ImageSource::new` derives its size from the image's *natural* size and the
+      font size and then never grows it, so a 32×32 cover with a (10, 20) cell became 3×2 cells and
+      a 12×6 pane drew it at 3×2. Scaling to the target rectangle first is the only way to fill it.
+      > **A resize invalidates the encoded image**, because Kitty's state is only valid for the size it
+      was encoded at. > A **stale download is dropped and always clears `loading`** — clearing it only
+      on the happy path is how one skipped track disables art for the rest of the session. The cover is
+      matched to the track by URL, so a slow download never shows the previous album under a new title.
+      > **Art needs a hole of at least 6×4 cells**; below that the space goes to the text, which is
+      how it "disappears cleanly" on a small terminal. > The **placeholder is no longer a framed box**:
+      the Now Playing pane's own border already frames the hole, and a second frame drawn as text
+      landed a whole art-height below the space it was reserving. While a cover is downloading the
+      hole says `fetching cover…`; otherwise it is empty. > **Verified live**: with a pty answering
+      the Kitty query exactly as cmux does, trak sent **25 chunks totalling 73 984 bytes = 136×136×4**
+      — a raw RGBA image at `f=32`, sized 17×8 cells from cmux's 8×17 px cell — and **zero**
+      half-block glyphs. Without an answer it fell back to half-blocks and drew 64 `▀` cells. The
+      half-block path is snapshot-tested: a red/blue fixture must put both colours in the buffer.
+      > **[owner]** still worth one look: real cover art in a real cmux window, since a pty can only
+      prove the bytes trak sends, not how they land on screen.
 - [ ] 4.2 **Accent colour from art**: dominant colour (skip near-black/near-white, bias saturation),
       applied to borders, progress, highlights; smooth-ish change on track change; settings `accent =
       art|green|terminal`. Ensure contrast on dark *and* light terminals. Done when: three modes

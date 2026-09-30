@@ -164,6 +164,17 @@ impl CommandOutcome {
     }
 }
 
+/// A fetched and decoded cover.
+///
+/// Both halves come back from the worker: the path because that is what is
+/// cached and what identifies the image, and the decoded pixels so the render
+/// thread does no decoding (TODO 4.1, "never block the UI thread").
+#[derive(Debug, Clone, PartialEq)]
+pub struct LoadedArt {
+    pub path: std::path::PathBuf,
+    pub image: image::DynamicImage,
+}
+
 /// What a finished job reports back.
 ///
 /// A poll and a write are different shapes: a poll's whole point is the state it
@@ -178,6 +189,13 @@ pub enum WorkerResult {
     ReadFailed(PlayerError),
     /// A write finished.
     Command(CommandOutcome),
+    /// An album-art download finished. Not a player job at all, but it runs on
+    /// the same worker so the render loop never waits on the network
+    /// (TODO 4.1).
+    Art {
+        url: String,
+        result: Result<LoadedArt, crate::art::ArtError>,
+    },
 }
 
 /// Runs player writes on a worker thread so the render loop never blocks.

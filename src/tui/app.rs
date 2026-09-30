@@ -11,6 +11,7 @@
 
 use std::time::Instant;
 
+use crate::art;
 use crate::player::actions::{CommandOutcome, PlayerCommand};
 use crate::player::{PlaybackState, PlayerState, RepeatMode, TrackInfo};
 
@@ -33,6 +34,66 @@ pub const HISTORY_VIEW: usize = 200;
 /// How long a toast stays up (TODO 4.8).
 const TOAST_SECS: f64 = 2.5;
 
+/// The album art for the current track, and where it got to.
+///
+/// The download happens on a worker (TODO 4.1: never block the UI thread), so
+/// this is a small state machine: nothing, asked for, on its way, here, or
+/// failed. A failure is a placeholder, not a crash: the art is the first thing to
+/// go when something is wrong, and the dashboard must survive losing it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ArtState {
+    /// The URL of the track now playing, or of the one being fetched.
+    pub url: Option<String>,
+    /// The fetched and decoded cover, ready to draw.
+    pub loaded: Option<crate::player::actions::LoadedArt>,
+    /// A fetch is in flight for `url`.
+    pub loading: bool,
+    /// Why the last fetch did not produce an image. One line, shown once.
+    pub error: Option<String>,
+}
+
+impl ArtState {
+    /// The image to draw, if it is the one for the track that is playing.
+    ///
+    /// Matching on the URL is what stops the wrong cover flashing up while a new
+    /// one downloads: the old file is still on disk, and drawing it under a new
+    /// title is worse than drawing nothing.
+    pub fn drawable(&self, track: &TrackInfo) -> Option<&crate::player::actions::LoadedArt> {
+        let want = track.artwork_url.as_deref();
+        match (&self.url, &self.loaded, want) {
+            (Some(have), Some(art), Some(want)) if have == want => Some(art),
+            _ => None,
+        }
+    }
+
+    /// Mark a fetch as started for `url`. Returns false if one is already
+    /// running, which is what keeps a skip from queueing a download per poll.
+    pub fn begin(&mut self, url: &str) -> bool {
+        if self.loading {
+            return false;
+        }
+        self.url = Some(url.to_string());
+        self.loading = true;
+        self.error = None;
+        true
+    }
+
+    /// True when the art for the current track still has to be fetched, or is
+    /// being fetched. The loop asks this after every read.
+    pub fn wants(&self, track: &TrackInfo) -> bool {
+        let Some(want) = track.artwork_url.as_deref() else {
+            return false;
+        };
+        if self.loading {
+            return false;
+        }
+        match &self.url {
+            Some(have) if have == want => self.loaded.is_none(),
+            _ => true,
+        }
+    }
+}
+
 /// Everything the loop can tell the app.
 #[derive(Debug, Clone)]
 pub enum Event {
@@ -48,6 +109,11 @@ pub enum Event {
     NotRunning,
     /// Local tick, for interpolating the bar and expiring toasts.
     Tick,
+    /// An image finished downloading and decoding, or failed to.
+    Art {
+        url: String,
+        result: Result<crate::player::actions::LoadedArt, art::ArtError>,
+    },
     /// A click, a drag or a wheel, already resolved to what was hit.
     ///
     /// The loop hit-tests against the regions the last frame recorded, so a click
@@ -209,6 +275,10 @@ pub struct App {
     pub busy: Option<PlayerCommand>,
     pub toast: Option<Toast>,
     pub settings: Settings,
+    /// TODO 4.1: the album art and its fetch state.
+    pub art: ArtState,
+    /// `[display] art` (SPEC §8). Off means never fetch, never draw.
+    pub art_enabled: bool,
     pub should_quit: bool,
     /// Local clock, for the header.
     pub clock: String,
@@ -243,6 +313,8 @@ impl App {
             busy: None,
             toast: None,
             settings: Settings::default(),
+            art: ArtState::default(),
+            art_enabled: true,
             should_quit: false,
             clock: String::new(),
             poll_due: true,
@@ -412,6 +484,35 @@ pub fn update(mut app: App, event: Event) -> Updated {
                 app.viewport = rows;
                 // A resize can leave the view scrolled past the end.
                 app.scroll_to_cursor();
+            }
+        }
+
+        Event::Art { url, result } => {
+            // The slot is free whatever happened. Clearing this only on the happy
+            // path is how one skipped track leaves art permanently disabled: a
+            // result for a track we have left is dropped, and if it did not also
+            // clear `loading` then `begin` would refuse every later request.
+            app.art.loading = false;
+            // A fetch for a track the user has already skipped past: drop it,
+            // rather than showing a cover for the wrong song.
+            let still_wanted = app
+                .track()
+                .and_then(|t| t.artwork_url.as_deref())
+                .is_some_and(|want| want == url);
+            if still_wanted {
+                match result {
+                    Ok(loaded) => {
+                        app.art.loaded = Some(loaded);
+                        app.art.error = None;
+                    }
+                    // One line, and the placeholder stays (TODO 4.1: art
+                    // disappears cleanly; it must never take the dashboard with
+                    // it).
+                    Err(e) => {
+                        app.art.loaded = None;
+                        app.art.error = Some(e.notice());
+                    }
+                }
             }
         }
 
@@ -1556,6 +1657,15 @@ mod tests {
         }
     }
 
+    /// A stand-in for a fetched cover. The pixels never matter to the app; only
+    /// the identity does.
+    fn loaded_art(path: &str) -> crate::player::actions::LoadedArt {
+        crate::player::actions::LoadedArt {
+            path: path.into(),
+            image: image::DynamicImage::ImageRgb8(image::RgbImage::new(2, 2)),
+        }
+    }
+
     /// A read-back that says the write took.
     fn landed(what: &'static str, wanted: i64) -> WriteOutcome {
         WriteOutcome {
@@ -1722,6 +1832,139 @@ mod tests {
         )
         .app;
         assert_eq!(app.meter_volume(), 100, "not 105");
+    }
+
+    /// The cover must belong to the track that is playing, or a slow download
+    /// shows the previous album under the new title.
+    #[test]
+    fn an_image_is_only_drawn_for_its_own_track() {
+        let mut app = with_track();
+        let url = app.track().unwrap().artwork_url.clone().unwrap();
+        assert!(app.art.wants(app.track().unwrap()), "nothing fetched yet");
+        assert!(app.art.drawable(app.track().unwrap()).is_none());
+
+        let art = loaded_art("/tmp/art.img");
+        assert!(app.art.begin(&url), "the fetch is started for this track");
+        let app = step(
+            app,
+            Event::Art {
+                url,
+                result: Ok(art.clone()),
+            },
+        )
+        .0;
+        assert_eq!(app.art.drawable(app.track().unwrap()), Some(&art));
+
+        // Now the track changes. The old file is still on disk, and drawing it
+        // under the new title would be a lie.
+        let mut other = playing();
+        other.track.artwork_url = Some("https://i.scdn.co/image/other".into());
+        let app = step(app, Event::PlayerState(Box::new(other))).0;
+        assert!(
+            app.art.drawable(app.track().unwrap()).is_none(),
+            "the previous cover must not be shown under the new title"
+        );
+        assert!(
+            app.art.wants(app.track().unwrap()),
+            "and the new one is wanted"
+        );
+    }
+
+    /// A fetch for a track the user skipped past is dropped, cover and all.
+    #[test]
+    fn an_image_for_a_track_we_have_left_is_ignored() {
+        let app = with_track();
+        let stale = "https://i.scdn.co/image/stale".to_string();
+        let mut other = playing();
+        other.track.artwork_url = Some(stale.clone());
+        let mut app = step(app, Event::PlayerState(Box::new(other))).0;
+        assert!(app.art.begin(&stale));
+
+        let app = step(
+            app,
+            Event::Art {
+                url: "https://i.scdn.co/image/something-else".into(),
+                result: Ok(loaded_art("/tmp/other.img")),
+            },
+        )
+        .0;
+        assert!(
+            app.art.loaded.is_none(),
+            "a stale download must not be adopted"
+        );
+        assert!(
+            app.art.wants(app.track().unwrap()),
+            "the real one is still owed"
+        );
+    }
+
+    /// A failed fetch is a placeholder and one line, never a crash.
+    #[test]
+    fn a_failed_fetch_keeps_the_dashboard_and_explains_itself() {
+        let app = with_track();
+        let url = app.track().unwrap().artwork_url.clone().unwrap();
+        let app = step(
+            app,
+            Event::Art {
+                url,
+                result: Err(crate::art::ArtError::Unreachable),
+            },
+        )
+        .0;
+        assert!(!app.art.loading);
+        assert!(app.art.loaded.is_none());
+        let e = app.art.error.as_deref().expect("a reason");
+        assert!(!e.contains('\n'), "one line: {e:?}");
+        assert!(app.track().is_some(), "the rest of the dashboard is intact");
+        // And it is not retried in a loop: `wants` stays true only because there
+        // is no image, and the loop asks once per read.
+        assert!(app.art.wants(app.track().unwrap()));
+    }
+
+    /// A track with no artwork asks for nothing. An advert is the common case.
+    #[test]
+    fn a_track_with_no_artwork_asks_for_nothing() {
+        let ad = parse(&fixture("playing_ad.txt")).unwrap();
+        let app = update(App::new(), Event::PlayerState(Box::new(ad))).app;
+        assert!(!app.art.wants(app.track().unwrap()));
+    }
+
+    /// A fetch in flight is not started twice, or a skip would queue a download
+    /// per poll.
+    #[test]
+    fn a_fetch_in_flight_is_not_started_again() {
+        let mut app = with_track();
+        let url = app.track().unwrap().artwork_url.clone().unwrap();
+        // The loop asks `wants`, then `begin`, then submits the download.
+        assert!(app.art.wants(app.track().unwrap()));
+        assert!(app.art.begin(&url), "the first request goes through");
+        assert!(app.art.loading);
+        assert!(!app.art.wants(app.track().unwrap()), "already in flight");
+
+        let app = step(
+            app,
+            Event::Art {
+                url,
+                result: Ok(loaded_art("/a")),
+            },
+        )
+        .0;
+        assert!(!app.art.loading);
+        assert!(
+            !app.art.wants(app.track().unwrap()),
+            "already have it, so no second download"
+        );
+
+        // A new track is a new download, and the old cover is not adopted.
+        let mut other = playing();
+        other.track.artwork_url = Some("https://i.scdn.co/image/two".into());
+        let mut app = step(app, Event::PlayerState(Box::new(other))).0;
+        assert!(app.art.wants(app.track().unwrap()));
+        assert!(app.art.begin("https://i.scdn.co/image/two"));
+        assert!(
+            !app.art.begin("https://i.scdn.co/image/two"),
+            "one download per track, not one per poll"
+        );
     }
 
     #[test]

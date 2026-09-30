@@ -6,11 +6,18 @@
 //! matters most: **borders must never wrap or tear**, so every pane is built from
 //! `Rect`s that are shrunk before anything is drawn inside them.
 
+use std::path::{Path, PathBuf};
+
+use image::{DynamicImage, Rgba};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
+use ratatui_image::Resize;
+use ratatui_image::StatefulImage;
+use ratatui_image::picker::Picker;
+use ratatui_image::protocol::{ImageSource, StatefulProtocol, StatefulProtocolType};
 
 use crate::player::PlaybackState;
 use crate::tui::app::{App, Control, HISTORY_VIEW, Hit, Tab};
@@ -81,8 +88,213 @@ pub fn layout_for(width: u16, height: u16) -> Layout_ {
     Layout_::Compact
 }
 
+/// The smallest art hole worth drawing. Below this the cover is a stripe, so the
+/// space goes to the text instead (TODO 4.1: art disappears cleanly when the
+/// terminal shrinks).
+const MIN_ART: (u16, u16) = (6, 4);
+
+/// The cell size halfblocks assume when nothing has queried the terminal.
+/// TODO 1.4 measured (10, 20) in Terminal.app; a cell is about twice as tall as
+/// it is wide, which is the assumption the art sizing rests on.
+const HALF_BLOCK_CELL: (u16, u16) = (10, 20);
+
 /// How much room the Now Playing pane gets, as a share of the width.
 const NOW_PLAYING_SHARE: u16 = 46;
+
+/// The image state, and the protocol it draws with.
+///
+/// `ratatui-image` keeps per-protocol state — for Kitty, which part of the image
+/// it has already sent — so it cannot be rebuilt every frame, or the image is
+/// re-sent from the top on each redraw. It lives here, owned by the event loop,
+/// and the renderer only says which image goes in which rectangle.
+///
+/// The protocol is chosen **once**, at startup, by querying the terminal
+/// (TODO 1.4: `Picker::from_query_stdio()` picked Kitty in cmux unattended, and
+/// halfblocks in Terminal.app). Asking per frame would write an escape sequence
+/// to the terminal on every draw.
+pub struct Images {
+    backend: Backend,
+    protocol: Option<StatefulProtocol>,
+    /// Which image the current protocol was built for: the path and the area.
+    /// A resize changes the area, and Kitty's state is only valid for the size it
+    /// was encoded at, so both invalidate it.
+    built_for: Option<(PathBuf, u16, u16)>,
+}
+
+/// How the protocol is obtained. A picker in production, because only the
+/// terminal knows what it can draw; a fixed one in tests, because a test has no
+/// terminal to ask and `Picker`'s fields are private.
+enum Backend {
+    Picker(Box<Picker>),
+    Fixed {
+        font: (u16, u16),
+        kind: StatefulProtocolType,
+    },
+}
+
+impl Default for Images {
+    fn default() -> Self {
+        Self {
+            backend: Backend::Fixed {
+                font: (10, 10),
+                kind: StatefulProtocolType::Halfblocks(
+                    ratatui_image::protocol::halfblocks::Halfblocks::default(),
+                ),
+            },
+            protocol: None,
+            built_for: None,
+        }
+    }
+}
+
+impl Images {
+    /// Ask the terminal what it supports. Never fails: a terminal that answers
+    /// nothing gets halfblocks, which every terminal can draw.
+    ///
+    /// Writes and reads stdio, so it must be called after entering the alternate
+    /// screen and before reading events (TODO 1.4).
+    pub fn from_terminal() -> Self {
+        match Picker::from_query_stdio() {
+            Ok(picker) => Self {
+                backend: Backend::Picker(Box::new(picker)),
+                protocol: None,
+                built_for: None,
+            },
+            Err(e) => {
+                // Not an error worth a toast: halfblocks always work, and the art
+                // is a bonus, not the point of trak.
+                let _ = e;
+                Self::default()
+            }
+        }
+    }
+
+    /// A halfblocks renderer with a known cell size, for tests.
+    pub fn halfblocks(cell: (u16, u16)) -> Self {
+        Self {
+            backend: Backend::Fixed {
+                font: cell,
+                kind: StatefulProtocolType::Halfblocks(
+                    ratatui_image::protocol::halfblocks::Halfblocks::default(),
+                ),
+            },
+            protocol: None,
+            built_for: None,
+        }
+    }
+
+    /// The cell size the terminal reports. TODO 1.4 measured (8, 17) in cmux and
+    /// (10, 20) in Terminal.app; the art has to be sized in cells, not pixels.
+    pub fn cell_size(&self) -> (u16, u16) {
+        self.backend.cell()
+    }
+
+    /// The cell rectangle the image occupies inside `area`, keeping the aspect
+    /// ratio. Square cover art in a wide, short pane is letterboxed, not
+    /// stretched: a wide rectangle of a square album is not what anybody wants to
+    /// look at.
+    ///
+    /// The arithmetic is in *cells*, because that is what the terminal draws in.
+    /// A cell is roughly twice as tall as it is wide, so a square image is half
+    /// as many cells across as it is down — which is why the same cover fills a
+    /// tall narrow pane and letterboxes in a wide one.
+    pub fn fit(&self, area: Rect, image: &DynamicImage) -> Rect {
+        let (cw, ch) = self.cell_size();
+        if cw == 0 || ch == 0 || area.width == 0 || area.height == 0 {
+            return Rect::new(area.x, area.y, 0, 0);
+        }
+        let iw = f64::from(image.width().max(1));
+        let ih = f64::from(image.height().max(1));
+        // Cells across per cell down, for this image in this terminal.
+        let ratio = (iw / ih) / (f64::from(cw) / f64::from(ch));
+        // The largest rectangle of that shape that fits.
+        let scale = (f64::from(area.width) / ratio).min(f64::from(area.height));
+        let w = ((ratio * scale).round() as u16).clamp(1, area.width);
+        let h = ((scale).round() as u16).clamp(1, area.height);
+        Rect::new(
+            area.x + (area.width - w) / 2,
+            area.y + (area.height - h) / 2,
+            w,
+            h,
+        )
+    }
+
+    /// Draw `image` into `area`, encoding it first if this is a new image or a
+    /// new size.
+    pub fn draw(&mut self, f: &mut Frame, path: &Path, image: &DynamicImage, area: Rect) {
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+        let sized = self.fit(area, image);
+        let key = (path.to_path_buf(), sized.width, sized.height);
+        if self.built_for.as_ref() != Some(&key) {
+            self.protocol = Some(self.backend.protocol_for(image.clone(), sized));
+            self.built_for = Some(key);
+        }
+        let Some(protocol) = &mut self.protocol else {
+            return;
+        };
+        f.render_stateful_widget(
+            StatefulImage::new().resize(Resize::Fit(None)),
+            sized,
+            protocol,
+        );
+    }
+
+    /// Forget the encoded image. A resize has to call this: Kitty's state is
+    /// only valid for the size it was encoded at, and drawing it at a new size
+    /// either tears or draws nothing at all.
+    pub fn invalidate(&mut self) {
+        self.protocol = None;
+        self.built_for = None;
+    }
+
+    /// Whether an image has been encoded and is ready to draw.
+    pub fn is_ready(&self) -> bool {
+        self.protocol.is_some()
+    }
+}
+
+impl Backend {
+    fn cell(&self) -> (u16, u16) {
+        match self {
+            Backend::Fixed { font, .. } => *font,
+            // 1.4's measurement in cmux, which is the terminal trak is used in.
+            Backend::Picker(_) => (8, 17),
+        }
+    }
+
+    /// Build a protocol whose image is already the right size for `area`.
+    ///
+    /// The resizing is done **here** rather than left to the protocol because
+    /// `ImageSource::new` derives its size from the image's *natural* size and
+    /// the font size, and then never grows it: a 32×32 cover with a (10, 20) cell
+    /// becomes 3×2 cells, and asking for a 12×6 area draws it at 3×2. Scaling to
+    /// the target rectangle first is the only way to fill the pane.
+    fn protocol_for(&self, image: DynamicImage, area: Rect) -> StatefulProtocol {
+        let (cw, ch) = self.cell();
+        let want_w = (area.width * cw).max(1);
+        let want_h = (area.height * ch).max(1);
+        let scaled = image::imageops::resize(
+            &image.to_rgba8(),
+            u32::from(want_w),
+            u32::from(want_h),
+            ratatui_image::FilterType::Triangle,
+        );
+        let scaled = DynamicImage::ImageRgba8(scaled);
+        match self {
+            // The picker builds its own source from the image, so handing it the
+            // pre-scaled pixels is enough: the area it reports is the one we
+            // asked for.
+            Backend::Picker(p) => p.new_resize_protocol(scaled),
+            Backend::Fixed { font, kind } => StatefulProtocol::new(
+                ImageSource::new(scaled, *font, Rgba([0, 0, 0, 0])),
+                *font,
+                kind.clone(),
+            ),
+        }
+    }
+}
 
 /// Where the clickable things ended up, recorded as they were drawn.
 ///
@@ -94,6 +306,8 @@ const NOW_PLAYING_SHARE: u16 = 46;
 pub struct Regions {
     /// Each tab label, in tab order.
     pub tabs: Vec<(Rect, usize)>,
+    /// The album-art area, when the pane is big enough to show one.
+    pub art: Option<Rect>,
     /// The history list's body, when the History tab is showing.
     pub history: Option<Rect>,
     /// The progress bar.
@@ -142,6 +356,12 @@ impl Regions {
         Some(Hit::HistoryRow(i))
     }
 
+    /// The album-art area, for the renderer and for the tests. Not a click
+    /// target: art is not interactive.
+    pub fn art_area(&self) -> Option<Rect> {
+        self.art
+    }
+
     /// How many history rows are on screen, for the app to scroll by.
     pub fn history_rows(&self) -> Option<usize> {
         self.history.map(|r| (r.height as usize).saturating_sub(2))
@@ -150,11 +370,18 @@ impl Regions {
 
 pub fn draw(f: &mut Frame, app: &App, theme: &Theme) {
     let mut regions = Regions::default();
-    draw_with(f, app, theme, &mut regions);
+    let mut images = Images::halfblocks(HALF_BLOCK_CELL);
+    draw_with(f, app, theme, &mut regions, &mut images);
 }
 
 /// The renderer, and where everything clickable ended up.
-pub fn draw_with(f: &mut Frame, app: &App, theme: &Theme, regions: &mut Regions) {
+pub fn draw_with(
+    f: &mut Frame,
+    app: &App,
+    theme: &Theme,
+    regions: &mut Regions,
+    images: &mut Images,
+) {
     *regions = Regions::default();
     let area = f.area();
     let (w, h) = (area.width, area.height);
@@ -174,9 +401,9 @@ pub fn draw_with(f: &mut Frame, app: &App, theme: &Theme, regions: &mut Regions)
 
     match layout_for(w, h) {
         Layout_::TooSmall => draw_too_small(f, area, app),
-        Layout_::Compact => draw_compact(f, area, app, theme, regions),
-        Layout_::Stacked => draw_stacked(f, area, app, theme, regions),
-        Layout_::Wide => draw_wide(f, area, app, theme, regions),
+        Layout_::Compact => draw_compact(f, area, app, theme, regions, images),
+        Layout_::Stacked => draw_stacked(f, area, app, theme, regions, images),
+        Layout_::Wide => draw_wide(f, area, app, theme, regions, images),
     }
 
     if app.show_help {
@@ -221,7 +448,14 @@ fn pane_block<'a>(title: &'a str, theme: &Theme, focused: bool) -> Block<'a> {
     b
 }
 
-fn draw_wide(f: &mut Frame, area: Rect, app: &App, theme: &Theme, regions: &mut Regions) {
+fn draw_wide(
+    f: &mut Frame,
+    area: Rect,
+    app: &App,
+    theme: &Theme,
+    regions: &mut Regions,
+    images: &mut Images,
+) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -234,7 +468,7 @@ fn draw_wide(f: &mut Frame, area: Rect, app: &App, theme: &Theme, regions: &mut 
     draw_header(f, rows[0], app, theme);
 
     if !app.settings.side_pane {
-        draw_now_playing(f, rows[1], app, theme, regions);
+        draw_now_playing(f, rows[1], app, theme, regions, images);
     } else {
         let cols = Layout::default()
             .direction(Direction::Horizontal)
@@ -243,14 +477,21 @@ fn draw_wide(f: &mut Frame, area: Rect, app: &App, theme: &Theme, regions: &mut 
                 Constraint::Min(24),
             ])
             .split(rows[1]);
-        draw_now_playing(f, cols[0], app, theme, regions);
+        draw_now_playing(f, cols[0], app, theme, regions, images);
         draw_tabs(f, cols[1], app, theme, regions);
     }
 
     draw_footer(f, rows[2], app, theme);
 }
 
-fn draw_stacked(f: &mut Frame, area: Rect, app: &App, theme: &Theme, regions: &mut Regions) {
+fn draw_stacked(
+    f: &mut Frame,
+    area: Rect,
+    app: &App,
+    theme: &Theme,
+    regions: &mut Regions,
+    images: &mut Images,
+) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -262,7 +503,7 @@ fn draw_stacked(f: &mut Frame, area: Rect, app: &App, theme: &Theme, regions: &m
         .split(area);
 
     draw_header(f, rows[0], app, theme);
-    draw_now_playing(f, rows[1], app, theme, regions);
+    draw_now_playing(f, rows[1], app, theme, regions, images);
     if app.settings.side_pane {
         draw_tabs(f, rows[2], app, theme, regions);
     }
@@ -317,7 +558,14 @@ fn draw_idle_card(f: &mut Frame, area: Rect, theme: &Theme) {
     );
 }
 
-fn draw_compact(f: &mut Frame, area: Rect, app: &App, theme: &Theme, regions: &mut Regions) {
+fn draw_compact(
+    f: &mut Frame,
+    area: Rect,
+    app: &App,
+    theme: &Theme,
+    regions: &mut Regions,
+    _images: &mut Images,
+) {
     let Some(track) = app.track() else {
         draw_too_small(f, area, app);
         return;
@@ -403,7 +651,14 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let _ = theme;
 }
 
-fn draw_now_playing(f: &mut Frame, area: Rect, app: &App, theme: &Theme, regions: &mut Regions) {
+fn draw_now_playing(
+    f: &mut Frame,
+    area: Rect,
+    app: &App,
+    theme: &Theme,
+    regions: &mut Regions,
+    images: &mut Images,
+) {
     let block = pane_block(" Now Playing ", theme, true);
     f.render_widget(block.clone(), area);
     let body = inner(area);
@@ -423,27 +678,68 @@ fn draw_now_playing(f: &mut Frame, area: Rect, app: &App, theme: &Theme, regions
     let dur = track.duration_secs() as f64;
     let mut lines: Vec<Line> = Vec::new();
 
-    // The art or visualizer pane (TODO 4.1) owns the top third. It is drawn as a
-    // framed placeholder so the layout reads as designed rather than unfinished,
-    // and so the renderer already reserves exactly the space art will need.
+    // The art pane owns the top third. The space is reserved whether or not there
+    // is an image to put in it, so a slow download does not make the layout jump,
+    // and so the art has exactly the room it needs the moment it arrives.
     let art_h = (body.height / 3).clamp(4, 12) as usize;
-    if art_h >= 4 {
-        lines.push(Line::from(Span::styled(
-            format!("┌{}┐", "─".repeat(body.width.saturating_sub(2) as usize)),
-            Theme::dim(),
-        )));
-        let rows = art_h.saturating_sub(3);
-        for _ in 0..rows {
-            lines.push(Line::from(Span::styled(
-                format!("│{}│", " ".repeat(body.width.saturating_sub(2) as usize)),
-                Theme::dim(),
-            )));
+    let mut art_lines = 0u16;
+    let hole_w = body.width.saturating_sub(2);
+    let hole_h = art_h.saturating_sub(2) as u16;
+    // Below this the cover is a stripe, so the space goes to the text instead
+    // (TODO 4.1: art disappears cleanly when the terminal shrinks).
+    if art_h >= 4 && hole_w >= MIN_ART.0 && hole_h >= MIN_ART.1 {
+        let frame = Rect {
+            x: body.x,
+            y: body.y,
+            width: body.width,
+            height: art_h as u16,
+        };
+        let hole = Rect {
+            x: frame.x + 1,
+            y: frame.y + 1,
+            width: hole_w,
+            height: hole_h,
+        };
+        let drawn = app
+            .art_enabled
+            .then(|| app.art.drawable(track))
+            .flatten()
+            .filter(|_| app.art.error.is_none());
+        if let Some(art) = drawn {
+            // Clear the hole first: halfblocks paint colours into cells, and
+            // whatever was in them would show through.
+            f.render_widget(ratatui::widgets::Clear, hole);
+            images.draw(f, &art.path, &art.image, hole);
+        } else if app.art.loading {
+            // The one thing worth saying while there is no cover: that one is on
+            // its way. Anything else here is decoration, and the hole is already
+            // framed by the pane's own border.
+            let hint = Rect { height: 1, ..hole };
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled("fetching cover…", Theme::dim())))
+                    .alignment(Alignment::Center),
+                hint,
+            );
         }
-        lines.push(Line::from(Span::styled(
-            format!("└{}┘", "─".repeat(body.width.saturating_sub(2) as usize)),
-            Theme::dim(),
-        )));
+        regions.art = Some(hole);
+        // A blank line under the art, so the title block is not flush against
+        // the frame.
         lines.push(Line::from(""));
+        art_lines = art_h as u16 + 1;
+    }
+
+    // Everything below the art is drawn as text, and the image was drawn straight
+    // into the frame above. Row arithmetic from here on is relative to *this*
+    // rectangle: measuring from `body` would be off by the height of the art on
+    // every frame, which is exactly the bug where the progress bar stops matching
+    // the thing you click.
+    let text_body = Rect {
+        y: body.y + art_lines,
+        height: body.height.saturating_sub(art_lines),
+        ..body
+    };
+    if text_body.height == 0 {
+        return;
     }
 
     if !track.artist.is_empty() {
@@ -460,15 +756,15 @@ fn draw_now_playing(f: &mut Frame, area: Rect, app: &App, theme: &Theme, regions
     // Counted from the lines actually pushed, not re-derived from the layout:
     // the artist and the album lines are conditional, so arithmetic about where
     // the bar "should" be is exactly the kind that goes stale.
-    let bar_row = body.y + lines.len() as u16;
+    let bar_row = text_body.y + lines.len() as u16;
     lines.push(Line::from(Span::styled(
         progress_bar(progress(app), bar_w),
         theme.accent_style(),
     )));
     regions.progress = Some(Rect {
-        x: body.x,
+        x: text_body.x,
         y: bar_row,
-        width: body.width,
+        width: text_body.width,
         height: 1,
     });
     lines.push(Line::from(vec![
@@ -491,7 +787,7 @@ fn draw_now_playing(f: &mut Frame, area: Rect, app: &App, theme: &Theme, regions
         controls.push_str("   ");
         controls.push_str(app.repeat.symbol());
     }
-    let ctl_row = body.y + lines.len() as u16;
+    let ctl_row = text_body.y + lines.len() as u16;
     lines.push(Line::from(controls));
     // The three transport glyphs are the first six cells of that line, two each.
     // Giving each two cells rather than one is deliberate: the exact width of ⏮
@@ -526,12 +822,13 @@ fn draw_now_playing(f: &mut Frame, area: Rect, app: &App, theme: &Theme, regions
         )));
     }
 
-    let shown = lines.len().min(body.height as usize);
-    let _ = art_h;
-    f.render_widget(
-        Paragraph::new(lines.into_iter().take(shown).collect::<Vec<_>>()),
-        body,
-    );
+    let shown = lines.len().min(text_body.height as usize);
+    if text_body.height > 0 && shown > 0 {
+        f.render_widget(
+            Paragraph::new(lines.into_iter().take(shown).collect::<Vec<_>>()),
+            text_body,
+        );
+    }
 }
 
 fn progress(app: &App) -> f64 {
@@ -1362,8 +1659,9 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(w, h);
         let mut term = ratatui::Terminal::new(backend).unwrap();
         let mut regions = Regions::default();
+        let mut images = Images::halfblocks(HALF_BLOCK_CELL);
         let theme = Theme::default();
-        term.draw(|f| draw_with(f, app, &theme, &mut regions))
+        term.draw(|f| draw_with(f, app, &theme, &mut regions, &mut images))
             .unwrap();
         (term.backend().buffer().clone(), regions)
     }
@@ -1562,6 +1860,249 @@ mod tests {
         regions.history = Some(Rect::new(0, 0, 10, 5));
         assert_eq!(regions.hit(0, 2), Some(Hit::HistoryRow(0)));
         assert_eq!(regions.history_rows(), Some(3));
+    }
+
+    /// A small, deterministic image, written to a temporary file so
+    /// `StatefulImage` has something to load. Halfblocks paint background
+    /// colours into cells, so a real gradient is what makes the snapshot mean
+    /// something.
+    /// Red and blue blocks, not a smooth gradient.
+    ///
+    /// A gradient downsamples into a handful of distinct colours and the
+    /// assertion ends up counting noise. Two colours that cannot be confused with
+    /// each other make the test say what it means: the image's *content* reached
+    /// the buffer.
+    fn fixture_image(dir: &Path) -> PathBuf {
+        use image::{Rgb, RgbImage};
+        let mut img = RgbImage::new(32, 32);
+        for (x, y, p) in img.enumerate_pixels_mut() {
+            *p = if (x / 4 + y / 4) % 2 == 0 {
+                Rgb([220, 20, 20])
+            } else {
+                Rgb([20, 20, 220])
+            };
+        }
+        let path = dir.join("fixture.png");
+        img.save(&path).expect("writing the fixture");
+        path
+    }
+
+    /// A temporary directory for one test.
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "trak-render-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        dir
+    }
+
+    /// TODO 4.1's done-when: a snapshot of the half-block path.
+    ///
+    /// Halfblocks are the fallback that every terminal can draw, and the only
+    /// protocol a `TestBackend` can show — Kitty draws by writing escape sequences
+    /// to the terminal, which a buffer cannot show. So this is the only art test
+    /// that can exist at all, and it is the one that matters for Terminal.app.
+    #[test]
+    fn the_half_block_path_actually_draws_the_image() {
+        let dir = temp_dir("art");
+        let path = fixture_image(&dir);
+        let image = crate::art::decode(&path).expect("decoding the fixture");
+
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        let mut app = app_at(100, 30);
+        let url = app.track().unwrap().artwork_url.clone().unwrap();
+        assert!(app.art.begin(&url));
+        let mut next = app.clone();
+        next = update(
+            next,
+            Event::Art {
+                url,
+                result: Ok(crate::player::actions::LoadedArt {
+                    path: path.clone(),
+                    image: image.clone(),
+                }),
+            },
+        )
+        .app;
+
+        let mut regions = Regions::default();
+        let mut images = Images::halfblocks(HALF_BLOCK_CELL);
+        let theme = Theme::default();
+        term.draw(|f| draw_with(f, &next, &theme, &mut regions, &mut images))
+            .unwrap();
+
+        let art = regions.art.expect("an art area when there is an image");
+        let buf = term.backend().buffer().clone();
+        // The fixture is a gradient, so the art area must contain more than one
+        // colour, and every cell in it must be painted. A blank area would mean
+        // the protocol drew nothing and the frame is a lie.
+        // Halfblocks draw each cell as a foreground/background pair, so "painted"
+        // means a half-block glyph with a colour -- not a particular one of the
+        // two, which is what an earlier version of this test got wrong.
+        let mut reddish = 0u32;
+        let mut bluish = 0u32;
+        let mut glyphs = std::collections::HashSet::new();
+        for y in art.y..art.y + art.height {
+            for x in art.x..art.x + art.width {
+                let cell = &buf[(x, y)];
+                glyphs.insert(cell.symbol());
+                for c in [cell.fg, cell.bg] {
+                    let ratatui::style::Color::Rgb(r, _, b) = c else {
+                        continue;
+                    };
+                    if r > 120 && r > b + 60 {
+                        reddish += 1;
+                    } else if b > 120 && b > r + 60 {
+                        bluish += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            reddish > 0 && bluish > 0,
+            "both halves of the fixture must reach the buffer: {reddish} red, {bluish} blue"
+        );
+        assert!(
+            glyphs.contains("▀"),
+            "halfblocks use the upper-half-block glyph: {glyphs:?}"
+        );
+
+        // And the rest of the dashboard is still there, below the image: the
+        // text block starts under the art rather than being painted over by it.
+        let below: String = (art.y + art.height..art.y + art.height + 4)
+            .map(|y| row_text(&buf, y, 0, 46))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            below.contains("Jane Remover"),
+            "the title block must be below the art:\n{below}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Resizing must throw the encoded image away: Kitty's state is only valid
+    /// for the size it was encoded at, and reusing it draws nothing or draws it
+    /// at the wrong scale.
+    #[test]
+    fn a_resize_invalidates_the_encoded_image() {
+        let mut images = Images::halfblocks(HALF_BLOCK_CELL);
+        assert!(!images.is_ready());
+        let img = image::DynamicImage::ImageRgb8(image::RgbImage::new(8, 8));
+        let backend = ratatui::backend::TestBackend::new(60, 20);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        let path = PathBuf::from("/tmp/whatever.png");
+        term.draw(|f| images.draw(f, &path, &img, f.area()))
+            .unwrap();
+        assert!(images.is_ready(), "the first draw encodes it");
+
+        images.invalidate();
+        assert!(!images.is_ready(), "and a resize throws that away");
+    }
+
+    /// The image is sized in *cells*, keeping the aspect ratio: a wide, short
+    /// pane must letterbox a square cover rather than stretch it.
+    #[test]
+    fn the_art_is_letterboxed_to_its_aspect_ratio() {
+        let images = Images::halfblocks(HALF_BLOCK_CELL);
+        let square = image::DynamicImage::ImageRgb8(image::RgbImage::new(10, 10));
+        let pane = Rect::new(0, 0, 40, 8);
+        let fitted = images.fit(pane, &square);
+        assert!(fitted.width <= pane.width && fitted.height <= pane.height);
+        // The property that matters is the *pixel* aspect: square cover art must
+        // come out square, which in cells means about twice as wide as it is
+        // tall, because a cell is twice as tall as it is wide.
+        let (cw, ch) = images.cell_size();
+        let px_w = f64::from(fitted.width * cw);
+        let px_h = f64::from(fitted.height * ch);
+        assert!(
+            (px_w / px_h - 1.0).abs() < 0.05,
+            "square art must not be stretched: {fitted:?} is {px_w}x{px_h}px"
+        );
+        assert!(
+            fitted.width < pane.width,
+            "and it must be letterboxed rather than filling the pane: {fitted:?}"
+        );
+        // Centred, so the leftover space is split.
+        assert_eq!(fitted.x, (pane.width - fitted.width) / 2);
+        assert!(fitted.width > 0 && fitted.height > 0);
+    }
+
+    /// A degenerate area must not divide by zero or produce a negative rect.
+    #[test]
+    fn fitting_into_nothing_produces_nothing() {
+        let images = Images::halfblocks(HALF_BLOCK_CELL);
+        let square = image::DynamicImage::ImageRgb8(image::RgbImage::new(10, 10));
+        // No area at all means no rectangle at all.
+        for pane in [Rect::new(0, 0, 0, 0), Rect::new(5, 5, 0, 10)] {
+            let fitted = images.fit(pane, &square);
+            assert_eq!((fitted.width, fitted.height), (0, 0), "{pane:?}");
+        }
+        // One cell is not nothing, and must not come out as a negative or
+        // overflowing rect.
+        for pane in [Rect::new(0, 0, 1, 1), Rect::new(3, 3, 2, 1)] {
+            let fitted = images.fit(pane, &square);
+            assert!(fitted.width >= 1 && fitted.width <= pane.width, "{pane:?}");
+            assert!(
+                fitted.height >= 1 && fitted.height <= pane.height,
+                "{pane:?}"
+            );
+        }
+    }
+
+    /// No image yet means the placeholder frame, and the space is reserved either
+    /// way, so the layout does not jump when the cover arrives.
+    #[test]
+    fn the_art_space_is_reserved_before_the_image_arrives() {
+        let app = app_at(100, 30);
+        let (buf, regions) = render(100, 30, &app);
+        let art = regions.art.expect("the art area is reserved");
+        assert!(art.width > 0 && art.height > 0);
+        // The placeholder is a frame of box-drawing characters.
+        // The hole sits inside the Now Playing pane, so the pane's rounded border
+        // is the frame around it: two cells above the hole, not one.
+        let top = row_text(&buf, art.y - 2, art.x - 2, art.width + 4);
+        assert!(top.contains('╭') && top.contains('╮'), "{top:?}");
+        // The row between the border and the hole is the pane's own padding.
+        assert_eq!(row_text(&buf, art.y - 1, art.x, art.width).trim(), "");
+        assert!(art.width >= MIN_ART.0 && art.height >= MIN_ART.1, "{art:?}");
+        // And it is empty, because there is no image yet: the space is reserved,
+        // not filled with a picture of nothing.
+        let hole: String = (0..art.height)
+            .map(|i| row_text(&buf, art.y + i, art.x, art.width))
+            .collect::<Vec<_>>()
+            .join("");
+        assert_eq!(hole.trim(), "", "the hole should be empty: {hole:?}");
+    }
+
+    /// TODO 4.1: "art disappears cleanly when the terminal shrinks below the
+    /// breakpoint". A small terminal must draw the compact strip, with no art
+    /// area and nothing left behind.
+    #[test]
+    fn the_art_disappears_cleanly_on_a_small_terminal() {
+        let app = app_at(100, 30);
+        for (w, h) in [(46, 12), (30, 8), (29, 30), (100, 7)] {
+            let (buf, regions) = render(w, h, &app);
+            assert!(
+                regions.art.is_none(),
+                "{w}x{h} is too small for art but reserved {}",
+                regions
+                    .art_area()
+                    .map(|r| format!("{r:?}"))
+                    .unwrap_or_default()
+            );
+            let text = (0..h)
+                .map(|y| row_text(&buf, y, 0, w))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                !text.contains('┌') || text.contains("too small"),
+                "{w}x{h} should not draw an art frame:\n{text}"
+            );
+        }
     }
 
     fn text_of(
