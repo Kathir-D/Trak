@@ -28,7 +28,7 @@ Legend: `[ ]` todo · `[x]` done · **A/B** = with / without a Spotify Client ID
 | ID | Risk | Mitigation / where handled |
 | --- | --- | --- |
 | R1 | Real-audio visualizer: the process-tap permission is attributed to the *terminal app*; a CLI child may not get a usable "System Audio Recording" prompt, or cmux may not be prompt-able | Spike first (1.5). Always ship the simulated fallback (8.3). README documents which terminals work |
-| R2 | Spotify ≥ 1.3.x ignores AppleScript `set sound volume` | Read-back check + hide meter + optional system-volume fallback (4.4) |
+| R2 | ~~Spotify ≥ 1.3.x ignores AppleScript `set sound volume`~~ **REFUTED on 1.3.1.234 (1.1):** sets work 8/8, but the read-back is often target−1 (quantisation). Rule now = read back with a ±1 tolerance (`docs/APPLESCRIPT.md` §5) | 4.4 (reframed as a preference) |
 | R3 | Keychain items created by an ad-hoc-signed binary can re-prompt after every upgrade (the code identity changes) | Test in 7.4; fall back to a `0600` token file in `~/.config/trak/` and document the trade-off |
 | R4 | Spotify Web API developer-mode rules changed recently (Premium owner requirement, user cap, endpoint removals, loopback-only redirect URIs) | Verify current rules in 7.1 *before* building A; update SPEC §6 |
 | R5 | cmux may not pass the Kitty image protocol through | Spike 1.4; half-blocks fallback must look good on its own |
@@ -58,19 +58,21 @@ Legend: `[ ]` todo · `[x]` done · **A/B** = with / without a Spotify Client ID
 Each spike ends with facts written to a doc, not just working code. Throwaway code goes in
 `spikes/` (git-ignored is fine; commit only if it is useful), the **findings** are committed.
 
-- [ ] 1.1 **AppleScript field survey.** With Spotify running and a track playing, run each getter
-      from SPEC §5 via `/usr/bin/osascript` and record the exact raw output, types, and units
-      (duration ms vs s, position seconds float, popularity int, `artwork url`, `spotify url`,
-      `id` format). Also: behaviour when nothing is loaded, when paused, when stopped, and when
-      Spotify is not running (must error, not launch it — use `application "Spotify" is running`).
-      Done when: `docs/APPLESCRIPT.md` has a table of every property with a real sample, plus fixtures
-      saved under `tests/fixtures/applescript/*.txt`. Verify: is a `tell` on a non-running Spotify
-      launching it? (It does; the running check must come first.)
-- [ ] 1.2 **Batched read script + cost.** Write one script that returns state, position, volume,
-      shuffling, repeating and all track fields as one delimited string (pick a delimiter that cannot
-      occur in titles, e.g. `\u{1f}` unit separator). Time it 50×.
-      Needs: 1.1. Done when: `docs/APPLESCRIPT.md` records p50/p95 latency. If p95 > 80 ms, note the
-      alternative (JXA, or split fast/slow reads) in `docs/ARCHITECTURE.md`.
+- [x] 1.1 **AppleScript field survey.** Full table in `docs/APPLESCRIPT.md`; fixtures in
+      `tests/fixtures/applescript/`. > Later agents: **`starred` is broken (-10000)** — liking needs
+      the Web API. `duration` is **ms** despite the sdef saying seconds. `id` == `spotify url` (both
+      full URIs). **An ad has empty album/artist, `missing value` artwork, `0` numerics, and a
+      `spotify:ad:` URI** — the parser must survive it. A `tell` **launches** a non-running app
+      (verified with TextEdit), so the `is running` guard is mandatory and must be the first
+      statement of the same script.
+- [x] 1.2 **Batched read script + cost.** > **p50 431 ms / p95 437 ms for the 17-field read — 5.5×
+      over the 80 ms budget.** Cause is ~18 ms *per Apple Event inside Spotify's handler* (Finder
+      does 30 events in 2 ms; JXA, `osacompile`, list-coalescing and a warm process all fail to help;
+      paused == playing, so it is not audio contention). > Design response, recorded in
+      `docs/APPLESCRIPT.md` §4: **split fast (6 fields, ~300 ms) / slow (11 track fields, only when
+      `id` changes)**, keep the poll on a worker thread, and lean on 1.3's notification to make the
+      poll a safety net. Process spawn alone is 50 ms, so the `is running` check must live inside the
+      same script.
 - [ ] 1.3 **`PlaybackStateChanged` notification.** Listen for `com.spotify.client.PlaybackStateChanged`
       (distributed notification), print `userInfo` on play / pause / skip / seek. Verify the key names
       (`Player State`, `Name`, `Artist`, `Album`, `Track ID`, `Duration`, `Playback Position` — believed

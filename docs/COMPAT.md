@@ -38,9 +38,15 @@ dictionary**. None of them needs the others installed.
    `com.spotify.client.PlaybackStateChanged` (verify its userInfo keys in TODO 1.3). It fires for
    changes made by Sonar's buttons, the Spotify window, media keys, and headless Spotify. A slow
    poll (1 s while playing, 3 s otherwise) is the backup and also drives the progress bar.
-5. **Spotify ≥ 1.3.x ignores AppleScript volume sets** (verified 2026-09-28 by headless-spotify).
-   After every volume write, read it back. If unchanged, hide the volume meter and show a one-line
-   notice; a setting may fall back to the Mac's system volume (TODO 4.x).
+5. **Read back after every volume write, but compare with a ±1 tolerance.** headless-spotify
+   reported on 2026-09-28 that "Spotify ≥ 1.3.x ignores AppleScript volume sets". **That is not true
+   on 1.3.1.234** — sets apply, verified 8/8 (see `docs/APPLESCRIPT.md` §5). What *is* true is
+   that Spotify quantises the volume, so **the read-back is often exactly 1 lower than the value
+   set** and is stable there. trak must therefore distinguish "the write was ignored" (read unchanged
+   at the pre-write value) from "the write landed, quantised" (read differs by ≤ 1), and must show
+   the value trak last *set* rather than the raw read, or the meter jitters by 1 % on every keypress.
+   If a write is genuinely ignored, hide the meter and show a one-line notice; the system-volume
+   fallback is then a config choice (`volume.control`), not an automatic repair (TODO 4.4).
 6. **Permissions belong to the terminal app**, not to Sonar. The first AppleScript call from
    e.g. cmux triggers a one-time "control Spotify" prompt for that terminal. The visualizer's tap
    needs "System Audio Recording" for the terminal, once. Denied → simulated visualizer.
