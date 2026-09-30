@@ -16,7 +16,7 @@ Run `cargo license` (or read `Cargo.lock`) before each release to check nothing 
 | --- | --- | --- |
 | [cavacore](https://github.com/TornaxO7/cavacore-rs) (port of [cava](https://github.com/karlstav/cava)) | MIT | Visualizer spectrum maths |
 | [cidre](https://github.com/yury/cidre) | MIT | Core Audio process tap (real-audio visualizer) |
-| [rspotify](https://github.com/ramsayleung/rspotify) | MIT | Spotify Web API + PKCE (Version A) |
+| ~~[rspotify](https://github.com/ramsayleung/rspotify)~~ | MIT | **rejected.** `ureq` plus a hand-written `Library` trait instead: rspotify is async and would drag `tokio` into a single-threaded TUI for no gain, and the one thing 7.5 asked for from it -- the id-list helpers -- calls endpoints that were removed in dev mode. See `src/web/api.rs` |
 
 ## Studied, not copied
 
@@ -35,6 +35,11 @@ All MIT or MIT/Apache-2.0, checked against the crate metadata in `Cargo.lock`.
 | --- | --- | --- | --- | --- |
 | [clap](https://github.com/clap-rs/clap) | 4 | MIT/Apache-2.0 | CLI parsing | the derive API, so the shpotify commands are one table |
 | [thiserror](https://github.com/dtolnay/thiserror) | 2 | MIT/Apache-2.0 | typed errors | the binary edge is the only place `anyhow` would be allowed |
+| [serde](https://github.com/serde-rs/serde) | 1.0 | MIT/Apache-2.0 | Version A's Web API payloads | added for the Web API only. `lyrics.rs`, `sonar.rs` and `headless.rs` keep their hand-written readers: they predate this and refactoring them is not part of any task |
+| [serde_json](https://github.com/serde-rs/json) | 1.0 | MIT/Apache-2.0 | Web API request and response bodies | |
+| [sha2](https://github.com/RustCrypto/hashes) | 0.10 | MIT/Apache-2.0 | the PKCE S256 challenge | |
+| [base64](https://github.com/marshallpierce/rust-base64) | 0.22 | MIT/Apache-2.0 | base64url for PKCE and the token file | |
+| [rand](https://github.com/rust-random/rand) | 0.8 | MIT/Apache-2.0 | the PKCE verifier and `state` | |
 | [ratatui](https://github.com/ratatui/ratatui) | 0.29 | MIT | TUI rendering | |
 | [crossterm](https://github.com/crossterm-rs/crossterm) | 0.28 | MIT | terminal and input events | mouse capture, bracketed paste, the run-loop-safe read |
 | [objc2](https://github.com/madsmtm/objc2) | 0.6 | MIT | Objective-C runtime | the `PlaybackStateChanged` observer; no app bundle needed |

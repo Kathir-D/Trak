@@ -14,6 +14,7 @@ pub mod player;
 pub mod sonar;
 pub mod tui;
 pub mod visualizer;
+pub mod web;
 
 #[cfg(test)]
 mod testutil;

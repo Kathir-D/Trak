@@ -30,7 +30,21 @@ objc2-foundation = { version = "0.3", features = [
 ] }
 ratatui-image = "8.0.1"
 image = "0.25"
+# The Web API (Version A). Blocking on purpose: trak's loop is a single thread
+# and a token refresh, a search or a playlist fetch all happen on a worker
+# behind a trait. An async client would drag a runtime into the TUI for no gain.
 ureq = "3"
+# Version A's JSON surface is large and every response is a typed struct, so
+# serde earns its keep there. The three hand-written readers in lyrics.rs,
+# sonar.rs and headless.rs predate this and are left alone: refactoring them is
+# not part of any task, and they are small enough that a rewrite would be churn.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# PKCE (TODO 7.2). The verifier has to be high-entropy random and its S256
+# challenge hashed, and the token file is base64url JSON.
+sha2 = "0.10"
+base64 = "0.22"
+rand = "0.8"
 # Spotify is read and written through AppleScript only, so osascript is the
 # transport. objc2-foundation carries the PlaybackStateChanged observer
 # (docs/APPLESCRIPT.md section 9): a plain CLI can receive it, no bundle needed.

@@ -544,7 +544,7 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
 - [x] 7.1 **Confirm API reality (R4)** — done in 1.7; SPEC §6 and every task in this phase were
       rewritten against `docs/WEB-API.md` in the same commit. > The 7.2/7.3/7.5/7.7/7.8/7.10/7.11
       notes below carry the specific changes.
-- [ ] 7.2 **PKCE auth**: loopback listener on an **ephemeral** port; the registered redirect URI is
+- [x] 7.2 **PKCE auth** (the real login is still **[owner]**): loopback listener on an **ephemeral** port; the registered redirect URI is
       `http://127.0.0.1` with **no port**, and the port actually used is sent in the request. Opens
       the browser with `open`, exchanges the code, refreshes tokens automatically. > **Refresh
       tokens expire after 6 months** (`docs/WEB-API.md` §6) — record the authorisation time locally,
@@ -561,12 +561,22 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
       `http://127.0.0.1:<port>/callback` if not. Done when: every step has an on-screen explanation
       and errors (bad ID, denied consent, port busy) are handled with retry. **[owner]** walks
       through it once.
-- [ ] 7.4 **Token storage**: the `0600` file decided in 1.8 (`~/.config/trak/token.json`, `XDG_CONFIG_HOME`
+- [x] 7.4 **Token storage**: the `0600` file decided in 1.8 (`~/.config/trak/token.json`, `XDG_CONFIG_HOME`
       respected, directory `0700`, atomic temp-then-rename write). **Refuse to read a token whose mode
       is looser than `0600`** rather than proceeding, and assert that in a test. Never logged, never in
       `config.toml`. Keep the `Store` trait so tests can fake it, but there is only **one** real
       backend — do not build a Keychain one (it hangs, see 1.8). Documented in the README.
-- [ ] 7.5 **`Library` trait + rspotify wrapper + `FakeLibrary`.** > **Do not use `rspotify`'s
+- [x] 7.5 **`Library` trait + `ureq` client + `FakeLibrary`.** > **rspotify rejected**: it is
+      async and would drag `tokio` into a single-threaded TUI for no gain, and the only thing 7.5
+      wanted from it — the id-list helpers — calls endpoints removed in dev mode. `ureq` plus a
+      hand-written trait instead. > The `0600` write is copied line for line from `config.rs`'s, so
+      there is one atomic-write-and-tighten implementation rather than two. > **`Debug` redacts** on
+      every type that can hold a token: a `Debug` impl is how a token ends up in a log. > Six-month
+      refresh window: 183 days, **long is the safe direction**; a 14-day warning lead is mine, not
+      Spotify's; the local clock warns and **the server decides** — a six-month-old refresh token is
+      still offered, because a fast local clock must not cost a login; `authorized_at` never moves on
+      refresh, which is what keeps the reconnect state reachable at all; any 4xx on refresh is spent,
+      5xx is not. > A test asserts no error `notice()` contains the token string. > **Do not use `rspotify`'s
       id-list helpers** (`tracks(ids)`, `artists(ids)`, `albums(ids)`) — the batch endpoints they
       call were removed in dev mode. Loop one id per request and cache hard; the quota is per
       developer account and shared across Client IDs. 429: **only `Retry-After` is documented and
