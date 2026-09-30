@@ -371,15 +371,14 @@ fn draw_now_playing(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     }
     lines.push(Line::from(controls));
 
-    if app.settings.show_volume {
+    // Hidden when a volume write did not land: a meter that cannot be trusted is
+    // worse than no meter, and the notice says why (COMPAT rule 5).
+    if app.settings.show_volume && !app.volume_hidden {
         // Plain text, not 🔊: the emoji rendered as a *muted* speaker in cmux
         // next to a 100% meter, which is the opposite of what it means.
+        let v = app.meter_volume();
         lines.push(Line::from(Span::styled(
-            format!(
-                "vol {} {}%",
-                Theme::volume_meter(app.volume, 10),
-                app.volume
-            ),
+            format!("vol {} {}%", Theme::volume_meter(v, 10), v),
             Style::default().fg(theme.accent_colour()),
         )));
     }
@@ -1044,6 +1043,37 @@ mod tests {
         let app = app_at(100, 30);
         let text = text_of(&mut term, &app, 100, 30);
         assert!(text.contains("no earlier tracks"), "{text}");
+    }
+
+    /// COMPAT rule 5: a meter that Spotify ignores is hidden rather than shown
+    /// wrong.
+    #[test]
+    fn the_volume_meter_is_hidden_when_spotify_ignored_the_write() {
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        let mut app = app_at(100, 30);
+        // The meter glyph, not the word "vol": the footer hint says "+/- vol".
+        assert!(text_of(&mut term, &app, 100, 30).contains('▰'));
+        app.volume_hidden = true;
+        let text = text_of(&mut term, &app, 100, 30);
+        assert!(
+            !text.contains('▰'),
+            "a meter that cannot be trusted: {text}"
+        );
+        assert!(!text.contains("100%"), "{text}");
+    }
+
+    /// The meter shows the user's own choice, which a poll cannot move.
+    #[test]
+    fn the_meter_shows_the_users_own_volume() {
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        let mut app = app_at(100, 30);
+        // A read reports 100; the user has asked for 40.
+        app.user_volume = Some(40);
+        let text = text_of(&mut term, &app, 100, 30);
+        assert!(text.contains("40%"), "{text}");
+        assert!(!text.contains("100%"), "not the raw read: {text}");
     }
 
     fn text_of(

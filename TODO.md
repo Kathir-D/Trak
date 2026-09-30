@@ -270,7 +270,10 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
       — **but only if the user has moved the selection at all**. Without that condition a session
       left alone walks the cursor to the oldest track, because every skip nudged it one row down. > 
       `FakePlayer::play_uri` was **not** applying the URI allow-list, so the fake accepted URIs the
-      real player refuses; a test that passed against the fake would have failed in production.
+      real player refuses; a test that passed against the fake would have failed in production. >
+      **The first read waited out a whole poll interval**, so the TUI opened on the idle card for five
+      seconds even with Spotify playing and no window focused — which looks exactly like Spotify not
+      running. `last_poll` now starts as "never polled", which is due immediately.
 - [x] 3.7 **Info tab.** Every AppleScript fact, plus **"heard this session"**, counted by URI
       across the history. > The label column is 18 wide, not 14: "heard this session" is the longest
       label and at 14 the value ran straight into it with no gap. > The count is the current track
@@ -293,9 +296,20 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
       triggers one real read, because the notification cannot fill those fields in. > The userInfo
       values arrive as untyped `AnyObject` (`NSTaggedPointerString` for text, `__NSCFNumber` for
       numbers), so each is downcast to the class it is documented to be.
-- [ ] 3.10 **Volume behaviour** per COMPAT rules 3 and 5: user-set volume tracking, read-back after
-      writes, meter hidden + notice when Spotify ignores sets. Done when: tests with a fake that
-      ignores writes; manual on the real Spotify.
+- [x] 3.10 **Volume behaviour** per COMPAT rules 3 and 5. > **The read-back was being computed and
+      then thrown away**: `run_one` mapped every `WriteOutcome` to `()`, so the app could not tell
+      "Spotify ignored this" from "Spotify took it". `WorkerResult::CommandDone(cmd, Result<()>)`
+      is now `Command(CommandOutcome)`, whose `result` is `Err` / `Ok(None)` / `Ok(Some(outcome))` —
+      three outcomes, because *succeeded at being ignored* is its own thing. > **The meter now shows
+      the user's volume, not the polled one.** A read only updates `read_volume`; `user_volume` is
+      set by `m`, `+`, `-` and by the target the player layer actually aimed for, so the clamp lives
+      in one place. This is COMPAT rule 3, not just rule 5: during a Sonar fade the polled value *is*
+      the mid-fade value, and a meter that follows it down says trak turned the music down. > An
+      ignored volume write hides the meter and shows the one-line notice; a landed one brings it
+      back, so one bad keypress is not a permanently broken display. An ignored *seek* gets the
+      notice but does not hide the meter. > Measured on real Spotify 1.3.1.234: `-` at 78 → 67 →
+      56, mute → 0, unmute restores exactly what it had, `+` at 100 clamps and stays 100, and a set
+      of 90 reads back **89** — the ±1 quantisation rule 5 documents, confirmed again.
 - [x] 3.11 **Copy share URL (`c`)** with a transient "copied" toast. > `pbcopy` rather than a
       pasteboard API: no entitlement, no extra binding, and it is what every other tool on the
       machine already uses. A test round-trips through `pbpaste` rather than trusting the exit

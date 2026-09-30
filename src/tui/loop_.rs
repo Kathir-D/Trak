@@ -26,7 +26,7 @@ use ratatui::backend::CrosstermBackend;
 use crate::player::AppleScriptPlayer;
 use crate::player::PlayerCommand;
 use crate::player::actions::Worker;
-use crate::player::actions::WorkerResult;
+use crate::player::actions::{CommandOutcome, WorkerResult, WriteOutcome};
 use crate::tui::app::{App, Event, update};
 use crate::tui::render::draw;
 use crate::tui::theme::{Accent, Border, Theme};
@@ -178,9 +178,7 @@ fn event_loop<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> i32 {
                     });
                     next
                 }
-                WorkerResult::CommandDone(cmd, result) => {
-                    update(app, Event::CommandDone(cmd, result)).app
-                }
+                WorkerResult::Command(outcome) => update(app, Event::CommandDone(outcome)).app,
             };
         }
 
@@ -284,55 +282,60 @@ fn event_loop<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> i32 {
 }
 
 /// Queue commands on the worker.
-///
-/// `is_poll` marks a read rather than a write: a poll must never carry a write,
-/// and the worker treats a poll as a plain `state()` call.
 fn submit_all(commands: Vec<PlayerCommand>, worker: &Worker) {
     for cmd in commands {
-        worker.submit(move |p| match run_one(p, cmd.clone()) {
-            Ok(()) => WorkerResult::CommandDone(cmd, Ok(())),
-            Err(e) => WorkerResult::CommandDone(cmd, Err(e)),
+        worker.submit(move |p| {
+            let result = run_one(p, cmd.clone());
+            WorkerResult::Command(match result {
+                // The read-back travels with the result rather than being thrown
+                // away: a volume write Spotify ignored is a state the app has to
+                // hear about (COMPAT rule 5), not a success.
+                Ok(Some(outcome)) => CommandOutcome::read_back(cmd, outcome),
+                Ok(None) => CommandOutcome::ok(cmd),
+                Err(e) => CommandOutcome::failed(cmd, e),
+            })
         });
     }
 }
 
+/// Run one write. `Ok(Some(outcome))` means the command was read back.
 fn run_one(
     p: &mut dyn crate::player::Player,
     cmd: PlayerCommand,
-) -> Result<(), crate::player::PlayerError> {
+) -> Result<Option<WriteOutcome>, crate::player::PlayerError> {
     use crate::player::actions::{seek_checked, set_volume_checked, step_volume};
 
     match cmd {
-        PlayerCommand::Toggle => p.toggle(),
-        PlayerCommand::Next => p.next(),
-        PlayerCommand::Prev => p.previous(),
-        PlayerCommand::Replay => p.seek(0.0).map(|_| ()),
-        PlayerCommand::Seek(secs) => seek_checked(p, secs).map(|_| ()),
-        PlayerCommand::VolumeStep(step) => step_volume(p, step).map(|_| ()),
-        PlayerCommand::SetVolume(v) => set_volume_checked(p, v).map(|_| ()),
+        PlayerCommand::Toggle => p.toggle().map(|_| None),
+        PlayerCommand::Next => p.next().map(|_| None),
+        PlayerCommand::Prev => p.previous().map(|_| None),
+        PlayerCommand::Replay => p.seek(0.0).map(|_| None),
+        PlayerCommand::Seek(secs) => seek_checked(p, secs).map(Some),
+        PlayerCommand::VolumeStep(step) => step_volume(p, step).map(Some),
+        PlayerCommand::SetVolume(v) => set_volume_checked(p, v).map(Some),
         PlayerCommand::ToggleShuffle => {
             let on = !p.state()?.shuffling_enabled;
-            p.command(&format!("set shuffling to {on}"))
+            p.command(&format!("set shuffling to {on}")).map(|_| None)
         }
         PlayerCommand::CycleRepeat => {
             // AppleScript cannot read back "repeat one" as distinct from "repeat
             // all", so the app remembers the mode and this writes its boolean.
             let on = !p.state()?.repeating_enabled;
-            p.command(&format!("set repeating to {on}"))
+            p.command(&format!("set repeating to {on}")).map(|_| None)
         }
         // `enter` on a history row (TODO 3.6). The URI came out of a read, and
         // `play_uri` checks the allow-list itself, so there is no path from a
         // Spotify string to a generated AppleScript literal.
-        PlayerCommand::PlayUri(uri) => p.play_uri(&uri),
+        PlayerCommand::PlayUri(uri) => p.play_uri(&uri).map(|_| None),
         // Copying is not a Spotify write at all, so it never touches a player.
         PlayerCommand::CopyLink(link) => {
             // A pasteboard that refuses is not a Spotify failure, and the link is
             // already in the toast, so there is nothing to report. Deliberately
             // not an error: a failed copy must never look like a failed command.
             let _ = crate::player::copy_to_clipboard(&link);
-            Ok(())
+            Ok(None)
         }
-        PlayerCommand::Launch => launch_spotify(),
+        PlayerCommand::Launch => launch_spotify().map(|_| None),
     }
 }
 

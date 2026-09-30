@@ -11,8 +11,8 @@
 
 use std::time::Instant;
 
-use crate::player::actions::PlayerCommand;
-use crate::player::{PlaybackState, PlayerError, PlayerState, RepeatMode, TrackInfo};
+use crate::player::actions::{CommandOutcome, PlayerCommand};
+use crate::player::{PlaybackState, PlayerState, RepeatMode, TrackInfo};
 
 /// A track played this session. Session-only, cleared on exit (SPEC §2).
 #[derive(Debug, Clone, PartialEq)]
@@ -40,8 +40,10 @@ pub enum Event {
     Resize,
     /// A poll came back. A read: never carries a write with it.
     PlayerState(Box<PlayerState>),
-    /// A write finished. `Err` becomes a one-line notice, never a crash.
-    CommandDone(PlayerCommand, Result<(), PlayerError>),
+    /// A write finished. `Err` becomes a one-line notice, never a crash, and a
+    /// read-back that says Spotify ignored the write hides the meter (COMPAT
+    /// rule 5).
+    CommandDone(CommandOutcome),
     /// Spotify is not running.
     NotRunning,
     /// Local tick, for interpolating the bar and expiring toasts.
@@ -125,10 +127,18 @@ pub struct App {
     /// left alone would end up selecting the *oldest* track.
     pub cursor_moved: bool,
     pub show_help: bool,
-    /// The volume the user last chose, which is what the meter shows. Spotify's
-    /// read-back is quantised and would make the meter jitter by 1 %
-    /// (COMPAT rule 5).
-    pub volume: u8,
+    /// What Spotify last reported, kept only so the meter has something to show
+    /// before the user has chosen a volume of their own.
+    pub read_volume: u8,
+    /// The volume the user last chose, which is what the meter shows once they
+    /// have. A poll never overwrites it: Spotify's read-back is quantised and
+    /// would make the meter jitter by 1 % (COMPAT rule 5), and during a Sonar
+    /// fade the read *is* the mid-fade value trak must not present as the user's
+    /// (COMPAT rule 3).
+    pub user_volume: Option<u8>,
+    /// Set when a volume write did not land. The meter is then a lie, so it is
+    /// hidden rather than shown wrong (COMPAT rule 5).
+    pub volume_hidden: bool,
     pub muted: bool,
     pub pre_mute_volume: u8,
     pub repeat: RepeatMode,
@@ -160,7 +170,9 @@ impl App {
             history_cursor: 0,
             cursor_moved: false,
             show_help: false,
-            volume: 0,
+            read_volume: 0,
+            user_volume: None,
+            volume_hidden: false,
             muted: false,
             pre_mute_volume: 0,
             repeat: RepeatMode::Off,
@@ -182,6 +194,12 @@ impl App {
 
     pub fn track(&self) -> Option<&TrackInfo> {
         self.state.as_ref().map(|s| &s.track)
+    }
+
+    /// The volume to draw: what the user chose, or Spotify's own value until
+    /// they choose one.
+    pub fn meter_volume(&self) -> u8 {
+        self.user_volume.unwrap_or(self.read_volume)
     }
 
     /// Spotify is not running.
@@ -298,16 +316,38 @@ pub fn update(mut app: App, event: Event) -> Updated {
             app.poll_due = false;
         }
 
-        Event::CommandDone(cmd, result) => {
+        Event::CommandDone(outcome) => {
             app.busy = None;
-            if let Err(e) = result {
-                // One line, never a stack trace (SPEC §6).
-                let (msg, _) = crate::cli::report(e);
-                app.toast(msg.lines().next().unwrap_or("error").to_string());
+            match outcome.result {
+                Err(e) => {
+                    // One line, never a stack trace (SPEC §6).
+                    let (msg, _) = crate::cli::report(e);
+                    app.toast(msg.lines().next().unwrap_or("error").to_string());
+                }
+                Ok(None) => {}
+                Ok(Some(w)) => {
+                    if w.landed {
+                        // The write landed, so the meter is worth showing again.
+                        app.volume_hidden = false;
+                        if w.what == "volume" {
+                            // Show what the player actually aimed for, which is
+                            // the clamped value, rather than recomputing the
+                            // clamp here and hoping the two agree.
+                            app.user_volume = Some(w.wanted.clamp(0, 100) as u8);
+                        }
+                    } else {
+                        if let Some(n) = w.notice() {
+                            app.toast(n.lines().next().unwrap_or("write ignored").to_string());
+                        }
+                        // A volume meter that cannot be trusted is worse than no
+                        // meter, and the notice is the only warning the user
+                        // gets (COMPAT rule 5).
+                        if w.what == "volume" {
+                            app.volume_hidden = true;
+                        }
+                    }
+                }
             }
-            // `repeat` was already advanced on the keypress, so nothing to do
-            // here; the command only reports whether Spotify took it.
-            let _ = cmd;
         }
     }
 
@@ -386,11 +426,13 @@ fn handle_key(app: &mut App, c: char, commands: &mut Vec<PlayerCommand>) {
         'm' => {
             app.muted = !app.muted;
             if app.muted {
-                app.pre_mute_volume = app.volume;
-                app.volume = 0;
+                // What the user had, which may be their own choice or Spotify's
+                // own value if they have not touched it yet.
+                app.pre_mute_volume = app.meter_volume();
+                app.user_volume = Some(0);
                 push(app, commands, PlayerCommand::SetVolume(0));
             } else {
-                app.volume = app.pre_mute_volume;
+                app.user_volume = Some(app.pre_mute_volume);
                 push(app, commands, PlayerCommand::SetVolume(app.pre_mute_volume));
             }
         }
@@ -461,9 +503,10 @@ fn apply_state(app: &mut App, s: PlayerState) {
         }
     }
 
-    if !app.muted {
-        app.volume = s.volume;
-    }
+    // A poll updates only what Spotify is the authority for. The meter is the
+    // user's, and stays theirs: `apply_state` must never write to it, or a Sonar
+    // fade would show up as trak having moved the volume (COMPAT rule 3).
+    app.read_volume = s.volume;
     app.repeat = if s.repeating_enabled {
         RepeatMode::Context
     } else {
@@ -476,6 +519,8 @@ fn apply_state(app: &mut App, s: PlayerState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::player::PlayerError;
+    use crate::player::actions::{CommandOutcome, WriteOutcome};
     use crate::player::fake::sample_track;
     use crate::player::parse::parse;
     use crate::testutil::fixture;
@@ -503,7 +548,8 @@ mod tests {
     fn a_first_read_records_no_history() {
         let app = with_track();
         assert!(app.history.is_empty(), "there is no previous track yet");
-        assert_eq!(app.volume, 100);
+        assert_eq!(app.meter_volume(), 100);
+        assert_eq!(app.user_volume, None, "the user has not chosen one yet");
         assert!(app.last_read.is_some());
     }
 
@@ -670,7 +716,11 @@ mod tests {
     #[test]
     fn finishing_a_command_clears_busy() {
         let (app, _) = press(with_track(), 'n');
-        let app = update(app, Event::CommandDone(PlayerCommand::Next, Ok(()))).app;
+        let app = update(
+            app,
+            Event::CommandDone(CommandOutcome::ok(PlayerCommand::Next)),
+        )
+        .app;
         assert!(app.busy.is_none());
     }
 
@@ -685,15 +735,22 @@ mod tests {
         let mut s = playing();
         s.volume = 42;
         app = update(app, Event::PlayerState(Box::new(s))).app;
-        assert_eq!(app.volume, 0, "a read must not override a mute");
+        assert_eq!(app.meter_volume(), 0, "a read must not override a mute");
 
         // The first command has to finish before another can be queued; that is
         // the point of the busy flag, and the test has to honour it.
-        let app = update(app, Event::CommandDone(PlayerCommand::SetVolume(0), Ok(()))).app;
+        let app = update(
+            app,
+            Event::CommandDone(CommandOutcome::read_back(
+                PlayerCommand::SetVolume(0),
+                landed("volume", 0),
+            )),
+        )
+        .app;
         let (app, cmds) = press(app, 'm');
         assert_eq!(cmds, vec![PlayerCommand::SetVolume(100)]);
         assert!(!app.muted);
-        assert_eq!(app.volume, 100, "unmute restores what the user had");
+        assert_eq!(app.meter_volume(), 100, "unmute restores what the user had");
     }
 
     /// Tab goes forward and Shift-Tab back, which the event loop maps to 'Z'
@@ -909,7 +966,10 @@ mod tests {
         let (app, _) = press(with_track(), 'n');
         let app = update(
             app,
-            Event::CommandDone(PlayerCommand::Next, Err(PlayerError::PermissionDenied)),
+            Event::CommandDone(CommandOutcome::failed(
+                PlayerCommand::Next,
+                PlayerError::PermissionDenied,
+            )),
         )
         .app;
         let t = app.toast.as_ref().expect("a toast");
@@ -921,7 +981,10 @@ mod tests {
         let (app, _) = press(with_track(), 'n');
         let mut app = update(
             app,
-            Event::CommandDone(PlayerCommand::Next, Err(PlayerError::NotRunning)),
+            Event::CommandDone(CommandOutcome::failed(
+                PlayerCommand::Next,
+                PlayerError::NotRunning,
+            )),
         )
         .app;
         assert!(app.toast.is_some());
@@ -960,11 +1023,19 @@ mod tests {
         assert_eq!(cmds, vec![PlayerCommand::CycleRepeat]);
         assert_eq!(app.repeat, RepeatMode::Context, "all");
 
-        let app = update(app, Event::CommandDone(PlayerCommand::CycleRepeat, Ok(()))).app;
+        let app = update(
+            app,
+            Event::CommandDone(CommandOutcome::ok(PlayerCommand::CycleRepeat)),
+        )
+        .app;
         let (app, _) = press(app, 'r');
         assert_eq!(app.repeat, RepeatMode::Track, "one");
 
-        let app = update(app, Event::CommandDone(PlayerCommand::CycleRepeat, Ok(()))).app;
+        let app = update(
+            app,
+            Event::CommandDone(CommandOutcome::ok(PlayerCommand::CycleRepeat)),
+        )
+        .app;
         let (app, _) = press(app, 'r');
         assert_eq!(app.repeat, RepeatMode::Off, "and back round to off");
     }
@@ -987,6 +1058,174 @@ mod tests {
         let (app, cmds) = press(app, 'c');
         assert!(cmds.is_empty());
         assert!(app.toast.is_none());
+    }
+
+    /// A read-back that says the write took.
+    fn landed(what: &'static str, wanted: i64) -> WriteOutcome {
+        WriteOutcome {
+            what,
+            wanted,
+            read: wanted,
+            landed: true,
+        }
+    }
+
+    /// A read-back that says Spotify took the call and did nothing with it.
+    fn ignored(what: &'static str, wanted: i64, read: i64) -> WriteOutcome {
+        WriteOutcome {
+            what,
+            wanted,
+            read,
+            landed: false,
+        }
+    }
+
+    /// The regression COMPAT rule 3 exists for: Sonar fades the volume while
+    /// ducking, trak polls, and the meter must not follow the fade down. If it
+    /// did, the user would think trak had turned the music down.
+    #[test]
+    fn a_poll_never_moves_a_volume_the_user_chose() {
+        let (mut app, cmds) = press(with_track(), '-');
+        assert_eq!(cmds, vec![PlayerCommand::VolumeStep(-10)]);
+        app = update(
+            app,
+            Event::CommandDone(CommandOutcome::read_back(
+                PlayerCommand::VolumeStep(-10),
+                landed("volume", 90),
+            )),
+        )
+        .app;
+        assert_eq!(app.meter_volume(), 90, "the user asked for 90");
+
+        // Sonar ducks: Spotify's own volume falls away, twice.
+        for faded in [45, 12] {
+            let mut s = playing();
+            s.volume = faded;
+            app = update(app, Event::PlayerState(Box::new(s))).app;
+            assert_eq!(app.read_volume, faded, "the read is recorded");
+            assert_eq!(
+                app.meter_volume(),
+                90,
+                "but the meter shows what the user chose, not a mid-fade value"
+            );
+        }
+    }
+
+    /// The same rule the other way round: with no choice of the user's own, the
+    /// meter still has to show something true.
+    #[test]
+    fn the_meter_falls_back_to_what_spotify_reports() {
+        let mut app = with_track();
+        assert_eq!(app.user_volume, None);
+        assert_eq!(app.meter_volume(), 100);
+        let mut s = playing();
+        s.volume = 33;
+        app = update(app, Event::PlayerState(Box::new(s))).app;
+        assert_eq!(app.meter_volume(), 33);
+    }
+
+    /// COMPAT rule 5: an ignored volume write hides the meter and says why.
+    #[test]
+    fn an_ignored_volume_write_hides_the_meter_and_explains_itself() {
+        let (mut app, _) = press(with_track(), '-');
+        let app = update(
+            app,
+            Event::CommandDone(CommandOutcome::read_back(
+                PlayerCommand::VolumeStep(-10),
+                ignored("volume", 90, 100),
+            )),
+        )
+        .app;
+        assert!(app.volume_hidden, "the meter would be a lie");
+        let t = app.toast.as_ref().expect("a notice");
+        assert!(!t.text.contains('\n'), "one line only: {t:?}");
+        assert!(t.text.contains("volume"), "{t:?}");
+    }
+
+    /// A write that lands brings the meter back, so one bad keypress is not a
+    /// permanently broken display.
+    #[test]
+    fn a_landed_write_brings_the_meter_back() {
+        let (mut app, _) = press(with_track(), '-');
+        app = update(
+            app,
+            Event::CommandDone(CommandOutcome::read_back(
+                PlayerCommand::VolumeStep(-10),
+                ignored("volume", 90, 100),
+            )),
+        )
+        .app;
+        assert!(app.volume_hidden);
+
+        let (app, _) = press(app, '-');
+        let app = update(
+            app,
+            Event::CommandDone(CommandOutcome::read_back(
+                PlayerCommand::VolumeStep(-10),
+                landed("volume", 80),
+            )),
+        )
+        .app;
+        assert!(!app.volume_hidden);
+        assert_eq!(app.meter_volume(), 80);
+    }
+
+    /// Spotify quantises, so a read-back one below what was asked for is a
+    /// success (COMPAT rule 5). This test is the reason the meter never hid
+    /// itself on this machine.
+    #[test]
+    fn a_quantised_read_back_does_not_hide_the_meter() {
+        let (app, _) = press(with_track(), '-');
+        let app = update(
+            app,
+            Event::CommandDone(CommandOutcome::read_back(
+                PlayerCommand::VolumeStep(-10),
+                WriteOutcome {
+                    what: "volume",
+                    wanted: 90,
+                    read: 89,
+                    landed: true,
+                },
+            )),
+        )
+        .app;
+        assert!(!app.volume_hidden, "one low is still landed");
+        assert_eq!(app.meter_volume(), 90, "the value set, not the read");
+    }
+
+    /// An ignored seek is worth a notice, but it is not a reason to believe the
+    /// volume meter has stopped working.
+    #[test]
+    fn an_ignored_seek_does_not_hide_the_volume_meter() {
+        let (app, _) = press(with_track(), 'l');
+        let app = update(
+            app,
+            Event::CommandDone(CommandOutcome::read_back(
+                PlayerCommand::Seek(5.0),
+                ignored("seek", 5, 0),
+            )),
+        )
+        .app;
+        assert!(!app.volume_hidden);
+        assert!(app.toast.is_some(), "but the user is told");
+    }
+
+    /// The value the player actually aimed for is the one shown, so the clamp
+    /// lives in one place.
+    #[test]
+    fn the_meter_shows_the_clamped_target_the_player_aimed_for() {
+        let mut app = with_track();
+        app.user_volume = Some(95);
+        let (app, _) = press(app, '+');
+        let app = update(
+            app,
+            Event::CommandDone(CommandOutcome::read_back(
+                PlayerCommand::VolumeStep(10),
+                landed("volume", 100),
+            )),
+        )
+        .app;
+        assert_eq!(app.meter_volume(), 100, "not 105");
     }
 
     #[test]

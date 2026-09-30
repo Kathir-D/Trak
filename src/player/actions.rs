@@ -125,6 +125,45 @@ pub enum PlayerCommand {
     Launch,
 }
 
+/// What a finished command reports back.
+///
+/// Three outcomes, not two: a command can fail, it can succeed, and it can
+/// *succeed at being ignored* — Spotify takes the call and does nothing with it.
+/// Folding those last two together is what made the volume meter flap, because
+/// the app had no way to hear about a write that quietly did not land
+/// (COMPAT rule 5).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CommandOutcome {
+    pub cmd: PlayerCommand,
+    /// `Err` is a failure to make the call at all. `Ok(None)` is a command with
+    /// nothing to read back. `Ok(Some(outcome))` is one that was read back, and
+    /// `outcome.landed` says whether Spotify took it.
+    pub result: Result<Option<WriteOutcome>, PlayerError>,
+}
+
+impl CommandOutcome {
+    pub fn ok(cmd: PlayerCommand) -> Self {
+        Self {
+            cmd,
+            result: Ok(None),
+        }
+    }
+
+    pub fn failed(cmd: PlayerCommand, e: PlayerError) -> Self {
+        Self {
+            cmd,
+            result: Err(e),
+        }
+    }
+
+    pub fn read_back(cmd: PlayerCommand, outcome: WriteOutcome) -> Self {
+        Self {
+            cmd,
+            result: Ok(Some(outcome)),
+        }
+    }
+}
+
 /// What a finished job reports back.
 ///
 /// A poll and a write are different shapes: a poll's whole point is the state it
@@ -138,7 +177,7 @@ pub enum WorkerResult {
     /// the TUI, because it means "show the idle card", not "show an error".
     ReadFailed(PlayerError),
     /// A write finished.
-    CommandDone(PlayerCommand, Result<(), PlayerError>),
+    Command(CommandOutcome),
 }
 
 /// Runs player writes on a worker thread so the render loop never blocks.
@@ -441,7 +480,7 @@ mod tests {
                 c.fetch_add(1, Ordering::AcqRel);
                 std::thread::sleep(std::time::Duration::from_millis(30));
                 let _ = set_volume_checked(p, 10);
-                WorkerResult::CommandDone(PlayerCommand::Toggle, Ok(()))
+                WorkerResult::Command(CommandOutcome::ok(PlayerCommand::Toggle))
             });
         }
         assert!(w.is_busy());
