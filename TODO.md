@@ -48,7 +48,7 @@ Legend: `[ ]` todo · `[x]` done · **A/B** = with / without a Spotify Client ID
       VERSION == Cargo.toml version check, on `macos-15`.
 - [ ] 0.4 **[owner]** Run the sibling agent prompts in `docs/AGENT-PROMPTS.md` (1 = Sonar,
       2 = headless-spotify) whenever convenient. Not blocking. Update their `Status:` lines when done.
-- [ ] 0.5 Confirm CI is green on GitHub after the first push; add the badge to the README.
+- [x] 0.5 Confirm CI is green on GitHub after the first push; add the badge to the README. (green on first push, badge is in the README)
       Needs: 0.3. Done when: Actions tab shows a green run on `main`.
 
 ---
