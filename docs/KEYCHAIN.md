@@ -39,6 +39,20 @@ dialog is a modal GUI panel that nobody is present to dismiss.
 | F | v3 (different identity) reads v1's item | **blocks** |
 | G | `security` (Apple-signed) reads v1's item | **blocks** |
 
+The block is not a permanent hang, and the distinction matters. macOS **caches the
+authorization decision per (item, code identity)**:
+
+- the **first** time a given identity touches a foreign item, it raises the dialog
+  and the call blocks (rows C, D, F, G);
+- every **subsequent** call by that *same* identity returns an error immediately,
+  with no dialog.
+
+Neither returns the secret, so the item is unreadable either way. What makes this
+fatal for trak is that the blocking case is always the one it hits: every release
+is a brand-new identity, so there is never a cached decision to fall back on. If a
+future reader of this doc only ever sees the second behaviour, that is an artifact
+of testing the same binary twice, not evidence the problem went away.
+
 The Keychain itself was verified healthy throughout, so none of these blocks are a
 locked-keychain artefact:
 
@@ -67,7 +81,8 @@ Therefore the invariant is:
 
 > A keychain item is silently readable **only** by the exact binary that created
 > it. Every other process — a newer build, an older build, even Apple's own
-> `security` — must obtain the user's authorization through a GUI dialog.
+> `security` — fails to read it, either by raising a GUI dialog (the first time
+> that identity tries) or by returning an error (thereafter).
 
 Row E is the one nuance worth keeping: a binary that *creates* its own item is
 fine, because there is nothing to authorize. So the Keychain looks like it works
@@ -135,6 +150,12 @@ The directory on this machine is already correct:
 - `docs/WEB-API.md` §6 is unaffected but still applies: a refresh token only lives
   **6 months** regardless of where it is stored, so the reconnect flow is needed
   either way.
+
+## Re-checking this yourself
+
+```sh
+./spikes/verify.sh          # the 1.8 section reproduces this end to end
+```
 
 ## Reproducing
 

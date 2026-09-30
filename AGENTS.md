@@ -147,10 +147,26 @@ Slow work runs on worker threads and returns as `Event`s. Details: `docs/ARCHITE
 ## Verifying against real Spotify (manual, keep it short)
 
 ```sh
+./spikes/verify.sh          # re-checks every Phase 1 spike claim; ~3 min, prints PASS/FAIL
+./spikes/verify.sh --quick  # same, minus the slow tap and notification sections
+```
+
+**Read `spikes/verify.sh` before re-deriving anything in `docs/APPLESCRIPT.md`,
+`docs/TERMINALS.md`, `docs/AUDIO-TAP.md` or `docs/KEYCHAIN.md`** — it runs the
+spikes and compares their output against what those docs claim, and a FAIL means
+the doc is wrong. It is the fastest way for a later agent to check its own work
+against a claim it did not make. It reads Spotify and, in the 1.3 and 1.5
+sections, pauses / seeks / skips a track, so it is not something to run while
+someone is listening.
+
+To check one thing by hand:
+
+```sh
 osascript -e 'tell application "Spotify" to return player state as string'   # via the shim in agent sessions
 ```
-Use only when a task says so, and never in automated tests. Record real outputs as fixtures under
-`tests/fixtures/` so future tests are hermetic.
+
+Use only when a task says so, and never in automated tests. Record real outputs as
+fixtures under `tests/fixtures/` so future tests are hermetic.
 
 ## When you are stuck or something contradicts the docs
 
