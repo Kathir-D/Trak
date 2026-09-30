@@ -167,12 +167,13 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
       `testutil` exist. > `clap` will not flatten `trak toggle shuffle|repeat` next to a
       play/pause `toggle`, so there is no play/pause subcommand: shpotify's `pause` *is* the
       toggle, and `toggle` takes the required `shuffle|repeat` argument SPEC §9 specifies.
-- [ ] 2.2 **`Player` trait + `PlayerState`/`TrackInfo` types + `FakePlayer`.** Types and the trait
-      are in `src/player/mod.rs`; **`FakePlayer` is not written yet** — the tests so far drive the
-      *parser* against the real fixtures instead, which is the part that had bugs. > `TrackInfo`
-      uses `Option` for popularity / play_count / artwork_url / uri, because an advert really does
-      report 0 and `missing value` and the Info tab has to tell "none" from "zero" (TODO 3.7).
-      `PlayerState::volume` carries the volume trak *set*, not the raw read (COMPAT rule 5).
+- [x] 2.2 **`Player` trait + `PlayerState`/`TrackInfo` types + `FakePlayer`.** `src/player/fake.rs`.
+      > `Quirks` is the important part: `quantise_volume`, `ignore_volume_writes`, `not_running`,
+      `denied`, `hang`. Without them the read-back logic and the idle card could only be tested
+      against a player that always behaves. > `writes()` records every write so a test can prove a
+      **poll never writes** (COMPAT rule 3). `volume_write_landed` is the ±1 rule, in one place.
+      `TrackInfo` uses `Option` for popularity / play_count / artwork_url / uri, because an advert
+      really does report 0 and `missing value` and the Info tab has to tell "none" from "zero".
 - [x] 2.3 **`AppleScriptPlayer`.** `src/player/applescript.rs` + `src/player/parse.rs`. > Script is
       fed on **stdin**, not `-e` or a file, because the `is running` guard is a multi-line `if` and
       a multi-line `-e` is a `-2740` syntax error (`docs/APPLESCRIPT.md` §3). Guard is the first
@@ -184,20 +185,34 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
       rather than escaping, so a quote in a user-supplied URI cannot close the AppleScript string
       literal. Verified live: `trak status` prints real state, `-1743` becomes a named
       `PermissionDenied` with a message pointing at Privacy & Security › Automation.
-- [ ] 2.4 **Write actions with read-back**: play, pause, toggle, next, prev, replay, seek, set volume
-      (read-back per COMPAT rule 5), shuffle, repeat, `play track "<uri>"`. Every write is user-initiated
-      only. Done when: unit tests on generated script text; manual check against Spotify.
-- [ ] 2.5 **CLI: `status`, `share`, `vol`, `pos`, `toggle`, playback verbs** with the decided
-      output style (SPEC §9): tidy, coloured only on a TTY, `--plain`, `--json`. Exit codes 0/1/2.
-      Done when: `assert_cmd` tests against `FakePlayer` cover each subcommand incl. errors; running
-      `trak status` prints a small card with a progress bar; piping it prints plain text.
-- [ ] 2.6 **`share url|uri`** copies to clipboard via `pbcopy` (fake in tests). Done when tested.
-- [ ] 2.7 **`play <name>` / `play album|artist|list <name>` / `play uri`.** `uri` works without an API
-      (AppleScript). Name searches need Version A: without a Client ID print how to get one and exit 2.
-      Needs: 7.x for the search half. Done when: `play uri` works now; the search half is stubbed with
-      the friendly error and a `TODO(7.x)` — do not leave dead code.
-- [ ] 2.8 **`trak` (no args) → TUI entry; `trak config` → settings entry** (placeholders until 3.x / 5.x).
-      Done when: both exist and print a clear "not built yet" message with exit 2 until replaced.
+- [x] 2.4 **Write actions with read-back.** `src/player/actions.rs` holds `seek_checked`,
+      `set_volume_checked`, `step_volume` and the background `Worker`. > The ±1 tolerance lives in
+      **one** function, so there is one implementation and one set of tests; getting this wrong is
+      what makes trak hide the volume meter after every keypress. > A seek is compared against the
+      **clamped** target, not the raw request — the first version reported every over-seek as a
+      failure, which two tests caught. > The `Worker` drops a submission while one is in flight, so
+      a held key cannot build a backlog. > `check_playable_uri` is an **allow-list in
+      `player/mod.rs`, not in the AppleScript transport** — it was in the transport first, and the
+      CLI tests caught that the fake bypassed it. User input enters trak at exactly one place.
+- [x] 2.5 **CLI.** Every shpotify command: `status [artist|album|track]`, `play`, `pause`, `stop`,
+      `quit`, `next`, `prev`, `replay`, `pos`, `vol up|down|show`, `toggle shuffle|repeat`,
+      `share url|uri`. Tidy on a TTY, plain when piped, `--plain` and `--json`. Exit codes 0/1/2.
+      27 `assert_cmd` tests via a hidden `--fake` flag, so they run in CI with no Spotify.
+      > `stop` and `quit` are in SPEC §9 and shpotify; `stop` is "pause if playing" because
+      Spotify's dictionary has **no `stop` command** (`tell ... to stop` silently no-ops).
+      > There is no play/pause subcommand: `clap` will not flatten `toggle shuffle|repeat` beside
+      one, and shpotify's `pause` *is* the toggle. > Piped output carries no ANSI, asserted.
+      > Verified live against real Spotify: `status`, `vol up|down` (read-back visible as target−1,
+      which is the quantisation), `pos 60`.
+- [x] 2.6 **`share url|uri`** copies via `pbcopy` and prints the link. > A clipboard failure is
+      not worth failing the command over, so it is best-effort; the link always goes to stdout.
+- [ ] 2.7 **`play <name>` / `play album|artist|list <name>` / `play uri`.** > The URI half is
+      done and tested: `trak play <spotify:uri>` works, and anything that is not a Spotify URI or a
+      search term is rejected before it reaches AppleScript. > The search half still needs 7.12; it
+      prints the Client ID steps and exits 2, which shpotify also did. `album|artist|list` subcommands
+      are still to add — they only make sense with search.
+- [ ] 2.8 **`trak` (no args) → TUI entry; `trak config` → settings entry.** > Bare `trak` exists
+      and says what does work, exit 2. Replaced by the TUI in 3.1. `trak config` not added yet.
 - [ ] 2.9 Update README "Usage" with real, copy-pasted output of each command. Done when: matches
       the binary.
 

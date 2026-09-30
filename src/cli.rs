@@ -4,7 +4,7 @@
 //! scripts. Exit codes are 0 ok, 1 runtime failure, 2 usage or missing setup
 //! (SPEC §9).
 
-use crate::player::{AppleScriptPlayer, Player, PlayerError, PlayerState};
+use crate::player::{Player, PlayerError, PlayerState};
 
 /// SPEC §9: 0 ok, 1 runtime failure, 2 usage / missing setup.
 pub const EXIT_OK: i32 = 0;
@@ -234,7 +234,9 @@ pub fn report(e: PlayerError) -> (String, i32) {
 }
 
 /// Run one player action and report it the way shpotify did.
-pub fn run_action(player: &mut AppleScriptPlayer, action: &str) -> i32 {
+///
+/// Only ever called for a user-initiated command (COMPAT rule 3).
+pub fn run_action<P: Player + ?Sized>(player: &mut P, action: &str) -> i32 {
     let result = match action {
         "play" => player.play(),
         "pause" => player.pause(),
@@ -248,6 +250,48 @@ pub fn run_action(player: &mut AppleScriptPlayer, action: &str) -> i32 {
     };
     match result {
         Ok(()) => EXIT_OK,
+        Err(e) => {
+            let (msg, code) = report(e);
+            eprintln!("{msg}");
+            code
+        }
+    }
+}
+
+/// `vol up` / `vol down`, through the one place the read-back rule lives.
+pub fn run_volume<P: Player + ?Sized>(player: &mut P, step: i16, json: bool) -> i32 {
+    match crate::player::actions::step_volume(player, step) {
+        Ok(o) => {
+            if let Some(notice) = o.notice() {
+                eprintln!("{notice}");
+                return EXIT_FAIL;
+            }
+            if json {
+                println!("{{\"volume\":{}}}", o.read);
+            } else {
+                println!("{}", o.read);
+            }
+            EXIT_OK
+        }
+        Err(e) => {
+            let (msg, code) = report(e);
+            eprintln!("{msg}");
+            code
+        }
+    }
+}
+
+/// `pos <seconds>`, also read back.
+pub fn run_seek<P: Player + ?Sized>(player: &mut P, secs: f64) -> i32 {
+    match crate::player::actions::seek_checked(player, secs) {
+        Ok(o) => {
+            if let Some(notice) = o.notice() {
+                eprintln!("{notice}");
+                return EXIT_FAIL;
+            }
+            println!("{}", crate::cli::format_time(o.read as f64));
+            EXIT_OK
+        }
         Err(e) => {
             let (msg, code) = report(e);
             eprintln!("{msg}");

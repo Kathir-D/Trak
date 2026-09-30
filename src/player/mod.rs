@@ -4,10 +4,18 @@
 //! lands here. The types are deliberately dumb: no Spotify-specific quirks, no
 //! formatting, no I/O. Rendering and formatting live in `cli/` and `tui/`.
 
+pub mod actions;
 pub mod applescript;
+pub mod fake;
 pub mod parse;
 
 pub use applescript::AppleScriptPlayer;
+pub use fake::volume_write_landed;
+#[allow(
+    unused_imports,
+    reason = "re-exported for the TUI and the CLI tests, TODO 3.2"
+)]
+pub use fake::{FakePlayer, Quirks};
 
 /// What Spotify is doing right now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,6 +152,40 @@ impl PlayerState {
     }
 }
 
+/// The URI shapes `play track` accepts, and nothing else.
+///
+/// This lives here rather than in the AppleScript transport because it is a rule
+/// about what trak will do, not about how it is done: the URI is interpolated
+/// into an AppleScript string literal, so a quote in it would close the literal
+/// and let the rest run as a second command. An allow-list makes that
+/// unrepresentable instead of attempting to escape it, and it means every backend
+/// enforces the same rule.
+pub fn check_playable_uri(uri: &str) -> Result<(), PlayerError> {
+    const KINDS: [&str; 6] = [
+        "spotify:track:",
+        "spotify:album:",
+        "spotify:playlist:",
+        "spotify:artist:",
+        "spotify:episode:",
+        "spotify:show:",
+    ];
+    // The id after the prefix must be non-empty: "spotify:track:" on its own is a
+    // malformed URI, not a playable one.
+    let ok = KINDS
+        .iter()
+        .any(|k| uri.strip_prefix(k).is_some_and(|id| !id.is_empty()))
+        && !uri.contains('"')
+        && !uri.contains('\\')
+        && !uri.contains('\n');
+    if ok {
+        Ok(())
+    } else {
+        Err(PlayerError::Script(format!(
+            "not a Spotify URI trak can play: {uri:?}"
+        )))
+    }
+}
+
 /// Everything trak can ask Spotify to do.
 ///
 /// Read calls are side-effect free and may be made as often as needed (COMPAT
@@ -192,4 +234,57 @@ pub enum PlayerError {
     /// Anything osascript reported that is not one of the above.
     #[error("{0}")]
     Script(String),
+}
+
+#[cfg(test)]
+mod uri_tests {
+    use super::check_playable_uri;
+
+    #[test]
+    fn only_playable_uris_are_accepted() {
+        for good in [
+            "spotify:track:6HacgXCExkzS552ILfJTXu",
+            "spotify:album:abc",
+            "spotify:playlist:xyz",
+            "spotify:artist:123",
+            "spotify:episode:e1",
+            "spotify:show:s1",
+        ] {
+            assert!(
+                check_playable_uri(good).is_ok(),
+                "{good} should be playable"
+            );
+        }
+    }
+
+    #[test]
+    fn a_uri_that_is_not_spotify_is_rejected() {
+        for bad in [
+            "",
+            "https://open.spotify.com/track/x",
+            // An advert has no play target, so it must not be accepted.
+            "spotify:ad:abc",
+            "not-a-uri",
+            // An empty id is malformed, not playable.
+            "spotify:track:",
+        ] {
+            let e = check_playable_uri(bad).unwrap_err();
+            assert!(
+                e.to_string().contains("not a Spotify URI"),
+                "{bad:?} gave {e}"
+            );
+        }
+    }
+
+    /// A user-supplied string must never be able to close the string literal in
+    /// the generated script and run the rest as a second command.
+    #[test]
+    fn a_quote_in_a_uri_cannot_inject_a_command() {
+        for evil in [
+            "spotify:track:x\" & (do shell script \"id\") & \"",
+            "spotify:track:x\\nset sound volume to 0",
+        ] {
+            assert!(check_playable_uri(evil).is_err(), "{evil:?} was accepted");
+        }
+    }
 }

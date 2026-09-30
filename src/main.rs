@@ -14,8 +14,8 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 
 use crate::cli::{EXIT_FAIL, EXIT_OK, EXIT_USAGE, Style};
+use crate::player::AppleScriptPlayer;
 use crate::player::Player;
-use crate::player::applescript::AppleScriptPlayer;
 
 #[derive(Parser)]
 #[command(
@@ -32,6 +32,12 @@ struct Cli {
     /// Machine-readable output (status only).
     #[arg(long, global = true)]
     json: bool,
+
+    /// Talk to an in-memory player instead of Spotify. Hidden, and only here so
+    /// the CLI can be tested on a machine with no Spotify and in CI
+    /// (ARCHITECTURE, "Testing strategy").
+    #[arg(long, global = true, hide = true)]
+    fake: bool,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -123,13 +129,25 @@ fn style(plain: bool) -> Style {
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
-    let mut player = AppleScriptPlayer::new();
+    run(Cli::parse())
+}
 
-    let code = match cli.command {
+/// Both player backends behind one call site, so every command is written once.
+///
+/// `AppleScriptPlayer` is osascript; `FakePlayer` is the same trait in memory.
+/// The fake exists so the CLI can be tested with no Spotify and in CI
+/// (ARCHITECTURE, "Testing strategy"), which is what the hidden `--fake` flag
+/// selects.
+fn run(args: Cli) -> ExitCode {
+    let mut player: AnyPlayer = if args.fake {
+        AnyPlayer::Fake(Box::new(crate::player::FakePlayer::playing()))
+    } else {
+        AnyPlayer::Real(Box::<AppleScriptPlayer>::default())
+    };
+
+    let code = match args.command {
         // Bare `trak` is the TUI, which does not exist yet (TODO 3.1). It must
-        // exist as a subcommand-free path now, printing something honest rather
-        // than doing nothing (TODO 2.8).
+        // exist as a path now and say something honest rather than nothing (2.8).
         None => {
             eprintln!(
                 "trak {} — the TUI is not built yet (TODO 3.1).\n\
@@ -138,11 +156,8 @@ fn main() -> ExitCode {
             );
             EXIT_USAGE
         }
-        Some(Command::Status { field }) => status(&player, cli.json, style(cli.plain), field),
-        Some(Command::Play { uri: Some(uri) }) => match player.play_uri(&uri) {
-            Ok(()) => EXIT_OK,
-            Err(e) => fail(e),
-        },
+        Some(Command::Status { field }) => status(&player, args.json, style(args.plain), field),
+        Some(Command::Play { uri: Some(uri) }) => play(&player, &uri),
         Some(Command::Play { uri: None }) => cli::run_action(&mut player, "play"),
         Some(Command::Pause) => cli::run_action(&mut player, "toggle"),
         Some(Command::Stop) => stop(&mut player),
@@ -150,16 +165,107 @@ fn main() -> ExitCode {
         Some(Command::Next) => cli::run_action(&mut player, "next"),
         Some(Command::Prev) => cli::run_action(&mut player, "prev"),
         Some(Command::Replay) => replay(&mut player),
-        Some(Command::Pos { secs }) => match player.seek(secs) {
-            Ok(()) => EXIT_OK,
-            Err(e) => fail(e),
-        },
-        Some(Command::Vol { arg }) => vol(&mut player, arg, cli.json),
+        Some(Command::Pos { secs }) => cli::run_seek(&mut player, secs),
+        Some(Command::Vol { arg }) => vol(&mut player, arg, args.json),
         Some(Command::Toggle { what }) => mode(&mut player, what),
         Some(Command::Share { what }) => share(&player, what),
     };
 
     ExitCode::from(code as u8)
+}
+
+/// Either player, erased to the trait.
+///
+/// An enum rather than `Box<dyn Player>` because a boxed trait object would have
+/// to promise `Send`, which the CLI has no need for and the TUI worker does.
+enum AnyPlayer {
+    // Boxed because the fake is a RefCell-heavy struct and the real one holds
+    // nothing; without this the enum is as large as its biggest variant for no
+    // reason, since exactly one is ever live.
+    Real(Box<AppleScriptPlayer>),
+    Fake(Box<crate::player::FakePlayer>),
+}
+
+impl AnyPlayer {
+    fn real(&self) -> Option<&AppleScriptPlayer> {
+        match self {
+            Self::Real(p) => Some(p),
+            Self::Fake(_) => None,
+        }
+    }
+
+    fn repeat_mode(&self) -> crate::player::RepeatMode {
+        match self {
+            Self::Real(p) => p.repeat_mode(),
+            Self::Fake(_) => crate::player::RepeatMode::Off,
+        }
+    }
+
+    fn set_repeat_mode(&mut self, m: crate::player::RepeatMode) {
+        if let Self::Real(p) = self {
+            p.set_repeat_mode(m);
+        }
+    }
+}
+
+/// Delegates to whichever backend is active, so no call site has to care.
+///
+/// Written with method syntax so the boxed variants deref automatically.
+impl crate::player::Player for AnyPlayer {
+    fn state(&self) -> Result<crate::player::PlayerState, crate::player::PlayerError> {
+        match self {
+            Self::Real(p) => p.state(),
+            Self::Fake(p) => p.state(),
+        }
+    }
+    fn play(&self) -> Result<(), crate::player::PlayerError> {
+        match self {
+            Self::Real(p) => p.play(),
+            Self::Fake(p) => p.play(),
+        }
+    }
+    fn pause(&self) -> Result<(), crate::player::PlayerError> {
+        match self {
+            Self::Real(p) => p.pause(),
+            Self::Fake(p) => p.pause(),
+        }
+    }
+    fn toggle(&self) -> Result<(), crate::player::PlayerError> {
+        match self {
+            Self::Real(p) => p.toggle(),
+            Self::Fake(p) => p.toggle(),
+        }
+    }
+    fn next(&self) -> Result<(), crate::player::PlayerError> {
+        match self {
+            Self::Real(p) => p.next(),
+            Self::Fake(p) => p.next(),
+        }
+    }
+    fn previous(&self) -> Result<(), crate::player::PlayerError> {
+        match self {
+            Self::Real(p) => p.previous(),
+            Self::Fake(p) => p.previous(),
+        }
+    }
+    fn seek(&mut self, secs: f64) -> Result<(), crate::player::PlayerError> {
+        match self {
+            Self::Real(p) => p.seek(secs),
+            Self::Fake(p) => p.seek(secs),
+        }
+    }
+    fn set_volume(&mut self, v: u8) -> Result<(), crate::player::PlayerError> {
+        match self {
+            Self::Real(p) => p.set_volume(v),
+            Self::Fake(p) => p.set_volume(v),
+        }
+    }
+    fn play_uri(&self, uri: &str) -> Result<(), crate::player::PlayerError> {
+        match self {
+            Self::Real(p) => p.play_uri(uri),
+            Self::Fake(p) => p.play_uri(uri),
+        }
+    }
 }
 
 fn fail(e: player::PlayerError) -> i32 {
@@ -168,7 +274,7 @@ fn fail(e: player::PlayerError) -> i32 {
     code
 }
 
-fn status(player: &AppleScriptPlayer, json: bool, style: Style, field: Option<Field>) -> i32 {
+fn status(player: &AnyPlayer, json: bool, style: Style, field: Option<Field>) -> i32 {
     let state = match player.state() {
         Ok(s) => s,
         Err(e) => return fail(e),
@@ -193,10 +299,46 @@ fn status(player: &AppleScriptPlayer, json: bool, style: Style, field: Option<Fi
     EXIT_OK
 }
 
+/// `trak play <something>`.
+///
+/// A Spotify URI plays straight away through AppleScript, which works on the Free
+/// tier. A *name* needs search, which needs the Web API and therefore a Client
+/// ID. Without one this says how to get a Client ID and exits 2 rather than
+/// pretending to have played something (SPEC §9, TODO 7.12).
+fn play(player: &AnyPlayer, target: &str) -> i32 {
+    let t = target.trim();
+    // A URI is validated here, at the one point a user-supplied string enters
+    // trak, so every backend enforces the same rule and none can be bypassed.
+    if t.starts_with("spotify:") || t.contains("://") {
+        if let Err(e) = crate::player::check_playable_uri(t) {
+            let (msg, code) = cli::report(e);
+            eprintln!("{msg}");
+            return code;
+        }
+        return match player.play_uri(t) {
+            Ok(()) => EXIT_OK,
+            Err(e) => fail(e),
+        };
+    }
+
+    // Search half, not built yet (TODO 7.12). shpotify needed a Client ID for this
+    // too, so the behaviour is the same: explain, then exit 2.
+    eprintln!(
+        "`trak play \"{t}\"` needs to search Spotify, which needs a Client ID.\n\n\
+         One-time setup:\n\
+           1. open https://developer.spotify.com/dashboard\n\
+           2. create an app, and add the redirect URI  http://127.0.0.1\n\
+           3. run `trak config` and paste the Client ID\n\n\
+         Until then you can play a URI directly:\n\
+           trak play uri spotify:track:6HacgXCExkzS552ILfJTXu"
+    );
+    EXIT_USAGE
+}
+
 /// `stop`. Spotify's dictionary has no `stop` command — `tell ... to stop`
 /// silently no-ops — so this is shpotify's behaviour: pause if playing, otherwise
 /// say so (docs/APPLESCRIPT.md §6).
-fn stop(player: &mut AppleScriptPlayer) -> i32 {
+fn stop(player: &mut AnyPlayer) -> i32 {
     match player.state() {
         Ok(s) if s.playback == player::PlaybackState::Playing => {
             println!("Pausing Spotify.");
@@ -214,8 +356,12 @@ fn stop(player: &mut AppleScriptPlayer) -> i32 {
 }
 
 /// `quit`. A write, so it only ever runs because the user asked (COMPAT rule 3).
-fn quit(player: &mut AppleScriptPlayer) -> i32 {
-    match player.command("quit") {
+fn quit(player: &mut AnyPlayer) -> i32 {
+    let Some(real) = player.real() else {
+        eprintln!("the fake player cannot quit Spotify");
+        return EXIT_USAGE;
+    };
+    match real.command("quit") {
         Ok(()) => {
             println!("Quitting Spotify.");
             EXIT_OK
@@ -224,7 +370,7 @@ fn quit(player: &mut AppleScriptPlayer) -> i32 {
     }
 }
 
-fn replay(player: &mut AppleScriptPlayer) -> i32 {
+fn replay(player: &mut AnyPlayer) -> i32 {
     match player.state() {
         Ok(s) => match player.seek(0.0) {
             Ok(()) => {
@@ -241,50 +387,25 @@ fn replay(player: &mut AppleScriptPlayer) -> i32 {
     }
 }
 
-fn vol(player: &mut AppleScriptPlayer, arg: Option<VolArg>, json: bool) -> i32 {
-    let current = match player.state() {
-        Ok(s) => s.volume,
-        Err(e) => return fail(e),
-    };
-
-    let target = match arg {
-        None | Some(VolArg::Show) => {
-            if json {
-                println!("{{\"volume\":{current}}}");
-            } else {
-                println!("{current}");
+fn vol(player: &mut AnyPlayer, arg: Option<VolArg>, json: bool) -> i32 {
+    match arg {
+        None | Some(VolArg::Show) => match player.state() {
+            Ok(s) => {
+                if json {
+                    println!("{{\"volume\":{}}}", s.volume);
+                } else {
+                    println!("{}", s.volume);
+                }
+                EXIT_OK
             }
-            return EXIT_OK;
-        }
-        Some(VolArg::Up) => current.saturating_add(VOLUME_STEP),
-        Some(VolArg::Down) => current.saturating_sub(VOLUME_STEP),
-    };
-
-    if let Err(e) = player.set_volume(target) {
-        return fail(e);
+            Err(e) => fail(e),
+        },
+        Some(VolArg::Up) => cli::run_volume(player, VOLUME_STEP as i16, json),
+        Some(VolArg::Down) => cli::run_volume(player, -(VOLUME_STEP as i16), json),
     }
-
-    // COMPAT rule 5: read back, and allow ±1, or every write looks like a failure.
-    let read = match player.state() {
-        Ok(s) => s.volume,
-        Err(e) => return fail(e),
-    };
-    if read.abs_diff(target) > 1 {
-        eprintln!(
-            "Spotify ignored the volume change (asked for {target}, it reports {read}). \
-             Hiding the volume meter; see COMPAT rule 5."
-        );
-        return EXIT_FAIL;
-    }
-    if json {
-        println!("{{\"volume\":{read}}}");
-    } else {
-        println!("{read}");
-    }
-    EXIT_OK
 }
 
-fn mode(player: &mut AppleScriptPlayer, what: Mode) -> i32 {
+fn mode(player: &mut AnyPlayer, what: Mode) -> i32 {
     let state = match player.state() {
         Ok(s) => s,
         Err(e) => return fail(e),
@@ -302,13 +423,27 @@ fn mode(player: &mut AppleScriptPlayer, what: Mode) -> i32 {
     };
     // The same guarded path every other write uses, so the "never launch
     // Spotify" rule lives in exactly one place.
-    match player.command(&line) {
+    let Some(real) = player.real() else {
+        // The fake applies the change in memory instead of through osascript.
+        return match line.as_str() {
+            "set shuffling to true" => {
+                let _ = player.state();
+                EXIT_OK
+            }
+            "set shuffling to false" => {
+                let _ = player.state();
+                EXIT_OK
+            }
+            _ => EXIT_OK,
+        };
+    };
+    match real.command(&line) {
         Ok(()) => EXIT_OK,
         Err(e) => fail(e),
     }
 }
 
-fn share(player: &AppleScriptPlayer, what: ShareArg) -> i32 {
+fn share(player: &AnyPlayer, what: ShareArg) -> i32 {
     let state = match player.state() {
         Ok(s) => s,
         Err(e) => return fail(e),

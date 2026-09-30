@@ -286,40 +286,8 @@ impl Player for AppleScriptPlayer {
 
     fn play_uri(&self, uri: &str) -> Result<(), PlayerError> {
         let uri = uri.trim();
-        check_playable_uri(uri)?;
+        crate::player::check_playable_uri(uri)?;
         self.command(&format!("play track \"{uri}\""))
-    }
-}
-
-/// The URI shapes AppleScript's `play track` accepts, and nothing else.
-///
-/// This is a validator rather than an escaper on purpose: the URI is interpolated
-/// into an AppleScript string literal, so a quote in it would otherwise close the
-/// literal and let the rest of the string run as a second command. An allow-list
-/// makes that unrepresentable instead of trying to escape it.
-pub fn check_playable_uri(uri: &str) -> Result<(), PlayerError> {
-    const KINDS: [&str; 6] = [
-        "spotify:track:",
-        "spotify:album:",
-        "spotify:playlist:",
-        "spotify:artist:",
-        "spotify:episode:",
-        "spotify:show:",
-    ];
-    // The id after the prefix must be non-empty: "spotify:track:" on its own is
-    // a malformed URI, not a playable one.
-    let valid = KINDS
-        .iter()
-        .any(|k| uri.strip_prefix(k).is_some_and(|id| !id.is_empty()))
-        && !uri.contains('"')
-        && !uri.contains('\\')
-        && !uri.contains('\n');
-    if valid {
-        Ok(())
-    } else {
-        Err(PlayerError::Script(format!(
-            "not a Spotify URI trak can play: {uri:?}"
-        )))
     }
 }
 
@@ -396,6 +364,9 @@ mod tests {
         assert!(p.seek(-1.0).is_err());
         assert!(p.seek(f64::NAN).is_err());
     }
+
+    #[cfg(test)]
+    use crate::player::check_playable_uri;
 
     #[test]
     fn only_playable_uris_are_accepted() {
