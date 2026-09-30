@@ -160,18 +160,30 @@ Each spike ends with facts written to a doc, not just working code. Throwaway co
 Reference: upstream `spotify` bash script at https://github.com/hnarayanan/shpotify (or the local
 clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference only; write idiomatic Rust.
 
-- [ ] 2.1 **Crate skeleton.** Add deps (`clap` derive, `anyhow`/`thiserror`, `serde`, `serde_json`,
-      `toml`, `dirs` or manual XDG). Create the module tree from ARCHITECTURE (empty modules OK).
-      Record each new dependency in `THIRD-PARTY-NOTICES.md`. Done when: `cargo build`, `clippy -D
-      warnings`, `fmt --check` pass.
-- [ ] 2.2 **`Player` trait + `PlayerState`/`TrackInfo` types + `FakePlayer`.**
-      Needs: 1.1. Done when: unit tests drive the fake through play/pause/next/seek/volume.
-- [ ] 2.3 **`AppleScriptPlayer`.** Uses `$TRAK_OSASCRIPT` (default `/usr/bin/osascript`), the batched
-      read script (1.2), a 5 s timeout, `is running` guard (never launches Spotify), typed errors
-      (`NotRunning`, `PermissionDenied` [-1743], `Timeout`, `Script(String)`). Parsing is a pure
-      function tested against the fixtures from 1.1. Done when: parsing tests pass and a manual run
-      prints real state; permission-denied produces a friendly message telling the user to allow their
-      terminal in System Settings › Privacy & Security › Automation.
+- [x] 2.1 **Crate skeleton.** `clap` derive + `thiserror` only, so far. > `serde`/`toml`/`dirs` are
+      not added yet: nothing needs them until 5.x (config) and 6.x (lyrics cache), and adding a
+      dependency before it is used is how the lock file rots. `assert_cmd`/`predicates` are
+      dev-dependencies for the 2.5 CLI tests. Module tree from ARCHITECTURE; `player/`, `cli/` and
+      `testutil` exist. > `clap` will not flatten `trak toggle shuffle|repeat` next to a
+      play/pause `toggle`, so there is no play/pause subcommand: shpotify's `pause` *is* the
+      toggle, and `toggle` takes the required `shuffle|repeat` argument SPEC §9 specifies.
+- [ ] 2.2 **`Player` trait + `PlayerState`/`TrackInfo` types + `FakePlayer`.** Types and the trait
+      are in `src/player/mod.rs`; **`FakePlayer` is not written yet** — the tests so far drive the
+      *parser* against the real fixtures instead, which is the part that had bugs. > `TrackInfo`
+      uses `Option` for popularity / play_count / artwork_url / uri, because an advert really does
+      report 0 and `missing value` and the Info tab has to tell "none" from "zero" (TODO 3.7).
+      `PlayerState::volume` carries the volume trak *set*, not the raw read (COMPAT rule 5).
+- [x] 2.3 **`AppleScriptPlayer`.** `src/player/applescript.rs` + `src/player/parse.rs`. > Script is
+      fed on **stdin**, not `-e` or a file, because the `is running` guard is a multi-line `if` and
+      a multi-line `-e` is a `-2740` syntax error (`docs/APPLESCRIPT.md` §3). Guard is the first
+      statement, so a non-running Spotify can never be launched (COMPAT rule 2). > **Two real bugs
+      the fixture tests caught, both the same mistake:** the parser was strict about numeric and
+      boolean fields, but "nothing is loaded" reports **empty strings for every field, not zeros**
+      — so the exact state the idle card has to render was rejected. Empty now means 0/false;
+      genuinely malformed values still fail loudly. > `play_uri` validates against an **allow-list**
+      rather than escaping, so a quote in a user-supplied URI cannot close the AppleScript string
+      literal. Verified live: `trak status` prints real state, `-1743` becomes a named
+      `PermissionDenied` with a message pointing at Privacy & Security › Automation.
 - [ ] 2.4 **Write actions with read-back**: play, pause, toggle, next, prev, replay, seek, set volume
       (read-back per COMPAT rule 5), shuffle, repeat, `play track "<uri>"`. Every write is user-initiated
       only. Done when: unit tests on generated script text; manual check against Spotify.
