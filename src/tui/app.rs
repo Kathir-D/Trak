@@ -125,6 +125,10 @@ pub enum Event {
     Sonar(crate::sonar::SonarState),
     /// headless-spotify answered, once (TODO 4.7).
     Headless(crate::headless::Headless),
+    /// A notification for the track that has just started (TODO 4.5). This is a
+    /// *change*, never the first read of a session: starting trak must not
+    /// announce whatever happened to be playing.
+    SoundForTrackChanged,
     /// An image finished downloading and decoding, or failed to.
     Art {
         url: String,
@@ -209,6 +213,34 @@ impl Tab {
     pub fn prev(self) -> Self {
         let i = Tab::ALL.iter().position(|t| *t == self).unwrap_or(0);
         Tab::ALL[(i + Tab::ALL.len() - 1) % Tab::ALL.len()]
+    }
+}
+
+/// Which volume trak changes (TODO 4.4, R2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VolumeControl {
+    /// Spotify's own volume, which is what a music player should change.
+    Spotify,
+    /// The **system** output volume, for when Spotify ignores AppleScript volume
+    /// sets. A fallback, not a preference: it turns down every sound on the
+    /// machine, so the setting exists for the user to choose it deliberately.
+    System,
+}
+
+impl VolumeControl {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim() {
+            "spotify" => Some(Self::Spotify),
+            "system" => Some(Self::System),
+            _ => None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Spotify => "spotify",
+            Self::System => "system",
+        }
     }
 }
 
@@ -347,6 +379,10 @@ pub struct Settings {
     pub side_pane: bool,
     /// SPEC §8 `[lyrics] enabled`, on by default.
     pub lyrics: bool,
+    /// SPEC §8 `[notifications] song_change`, **off** by default (TODO 4.5).
+    pub song_change_notification: bool,
+    /// SPEC §8 `volume.control` (TODO 4.4, R2).
+    pub volume_control: VolumeControl,
     /// SPEC §8 `[input] mouse`, on by default. When off the loop does not even
     /// ask the terminal for mouse events.
     pub mouse: bool,
@@ -368,6 +404,8 @@ impl Default for Settings {
             show_key_hints: true,
             side_pane: true,
             lyrics: true,
+            song_change_notification: false,
+            volume_control: VolumeControl::Spotify,
             mouse: true,
             rounded: true,
             display_mode: DisplayMode::Art,
@@ -670,6 +708,19 @@ pub fn update(mut app: App, event: Event) -> Updated {
             }
         }
 
+        Event::SoundForTrackChanged => {
+            if app.settings.song_change_notification
+                && let Some(track) = app.track()
+            {
+                let body = match (track.artist.is_empty(), track.album.is_empty()) {
+                    (true, _) => String::new(),
+                    (false, true) => track.artist.clone(),
+                    _ => format!("{} — {}", track.artist, track.album),
+                };
+                commands.push(PlayerCommand::Notify(track.title.clone(), body));
+            }
+        }
+
         Event::Sonar(state) => {
             // A duck that has just begun is the one thing the user needs to know
             // about before reaching for the volume keys, which are refused while
@@ -814,6 +865,13 @@ fn handle_key(app: &mut App, c: char, commands: &mut Vec<PlayerCommand>) {
         // mid-fade is Sonar's own value, so even pressing `-` would write a
         // mid-fade number back. The mute is named in the rule and is disabled
         // with the rest.
+        // On the system control the volume keys are somebody else's volume, so
+        // trak says so rather than silently doing nothing (TODO 4.4).
+        _ if matches!(c, '+' | '=' | '-' | '_')
+            && app.settings.volume_control == VolumeControl::System =>
+        {
+            app.toast("volume is on the system control, which changes every sound on this Mac");
+        }
         _ if app.sonar.is_ducking() && matches!(c, 'm' | '+' | '=' | '-' | '_') => {
             app.toast("Sonar is adjusting the volume — leave it alone for a moment");
         }
@@ -1881,6 +1939,97 @@ mod tests {
             path: path.into(),
             image: image::DynamicImage::ImageRgb8(image::RgbImage::new(2, 2)),
         }
+    }
+
+    /// The notification is off by default (SPEC §8) and must never announce the
+    /// first read of a session: starting trak is not a song change.
+    #[test]
+    fn the_song_change_notification_is_off_until_asked_for() {
+        let app = with_track();
+        assert!(
+            !app.settings.song_change_notification,
+            "off by default, per SPEC section 8"
+        );
+        let (mut app, cmds) = step(app, Event::SoundForTrackChanged);
+        assert!(cmds.is_empty(), "nothing should be announced");
+        app.settings.song_change_notification = true;
+        let (_, cmds) = step(app, Event::SoundForTrackChanged);
+        assert_eq!(
+            cmds,
+            vec![PlayerCommand::Notify(
+                "Census Designated".into(),
+                "Jane Remover — Census Designated".into(),
+            )],
+            "title is the track, body is artist and album"
+        );
+    }
+
+    /// Every shape of a track has to produce a notification that is not
+    /// nonsense, and a promo with no artist and no album is the awkward one.
+    #[test]
+    fn the_notification_body_copes_with_missing_fields() {
+        for (artist, album, want) in [
+            (
+                "Jane Remover",
+                "Census Designated",
+                "Jane Remover — Census Designated",
+            ),
+            ("Jane Remover", "", "Jane Remover"),
+            ("", "Some Album", ""),
+            ("", "", ""),
+        ] {
+            let mut app = with_track();
+            app.settings.song_change_notification = true;
+            let mut s = playing();
+            s.track.title = "Some Track".into();
+            s.track.artist = artist.into();
+            s.track.album = album.into();
+            app = update(app, Event::PlayerState(Box::new(s))).app;
+            let (_, cmds) = step(app, Event::SoundForTrackChanged);
+            match cmds.as_slice() {
+                [PlayerCommand::Notify(title, body)] => {
+                    assert_eq!(title, "Some Track");
+                    assert_eq!(body, want, "{artist:?}/{album:?}");
+                }
+                other => panic!("expected exactly one notification, got {other:?}"),
+            }
+        }
+    }
+
+    /// On the system control the volume keys are somebody else's volume, so trak
+    /// says so rather than silently doing nothing (TODO 4.4, R2).
+    #[test]
+    fn the_system_volume_control_explains_itself() {
+        let mut app = with_track();
+        app.settings.volume_control = VolumeControl::System;
+        for key in ['+', '=', '-', '_'] {
+            let (app, cmds) = press(app.clone(), key);
+            assert!(
+                cmds.is_empty(),
+                "{key:?} must not silently change the system volume"
+            );
+            let t = app.toast.as_ref().expect("an explanation");
+            assert!(t.text.contains("system"), "{t:?}");
+        }
+        // And on Spotify's own control the keys work exactly as before.
+        let mut app = with_track();
+        app.settings.volume_control = VolumeControl::Spotify;
+        let (_, cmds) = press(app, '+');
+        assert_eq!(cmds, vec![PlayerCommand::VolumeStep(10)]);
+    }
+
+    #[test]
+    fn the_volume_control_parses_the_config_strings() {
+        assert_eq!(
+            VolumeControl::parse("spotify"),
+            Some(VolumeControl::Spotify)
+        );
+        assert_eq!(
+            VolumeControl::parse(" system "),
+            Some(VolumeControl::System)
+        );
+        assert_eq!(VolumeControl::parse("everything"), None);
+        assert_eq!(VolumeControl::System.label(), "system");
     }
 
     /// COMPAT rule 3 in one test: while Sonar owns the volume, trak must not

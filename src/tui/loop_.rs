@@ -254,6 +254,12 @@ fn event_loop<B: ratatui::backend::Backend>(
                 // popularity, so one read has to follow. It is cheap, because
                 // that is once per song rather than once per poll.
                 if track_changed {
+                    // TODO 4.5. The first read of a session is not a change, and
+                    // `app.state` is only set after one, so announcing here
+                    // cannot announce what was already playing when trak started.
+                    let u = update(app, Event::SoundForTrackChanged);
+                    app = u.app;
+                    submit_all(u.commands, &worker);
                     worker.submit(|p| match p.state() {
                         Ok(st) => crate::player::actions::WorkerResult::State(Box::new(st)),
                         Err(e) => crate::player::actions::WorkerResult::ReadFailed(e),
@@ -483,6 +489,20 @@ fn run_one(
             // not an error: a failed copy must never look like a failed command.
             let _ = crate::player::copy_to_clipboard(&link);
             Ok(None)
+        }
+        PlayerCommand::Notify(title, body) => {
+            // `display notification`, and nothing else: no icon, no sound, and no
+            // subtitle, because the point is a quiet line when the track changes.
+            let script = format!(
+                "display notification \"{}\" with title \"{}\"",
+                // A quote or a backslash in a track title would close the string
+                // literal, and this is the same allow-list problem `play track`
+                // has. AppleScript escapes them the other way round: the quote is
+                // the only thing that needs doubling.
+                body.replace('"', "\\\""),
+                title.replace('"', "\\\"")
+            );
+            p.command(&script).map(|_| None)
         }
         PlayerCommand::Launch => launch_spotify().map(|_| None),
     }

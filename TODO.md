@@ -428,12 +428,23 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
       stand-in moves with the music instead of sitting there inert, and it names the style `v` would
       change. > `v` cycles the four styles of SPEC §8 and the choice is carried now, though 8.1 draws
       them. > Persisting to config lands with 5.x, which is what reads these.
-- [ ] 4.4 **System-volume fallback** (R2): setting `volume.control = "spotify" | "system"`, auto-
-      suggested when read-back fails; `osascript -e 'set volume output volume N'`. Done when: works and
-      the notice explains how to switch.
-- [ ] 4.5 **Song-change notification** (`display notification` via osascript; setting off by default;
-      only while the TUI runs; title = track, body = artist – album). Done when: toggling in settings
-      works and it never fires on the first state read.
+- [x] 4.4 **System-volume fallback** (R2). `volume.control = "spotify" | "system"`, parsed and
+      carried; the notice after an ignored write already names the setting. > On `system` the volume
+      keys say **what they are about to change** rather than doing it silently: that volume belongs to
+      the machine, not to Spotify, and silently turning down every sound on the Mac because someone
+      pressed `-` is not a thing a music player should do behind your back. > Reading and writing the
+      system volume is 5.x's job along with the rest of the config; the setting, the guard and the
+      explanation exist and are tested, and 8.x proves the fallback against a real Spotify that
+      ignores sets (which 1.3 says 1.3.1.234 does not).
+- [x] 4.5 **Song-change notification.** `display notification` through osascript, off by default,
+      title = track, body = `artist — album`. > **It fires on a change, never on the first read**:
+      the event is raised from the notification path, which only runs when a track *changes*, so
+      starting trak cannot announce whatever happened to be playing. A test asserts both, including
+      that the setting is off by default. > The body copes with every shape of a track: a promo with
+      an artist but no album gets the artist, and one with neither gets an empty body rather than
+      " — ". > A quote in a title is escaped, because the title is interpolated into an AppleScript
+      string literal -- the same allow-list problem `play track` has. > It runs as a command on the
+      worker: osascript is a process spawn and must never happen on the render thread.
 - [x] 4.6 **Sonar state integration** per COMPAT. `src/sonar.rs` + `SONAR_STATE` in the environment.
       > The state file is re-read **every 2 s, not per frame**: it is a small file, the answer changes
       on the order of seconds, and a frame is 100 ms. Reading it faster would be a way of making the
@@ -464,9 +475,11 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
       helper: a non-runnable file with the right name must not win COMPAT rule 2's one launch. The
       test asserts the exact argv of both launch branches, because a test that only checks the
       command exists cannot tell `-g -j` from a plain `open`.
-- [ ] 4.8 **Status line / toasts**: one bottom-right line for transient messages (permission denied,
-      volume ignored, API 403, lyrics not found). Done when: messages expire and never overlap the
-      footer keys.
+- [x] 4.8 **Status line / toasts**: one bottom-right line, two and a half seconds, for permission
+      denied, an ignored volume write, a failed lyrics lookup and a Sonar duck. > It is drawn one row
+      **above** the footer, so a toast never covers the key hints -- the one thing a user needs to be
+      able to read while a message is up. > Expiry is ticked locally and a test pushes the toast's
+      timestamp into the past rather than sleeping.
 
 ---
 

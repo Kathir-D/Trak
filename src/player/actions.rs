@@ -123,6 +123,11 @@ pub enum PlayerCommand {
     CopyLink(String),
     /// The idle card's enter. The only launch trak ever performs (COMPAT rule 2).
     Launch,
+    /// Put a macOS notification on screen (TODO 4.5). Not a Spotify write at all:
+    /// it is `display notification` through osascript, and it is a command rather
+    /// than something the loop does inline because osascript is a process spawn
+    /// and must never happen on the render thread.
+    Notify(String, String),
 }
 
 /// What a finished command reports back.
