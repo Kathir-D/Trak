@@ -1,0 +1,10 @@
+[package]
+name = "tap-spike"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+cidre = { version = "0.29", default-features = false, features = ["core_audio", "cf", "ns", "ca", "cat", "av", "app", "objc", "blocks", "dispatch", "macos_14_2"] }
+
+[workspace]

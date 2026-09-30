@@ -47,6 +47,7 @@ These were checked against the actual crate metadata while the spike was written
 | [cavacore](https://github.com/TornaxO7/cavacore-rs) (port of [cava](https://github.com/karlstav/cava)) | 2.0.2 | MIT | Visualizer spectrum maths | builds on stable for both `aarch64-apple-darwin` and `x86_64-apple-darwin` |
 | [image](https://github.com/image-rs/image) | 0.25 | MIT/Apache-2.0 | Art decode | re-exported by ratatui-image; needed directly by the spike |
 | [crossterm](https://github.com/crossterm-rs/crossterm) | 0.28 | MIT | Terminal control | |
+| [cidre](https://github.com/yury/cidre) | 0.29 | MIT | Core Audio process tap (TODO 1.5/8.3) | **needs `default-features = false`** plus an rpath to `/usr/lib/swift`, or the binary will not launch on macOS 27 — see `docs/AUDIO-TAP.md` §3e. Its process-specific tap descriptions currently fail; see §3b |
 
 Notes:
 
