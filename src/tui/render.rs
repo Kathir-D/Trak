@@ -13,7 +13,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 
 use crate::player::PlaybackState;
-use crate::tui::app::{App, HISTORY_VIEW, Tab};
+use crate::tui::app::{App, Control, HISTORY_VIEW, Hit, Tab};
 use crate::tui::theme::{Theme, format_time, progress_bar};
 
 /// The keys in SPEC §4 that this build deliberately does not offer, and why.
@@ -84,7 +84,78 @@ pub fn layout_for(width: u16, height: u16) -> Layout_ {
 /// How much room the Now Playing pane gets, as a share of the width.
 const NOW_PLAYING_SHARE: u16 = 46;
 
+/// Where the clickable things ended up, recorded as they were drawn.
+///
+/// The event loop hit-tests clicks against the regions the *last* frame recorded,
+/// which is the only arrangement that cannot go wrong: a click is then resolved
+/// against the cells the user can see, and there is no second copy of the layout
+/// maths to drift out of step with the renderer.
+#[derive(Debug, Default, Clone)]
+pub struct Regions {
+    /// Each tab label, in tab order.
+    pub tabs: Vec<(Rect, usize)>,
+    /// The history list's body, when the History tab is showing.
+    pub history: Option<Rect>,
+    /// The progress bar.
+    pub progress: Option<Rect>,
+    /// The three transport controls, left to right.
+    pub controls: Vec<(Rect, Control)>,
+}
+
+impl Regions {
+    /// What is at this cell, if anything.
+    pub fn hit(&self, col: u16, row: u16) -> Option<Hit> {
+        for (r, i) in &self.tabs {
+            if r.contains((col, row).into()) {
+                return Some(Hit::Tab(*i));
+            }
+        }
+        if let Some(p) = self.progress
+            && p.contains((col, row).into())
+            && p.width > 0
+        {
+            // A seek is a fraction of the bar's width, so the position accounts
+            // for where inside the bar the click landed rather than snapping to
+            // the nearest whole tenth.
+            let f = (col.saturating_sub(p.x) as f64 + 0.5) / p.width as f64;
+            return Some(Hit::Seek(f.clamp(0.0, 1.0)));
+        }
+        for (r, c) in &self.controls {
+            if r.contains((col, row).into()) {
+                return Some(Hit::Control(*c));
+            }
+        }
+        let h = self.history?;
+        if !h.contains((col, row).into()) {
+            return None;
+        }
+        // The first two rows of the pane are the now-playing row and the
+        // heading, so the list starts at row 2 and the last two rows of a
+        // short pane are not entries at all. Anything that is not an entry row
+        // is still the pane, so a wheel over the heading or the gap below the
+        // list scrolls rather than doing nothing.
+        let entries = self.history_rows().unwrap_or(0);
+        let i = row.saturating_sub(h.y + 2) as usize;
+        if i >= entries {
+            return Some(Hit::HistoryPane);
+        }
+        Some(Hit::HistoryRow(i))
+    }
+
+    /// How many history rows are on screen, for the app to scroll by.
+    pub fn history_rows(&self) -> Option<usize> {
+        self.history.map(|r| (r.height as usize).saturating_sub(2))
+    }
+}
+
 pub fn draw(f: &mut Frame, app: &App, theme: &Theme) {
+    let mut regions = Regions::default();
+    draw_with(f, app, theme, &mut regions);
+}
+
+/// The renderer, and where everything clickable ended up.
+pub fn draw_with(f: &mut Frame, app: &App, theme: &Theme, regions: &mut Regions) {
+    *regions = Regions::default();
     let area = f.area();
     let (w, h) = (area.width, area.height);
 
@@ -103,9 +174,9 @@ pub fn draw(f: &mut Frame, app: &App, theme: &Theme) {
 
     match layout_for(w, h) {
         Layout_::TooSmall => draw_too_small(f, area, app),
-        Layout_::Compact => draw_compact(f, area, app, theme),
-        Layout_::Stacked => draw_stacked(f, area, app, theme),
-        Layout_::Wide => draw_wide(f, area, app, theme),
+        Layout_::Compact => draw_compact(f, area, app, theme, regions),
+        Layout_::Stacked => draw_stacked(f, area, app, theme, regions),
+        Layout_::Wide => draw_wide(f, area, app, theme, regions),
     }
 
     if app.show_help {
@@ -150,7 +221,7 @@ fn pane_block<'a>(title: &'a str, theme: &Theme, focused: bool) -> Block<'a> {
     b
 }
 
-fn draw_wide(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+fn draw_wide(f: &mut Frame, area: Rect, app: &App, theme: &Theme, regions: &mut Regions) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -163,7 +234,7 @@ fn draw_wide(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     draw_header(f, rows[0], app, theme);
 
     if !app.settings.side_pane {
-        draw_now_playing(f, rows[1], app, theme);
+        draw_now_playing(f, rows[1], app, theme, regions);
     } else {
         let cols = Layout::default()
             .direction(Direction::Horizontal)
@@ -172,14 +243,14 @@ fn draw_wide(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
                 Constraint::Min(24),
             ])
             .split(rows[1]);
-        draw_now_playing(f, cols[0], app, theme);
-        draw_tabs(f, cols[1], app, theme);
+        draw_now_playing(f, cols[0], app, theme, regions);
+        draw_tabs(f, cols[1], app, theme, regions);
     }
 
     draw_footer(f, rows[2], app, theme);
 }
 
-fn draw_stacked(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+fn draw_stacked(f: &mut Frame, area: Rect, app: &App, theme: &Theme, regions: &mut Regions) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -191,9 +262,9 @@ fn draw_stacked(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         .split(area);
 
     draw_header(f, rows[0], app, theme);
-    draw_now_playing(f, rows[1], app, theme);
+    draw_now_playing(f, rows[1], app, theme, regions);
     if app.settings.side_pane {
-        draw_tabs(f, rows[2], app, theme);
+        draw_tabs(f, rows[2], app, theme, regions);
     }
     draw_footer(f, rows[3], app, theme);
 }
@@ -246,7 +317,7 @@ fn draw_idle_card(f: &mut Frame, area: Rect, theme: &Theme) {
     );
 }
 
-fn draw_compact(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+fn draw_compact(f: &mut Frame, area: Rect, app: &App, theme: &Theme, regions: &mut Regions) {
     let Some(track) = app.track() else {
         draw_too_small(f, area, app);
         return;
@@ -270,6 +341,12 @@ fn draw_compact(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         )),
     ];
     f.render_widget(Paragraph::new(lines), area);
+    regions.progress = Some(Rect {
+        x: area.x + 2,
+        y: area.y + 2,
+        width: area.width.saturating_sub(4),
+        height: 1,
+    });
 }
 
 fn draw_too_small(f: &mut Frame, area: Rect, app: &App) {
@@ -326,7 +403,7 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let _ = theme;
 }
 
-fn draw_now_playing(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+fn draw_now_playing(f: &mut Frame, area: Rect, app: &App, theme: &Theme, regions: &mut Regions) {
     let block = pane_block(" Now Playing ", theme, true);
     f.render_widget(block.clone(), area);
     let body = inner(area);
@@ -380,10 +457,20 @@ fn draw_now_playing(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     }
 
     let bar_w = body.width as usize;
+    // Counted from the lines actually pushed, not re-derived from the layout:
+    // the artist and the album lines are conditional, so arithmetic about where
+    // the bar "should" be is exactly the kind that goes stale.
+    let bar_row = body.y + lines.len() as u16;
     lines.push(Line::from(Span::styled(
         progress_bar(progress(app), bar_w),
         theme.accent_style(),
     )));
+    regions.progress = Some(Rect {
+        x: body.x,
+        y: bar_row,
+        width: body.width,
+        height: 1,
+    });
     lines.push(Line::from(vec![
         Span::styled(format_time(pos), Theme::dim()),
         Span::raw(" "),
@@ -404,7 +491,28 @@ fn draw_now_playing(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         controls.push_str("   ");
         controls.push_str(app.repeat.symbol());
     }
+    let ctl_row = body.y + lines.len() as u16;
     lines.push(Line::from(controls));
+    // The three transport glyphs are the first six cells of that line, two each.
+    // Giving each two cells rather than one is deliberate: the exact width of ⏮
+    // and ⏸ is ambiguous between ratatui and the terminal, and with one cell each
+    // a click between two glyphs could land on neither. The boundaries between
+    // the three are the only approximate part.
+
+    regions.controls = [(0, Control::Prev), (2, Control::Toggle), (4, Control::Next)]
+        .into_iter()
+        .map(|(dx, c)| {
+            (
+                Rect {
+                    x: body.x + dx,
+                    y: ctl_row,
+                    width: 2,
+                    height: 1,
+                },
+                c,
+            )
+        })
+        .collect();
 
     // Hidden when a volume write did not land: a meter that cannot be trusted is
     // worse than no meter, and the notice says why (COMPAT rule 5).
@@ -433,8 +541,12 @@ fn progress(app: &App) -> f64 {
     }
 }
 
-fn draw_tabs(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
-    let title = format!(" {} ", tab_strip(app));
+fn draw_tabs(f: &mut Frame, area: Rect, app: &App, theme: &Theme, regions: &mut Regions) {
+    // The segments come first: the title is built from them and the clickable
+    // rects come from them, so a tab cannot be drawn in one place and clicked
+    // somewhere else.
+    let strip = tab_strip(app);
+    let title = format!(" {} ", strip.text);
     let block = pane_block(&title, theme, false);
     f.render_widget(block, area);
     let body = inner(area);
@@ -442,8 +554,30 @@ fn draw_tabs(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         return;
     }
 
+    // The strip is drawn as the pane's *title*, and ratatui draws a title over
+    // the top border rather than inside the body. So the row is the pane's own
+    // first row, not the body's, and the title is " <strip> ", which puts the
+    // strip two cells in from the pane's left edge.
+    let strip_x = area.x + 2;
+    let strip_y = area.y;
+    for (i, (offset, label)) in strip.segments.iter().enumerate() {
+        let w = label.chars().count() as u16;
+        regions.tabs.push((
+            Rect {
+                x: strip_x + offset,
+                y: strip_y,
+                width: w,
+                height: 1,
+            },
+            i,
+        ));
+    }
+
     let lines: Vec<Line> = match app.tab {
-        Tab::History => history_lines(app, theme),
+        Tab::History => {
+            regions.history = Some(body);
+            history_lines(app, theme)
+        }
         Tab::Info => info_lines(app, theme),
         Tab::Lyrics => vec![Line::from(Span::styled(
             if app.is_idle() { "" } else { "no lyrics yet" },
@@ -453,20 +587,34 @@ fn draw_tabs(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     f.render_widget(Paragraph::new(lines), body);
 }
 
-fn tab_strip(app: &App) -> String {
-    Tab::ALL
-        .iter()
-        .enumerate()
-        .map(|(i, t)| {
-            let n = i + 1;
-            if *t == app.tab {
-                format!("[{n}]{}", t.label())
-            } else {
-                format!(" {n} {} ", t.label())
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+/// The tab strip, as text plus the pieces it is made of.
+///
+/// Built once and used twice — for the pane title and for the clickable rects —
+/// because a tab strip rendered from one description and clicked from another is
+/// a tab strip that eventually stops lining up.
+struct TabStrip {
+    text: String,
+    /// Cell offset from the start of the text, and the text, per tab.
+    segments: Vec<(u16, String)>,
+}
+
+fn tab_strip(app: &App) -> TabStrip {
+    let mut segments = Vec::new();
+    let mut text = String::new();
+    for (i, t) in Tab::ALL.iter().enumerate() {
+        let n = i + 1;
+        let label = if *t == app.tab {
+            format!("[{n}]{}", t.label())
+        } else {
+            format!(" {n} {} ", t.label())
+        };
+        if !text.is_empty() {
+            text.push(' ');
+        }
+        segments.push((text.chars().count() as u16, label.clone()));
+        text.push_str(&label);
+    }
+    TabStrip { text, segments }
 }
 
 fn history_lines<'a>(app: &'a App, theme: &'a Theme) -> Vec<Line<'a>> {
@@ -511,9 +659,7 @@ fn history_lines<'a>(app: &'a App, theme: &'a Theme) -> Vec<Line<'a>> {
     // Newest first, which is what a history is for, and the same order the
     // cursor counts in (`App::selected_history`).
     out.extend(
-        app.history
-            .iter()
-            .rev()
+        app.visible_history()
             .take(HISTORY_VIEW)
             .enumerate()
             .map(|(i, e)| {
@@ -1208,6 +1354,214 @@ mod tests {
                 "NOT_YET excuses `{key}` ({why}) but the help overlay offers it"
             );
         }
+    }
+
+    /// Draw a frame and hand back both the cells and where things landed, which
+    /// is the only way to test a click against what is really on screen.
+    fn render(w: u16, h: u16, app: &App) -> (ratatui::buffer::Buffer, Regions) {
+        let backend = ratatui::backend::TestBackend::new(w, h);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        let mut regions = Regions::default();
+        let theme = Theme::default();
+        term.draw(|f| draw_with(f, app, &theme, &mut regions))
+            .unwrap();
+        (term.backend().buffer().clone(), regions)
+    }
+
+    /// The cells of one row, by column. Indexing the buffer rather than slicing
+    /// a joined string: a glyph like ⏮ is three bytes, and slicing by column
+    /// lands mid-character.
+    fn row_text(buf: &ratatui::buffer::Buffer, y: u16, from: u16, len: u16) -> String {
+        (from..from + len)
+            .map(|x| buf[(x, y)].symbol().to_string())
+            .collect()
+    }
+
+    /// A click has to land where the pixels are. This is the test that says so:
+    /// it finds the progress bar *in the rendered text*, clicks the middle of
+    /// it, and checks the hit is the middle of the track.
+    #[test]
+    fn clicking_the_rendered_progress_bar_seeks_to_that_point() {
+        let app = app_at(100, 30);
+        let (buf, regions) = render(100, 30, &app);
+        let bar = regions.progress.expect("a progress bar");
+        // The bar's own columns, not the whole row: the pane's border is in the
+        // way and the bar is drawn with ─ ─ rather than ▰ ▰ until it advances.
+        let row = row_text(&buf, bar.y, bar.x, bar.width);
+        assert_eq!(row.chars().count(), 44, "the bar spans the pane's width");
+        assert!(
+            row.chars().all(|c| matches!(c, '─' | '▰' | '█')),
+            "the bar should be drawn where the region says: {row:?}"
+        );
+
+        // A third of the way along the bar.
+        let x = bar.x + bar.width / 3;
+        let hit = regions.hit(x, bar.y).expect("the bar is clickable");
+        match hit {
+            Hit::Seek(f) => {
+                assert!(
+                    (f - 1.0 / 3.0).abs() < 0.05,
+                    "a third of the way along must seek to a third, got {f}"
+                );
+            }
+            other => panic!("expected a seek, got {other:?}"),
+        }
+        // The two ends, which is where off-by-one errors live. A click resolves
+        // to the middle of the cell it landed in, so the ends are half a cell in
+        // rather than exactly 0 and 1.
+        let half = 0.5 / bar.width as f64;
+        let near = |want: f64, got: Hit| match got {
+            Hit::Seek(f) => assert!((f - want).abs() < 1e-9, "wanted {want}, got {f}"),
+            other => panic!("expected a seek, got {other:?}"),
+        };
+        near(half, regions.hit(bar.x, bar.y).expect("the left end"));
+        near(
+            1.0 - half,
+            regions
+                .hit(bar.x + bar.width - 1, bar.y)
+                .expect("the right end"),
+        );
+        // One past the end of the bar is not a seek at all.
+        assert_eq!(regions.hit(bar.x + bar.width, bar.y), None);
+    }
+
+    /// Every tab label the strip draws has to be clickable, and clicking one
+    /// selects it. The rects come from the same segments as the title.
+    #[test]
+    fn every_tab_is_clickable_where_it_is_drawn() {
+        let app = app_at(100, 30);
+        let (buf, regions) = render(100, 30, &app);
+        assert_eq!(regions.tabs.len(), Tab::ALL.len());
+        for (i, tab) in Tab::ALL.iter().enumerate() {
+            let (r, idx) = regions.tabs[i];
+            assert_eq!(idx, i);
+            let drawn = row_text(&buf, r.y, r.x, r.width);
+            assert!(
+                drawn.contains(tab.label()),
+                "tab {i} region does not sit over its label: {drawn:?}"
+            );
+        }
+        // And a click on the second tab switches to it.
+        let (r, _) = regions.tabs[1];
+        let mut next = app.clone();
+        next = update(
+            next,
+            Event::Mouse(crate::tui::app::Mouse {
+                action: crate::tui::app::MouseAction::Press,
+                target: regions.hit(r.x + 1, r.y).unwrap(),
+            }),
+        )
+        .app;
+        assert_eq!(next.tab, Tab::Info);
+    }
+
+    /// The three transport controls, and that they are on the row the renderer
+    /// drew them on.
+    #[test]
+    fn the_transport_controls_are_clickable() {
+        let app = app_at(100, 30);
+        let (buf, regions) = render(100, 30, &app);
+        assert_eq!(regions.controls.len(), 3);
+        let want = [Control::Prev, Control::Toggle, Control::Next];
+        for (i, (r, c)) in regions.controls.iter().enumerate() {
+            assert_eq!(*c, want[i]);
+            let drawn = row_text(&buf, r.y, r.x, r.width);
+            assert!(
+                ["⏮", "⏸", "▶", "⏹", "⏭"].iter().any(|g| drawn.contains(*g)),
+                "control {i} is not over a transport glyph: {drawn:?}"
+            );
+            assert_eq!(regions.hit(r.x, r.y), Some(Hit::Control(want[i])));
+        }
+    }
+
+    /// A click on a history row selects that row, counted from what is shown.
+    #[test]
+    fn clicking_a_history_row_selects_it() {
+        let mut app = app_at(100, 30);
+        for i in 0..5 {
+            let mut s = parse(&fixture("playing_track.txt")).unwrap();
+            s.track.uri = Some(format!("spotify:track:t{i}"));
+            s.track.title = format!("Old {i}");
+            app = update(app, Event::PlayerState(Box::new(s))).app;
+        }
+        let (_, regions) = render(100, 30, &app);
+        let h = regions.history.expect("the history body");
+        // Row 0 of the list is the third line of the body: the now-playing row
+        // and the heading come first.
+        let row = h.y + 2;
+        assert_eq!(regions.hit(h.x + 2, row), Some(Hit::HistoryRow(0)));
+        assert_eq!(regions.hit(h.x + 2, row + 2), Some(Hit::HistoryRow(2)));
+        // Below the last row is the pane, not a row: a wheel there still scrolls.
+        let past = h.y + h.height + 5;
+        assert_eq!(
+            regions.hit(h.x + 2, past),
+            None,
+            "outside the pane entirely"
+        );
+    }
+
+    /// The wheel needs a target that is not a row, and one that is not a row
+    /// *or* the pane would be a dead zone.
+    #[test]
+    fn a_wheel_over_the_history_has_somewhere_to_land() {
+        let app = app_at(100, 30);
+        let (_, regions) = render(100, 30, &app);
+        let h = regions.history.expect("the history body");
+        for row in h.y..h.y + h.height {
+            assert!(
+                matches!(
+                    regions.hit(h.x, row),
+                    Some(Hit::HistoryRow(_)) | Some(Hit::HistoryPane)
+                ),
+                "row {row} is not scrollable"
+            );
+        }
+    }
+
+    /// Nothing outside the dashboard is clickable, and a frame with no tab pane
+    /// records no regions rather than stale ones.
+    #[test]
+    fn an_idle_card_has_nothing_to_click() {
+        let (buf, regions) = render(100, 30, &App::new());
+        let screen: String = (0..30)
+            .map(|y| row_text(&buf, y, 0, 100))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("isn't running"), "{screen}");
+        // The card replaces the whole dashboard, so there is nothing clickable
+        // at all -- not even the tab strip.
+        assert!(regions.tabs.is_empty(), "the card has no tabs");
+        assert!(regions.history.is_none(), "there is no list to click");
+        assert!(regions.progress.is_none(), "and no bar to scrub");
+        assert!(regions.controls.is_empty());
+    }
+
+    /// A hit test must never divide by a zero-width bar or produce a fraction
+    /// outside 0..=1.
+    #[test]
+    fn a_degenerate_region_is_never_a_target() {
+        let mut regions = Regions {
+            progress: Some(Rect {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 1,
+            }),
+            ..Regions::default()
+        };
+        assert_eq!(regions.hit(0, 0), None, "a zero-width bar is not a target");
+        regions.progress = Some(Rect::new(10, 0, 4, 1));
+        assert_eq!(regions.hit(10, 0), Some(Hit::Seek(0.125)));
+        // A history region too short to hold the two header rows is all pane.
+        let mut regions = Regions {
+            history: Some(Rect::new(0, 0, 10, 2)),
+            ..Regions::default()
+        };
+        assert_eq!(regions.hit(0, 0), Some(Hit::HistoryPane));
+        assert_eq!(regions.hit(0, 1), Some(Hit::HistoryPane));
+        regions.history = Some(Rect::new(0, 0, 10, 5));
+        assert_eq!(regions.hit(0, 2), Some(Hit::HistoryRow(0)));
+        assert_eq!(regions.history_rows(), Some(3));
     }
 
     fn text_of(

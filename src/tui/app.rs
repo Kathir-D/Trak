@@ -48,7 +48,57 @@ pub enum Event {
     NotRunning,
     /// Local tick, for interpolating the bar and expiring toasts.
     Tick,
+    /// A click, a drag or a wheel, already resolved to what was hit.
+    ///
+    /// The loop hit-tests against the regions the last frame recorded, so a click
+    /// lands where the pixels are rather than where a second guess at the layout
+    /// says they are.
+    Mouse(Mouse),
+    /// How many history rows fit on screen. The loop sends this whenever it
+    /// changes, because only it knows the pane's height.
+    Viewport(usize),
     Quit,
+}
+
+/// What a mouse event did, as far as the app is concerned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseAction {
+    Press,
+    /// A press that is being held. Only meaningful for a drag, e.g. scrubbing
+    /// the progress bar.
+    Drag,
+    Release,
+    ScrollUp,
+    ScrollDown,
+}
+
+/// A mouse event with its target already resolved by the renderer.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Mouse {
+    pub action: MouseAction,
+    pub target: Hit,
+}
+
+/// A transport control drawn in the Now Playing pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Control {
+    Prev,
+    Toggle,
+    Next,
+}
+
+/// Something on screen that can be clicked.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Hit {
+    /// One of the tab labels.
+    Tab(usize),
+    /// A row of the history list, counting from the top of what is *shown*.
+    HistoryRow(usize),
+    /// Anywhere in the history list, for a wheel that is not over a row.
+    HistoryPane,
+    /// The progress bar, as a fraction of the track.
+    Seek(f64),
+    Control(Control),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,6 +147,9 @@ pub struct Settings {
     pub show_volume: bool,
     pub show_key_hints: bool,
     pub side_pane: bool,
+    /// SPEC §8 `[input] mouse`, on by default. When off the loop does not even
+    /// ask the terminal for mouse events.
+    pub mouse: bool,
     /// Rounded by default (SPEC §2).
     pub rounded: bool,
 }
@@ -110,6 +163,7 @@ impl Default for Settings {
             show_volume: true,
             show_key_hints: true,
             side_pane: true,
+            mouse: true,
             rounded: true,
         }
     }
@@ -122,6 +176,13 @@ pub struct App {
     pub history: Vec<HistoryEntry>,
     pub tab: Tab,
     pub history_cursor: usize,
+    /// The first history row shown. The list can be 500 long and the pane 20
+    /// rows high, so the view has to follow the cursor or `j` walks it off the
+    /// screen with nothing to show for it.
+    pub history_scroll: usize,
+    /// How many history rows fit. Sent by the loop, which is the only thing that
+    /// knows the pane's height.
+    pub viewport: usize,
     /// Whether the user has actually moved the selection. Without this, every
     /// track change would drag the cursor down with the new row, and a session
     /// left alone would end up selecting the *oldest* track.
@@ -168,6 +229,8 @@ impl App {
             history: Vec::new(),
             tab: Tab::History,
             history_cursor: 0,
+            history_scroll: 0,
+            viewport: 10,
             cursor_moved: false,
             show_help: false,
             read_volume: 0,
@@ -230,6 +293,35 @@ impl App {
         }
     }
 
+    /// Move the selection to `row` in the view, scrolling to keep it on screen.
+    ///
+    /// Every way the cursor moves goes through here. Doing it in each key handler
+    /// is how the scroll and the cursor drift apart, which shows up as a
+    /// selection that has moved but is not on screen.
+    fn select(&mut self, row: usize) {
+        self.history_cursor = row.min(self.history_cursor_max());
+        self.cursor_moved = true;
+        self.scroll_to_cursor();
+    }
+
+    fn scroll_to_cursor(&mut self) {
+        let page = self.viewport.max(1);
+        if self.history_cursor < self.history_scroll {
+            self.history_scroll = self.history_cursor;
+        } else if self.history_cursor >= self.history_scroll + page {
+            self.history_scroll = self.history_cursor + 1 - page;
+        }
+        // Never scroll past the end: the last page should be full of history
+        // rather than padded with blank rows.
+        let last = self.history.len().saturating_sub(page);
+        self.history_scroll = self.history_scroll.min(last);
+    }
+
+    /// The history rows as the tab shows them: newest first, from the scroll.
+    pub fn visible_history(&self) -> impl Iterator<Item = &HistoryEntry> {
+        self.history.iter().rev().skip(self.history_scroll)
+    }
+
     /// The row `enter` would play, or `None` when there is nothing to play.
     ///
     /// The cursor counts rows from the **newest**, because that is the order the
@@ -240,9 +332,14 @@ impl App {
         self.history.iter().rev().nth(self.history_cursor)
     }
 
-    /// The highest cursor value that still points at a drawn row.
+    /// The highest cursor value: the last row of the list.
+    ///
+    /// Every row is reachable now that the view scrolls. This used to stop at
+    /// `HISTORY_VIEW`, which quietly made the oldest 300 rows of a long session
+    /// unreachable — and, worse, unreachable *invisibly*, because the view did
+    /// not scroll then either.
     fn history_cursor_max(&self) -> usize {
-        self.history.len().min(HISTORY_VIEW).saturating_sub(1)
+        self.history.len().saturating_sub(1)
     }
 
     /// How many times the current track has come round this session.
@@ -309,6 +406,16 @@ pub fn update(mut app: App, event: Event) -> Updated {
             apply_state(&mut app, *s);
             app.poll_due = false;
         }
+
+        Event::Viewport(rows) => {
+            if app.viewport != rows {
+                app.viewport = rows;
+                // A resize can leave the view scrolled past the end.
+                app.scroll_to_cursor();
+            }
+        }
+
+        Event::Mouse(m) => handle_mouse(&mut app, m, &mut commands),
 
         Event::NotRunning => {
             app.state = None;
@@ -391,12 +498,11 @@ fn handle_key(app: &mut App, c: char, commands: &mut Vec<PlayerCommand>) {
         '2' => app.tab = Tab::Info,
         '3' => app.tab = Tab::Lyrics,
         'j' => {
-            app.history_cursor = (app.history_cursor + 1).min(app.history_cursor_max());
-            app.cursor_moved = true;
+            let next = app.history_cursor + 1;
+            app.select(next);
         }
         'k' => {
-            app.history_cursor = app.history_cursor.saturating_sub(1);
-            app.cursor_moved = true;
+            app.select(app.history_cursor.saturating_sub(1));
         }
         _ if busy => {}
         // `enter` plays the selected history row (SPEC §4). It only means that on
@@ -463,6 +569,69 @@ fn handle_key(app: &mut App, c: char, commands: &mut Vec<PlayerCommand>) {
     }
 }
 
+/// How far a wheel notch moves the selection.
+const WHEEL_LINES: usize = 3;
+
+fn handle_mouse(app: &mut App, m: Mouse, commands: &mut Vec<PlayerCommand>) {
+    // The loop does not ask for mouse events when this is off, but a terminal
+    // that reports them anyway must not turn them into Spotify writes
+    // (COMPAT rule 3).
+    if !app.settings.mouse {
+        return;
+    }
+    // The overlay is modal: a click behind it must not reach the dashboard, and a
+    // click *on* it just closes it.
+    if app.show_help {
+        app.show_help = false;
+        return;
+    }
+    // COMPAT rule 3 again: a click is a user action, but a *drag* is only a user
+    // action while the button is held, and a release is not a command at all.
+    if m.action == MouseAction::Release {
+        return;
+    }
+
+    match m.target {
+        Hit::Tab(i) => {
+            if let Some(tab) = Tab::ALL.get(i) {
+                app.tab = *tab;
+            }
+        }
+        Hit::HistoryRow(i) => {
+            if m.action == MouseAction::Press {
+                app.select(app.history_scroll + i);
+            }
+        }
+        Hit::HistoryPane => {
+            let down = matches!(m.action, MouseAction::ScrollDown);
+            let row = if down {
+                app.history_cursor + WHEEL_LINES
+            } else {
+                app.history_cursor.saturating_sub(WHEEL_LINES)
+            };
+            app.select(row);
+        }
+        Hit::Seek(fraction) => {
+            let dur = app.track().map(|t| t.duration_secs()).unwrap_or(0);
+            if dur > 0 {
+                push(
+                    app,
+                    commands,
+                    PlayerCommand::Seek((fraction.clamp(0.0, 1.0) * dur as f64).round()),
+                );
+            }
+        }
+        Hit::Control(c) => {
+            let cmd = match c {
+                Control::Prev => PlayerCommand::Prev,
+                Control::Toggle => PlayerCommand::Toggle,
+                Control::Next => PlayerCommand::Next,
+            };
+            push(app, commands, cmd);
+        }
+    }
+}
+
 /// Queue a command unless one is already in flight.
 fn push(app: &mut App, commands: &mut Vec<PlayerCommand>, cmd: PlayerCommand) {
     if app.busy.is_some() {
@@ -499,7 +668,8 @@ fn apply_state(app: &mut App, s: PlayerState) {
         // selection is the user's to keep. A cursor nobody has touched stays at
         // the newest row, which is where it belongs.
         if app.cursor_moved {
-            app.history_cursor = (app.history_cursor + 1).min(app.history_cursor_max());
+            app.history_cursor += 1;
+            app.scroll_to_cursor();
         }
     }
 
@@ -792,20 +962,36 @@ mod tests {
         assert_eq!(app.history_cursor, 0);
     }
 
-    /// A long session must not be able to select a row the renderer never draws.
+    /// The cursor must always be one of the rows on screen, however long the
+    /// session gets and whichever way it is scrolled.
     #[test]
-    fn the_cursor_cannot_reach_past_the_drawn_window() {
+    fn the_cursor_is_always_inside_the_rows_on_screen() {
         let mut app = with_track();
         for n in 0..(HISTORY_CAP + 10) {
             let mut s = playing();
             s.track.uri = Some(format!("spotify:track:t{n}"));
             app = update(app, Event::PlayerState(Box::new(s))).app;
         }
-        for _ in 0..(HISTORY_CAP * 2) {
+        app = update(app, Event::Viewport(9)).app;
+        let check = |app: &App, how: &str| {
+            let visible = app.visible_history().count();
+            assert!(visible > 0, "{how}: nothing on screen");
+            let first = app.history_cursor - app.history_scroll;
+            assert!(
+                first < visible,
+                "{how}: the cursor is {first} rows into a page of {visible}"
+            );
+        };
+        for _ in 0..(HISTORY_CAP + 20) {
             let (next, _) = press(app, 'j');
             app = next;
+            check(&app, "after j");
         }
-        assert!(app.history_cursor < HISTORY_VIEW);
+        for _ in 0..(HISTORY_CAP + 20) {
+            let (next, _) = press(app, 'k');
+            app = next;
+            check(&app, "after k");
+        }
         assert!(app.selected_history().is_some());
     }
 
@@ -1073,6 +1259,227 @@ mod tests {
         let (app, cmds) = press(app, 'c');
         assert!(cmds.is_empty());
         assert!(app.toast.is_none());
+    }
+
+    /// A click has to do what the pixel under it looks like it does.
+    #[test]
+    fn a_click_does_what_the_thing_under_it_says() {
+        let dur = with_track().track().unwrap().duration_secs() as f64;
+        assert!(dur > 0.0);
+
+        // The three transport controls, each from a clean app so nothing is in
+        // flight.
+        for (target, want) in [
+            (Hit::Control(Control::Prev), PlayerCommand::Prev),
+            (Hit::Control(Control::Toggle), PlayerCommand::Toggle),
+            (Hit::Control(Control::Next), PlayerCommand::Next),
+        ] {
+            let (_, cmds) = step(with_track(), click(target));
+            assert_eq!(cmds, vec![want], "{target:?}");
+        }
+
+        // Halfway along the progress bar is halfway through the track.
+        let (_, cmds) = step(with_track(), click(Hit::Seek(0.5)));
+        assert_eq!(cmds, vec![PlayerCommand::Seek((dur * 0.5).round())]);
+
+        // And a click past the end clamps rather than seeking outside the track.
+        let (_, cmds) = step(with_track(), click(Hit::Seek(1.4)));
+        assert_eq!(cmds, vec![PlayerCommand::Seek(dur)]);
+        let (_, cmds) = step(with_track(), click(Hit::Seek(-0.2)));
+        assert_eq!(cmds, vec![PlayerCommand::Seek(0.0)]);
+    }
+
+    fn click(target: Hit) -> Event {
+        Event::Mouse(Mouse {
+            action: MouseAction::Press,
+            target,
+        })
+    }
+
+    fn scroll(down: bool) -> Event {
+        Event::Mouse(Mouse {
+            action: if down {
+                MouseAction::ScrollDown
+            } else {
+                MouseAction::ScrollUp
+            },
+            target: Hit::HistoryPane,
+        })
+    }
+
+    #[test]
+    fn a_tab_click_switches_tab_and_a_bad_index_does_nothing() {
+        let (app, cmds) = step(with_track(), click(Hit::Tab(1)));
+        assert_eq!(app.tab, Tab::Info);
+        assert!(cmds.is_empty(), "switching tab is not a Spotify write");
+        let (app, _) = step(app, click(Hit::Tab(99)));
+        assert_eq!(
+            app.tab,
+            Tab::Info,
+            "an index that does not exist is ignored"
+        );
+    }
+
+    /// The overlay is modal: a click behind it must not reach the dashboard.
+    #[test]
+    fn a_click_behind_the_overlay_only_closes_it() {
+        let (app, _) = press(with_track(), '?');
+        let want = fingerprint(&app);
+        let (app, cmds) = step(app, click(Hit::Control(Control::Next)));
+        assert!(cmds.is_empty(), "a click must not fire behind the overlay");
+        assert!(!app.show_help, "and it closes the overlay");
+        assert_eq!(app.tab, want.tab);
+    }
+
+    /// A release is not a command: the drag already happened on the press.
+    #[test]
+    fn releasing_the_button_is_not_a_second_command() {
+        let (_, cmds) = step(
+            with_track(),
+            Event::Mouse(Mouse {
+                action: MouseAction::Release,
+                target: Hit::Control(Control::Next),
+            }),
+        );
+        assert!(cmds.is_empty());
+    }
+
+    /// Clicking a row selects it, counted from what is on screen — which is the
+    /// whole point of a scrollable list.
+    #[test]
+    fn clicking_a_row_selects_it_where_it_is_shown() {
+        let mut app = app_with_history(20);
+        app = step(app, Event::Viewport(5)).0;
+        // A few rows down, so the view has scrolled.
+        for _ in 0..8 {
+            app = press(app, 'j').0;
+        }
+        let scroll = app.history_scroll;
+        assert!(
+            scroll > 0,
+            "the view should have scrolled to follow the cursor"
+        );
+        let (app, cmds) = step(app.clone(), click(Hit::HistoryRow(0)));
+        assert!(cmds.is_empty(), "a click selects, it does not play");
+        assert_eq!(
+            app.history_cursor, scroll,
+            "row 0 of the view is the top row that is showing"
+        );
+        let (app, _) = step(app, click(Hit::HistoryRow(2)));
+        assert_eq!(app.history_cursor, scroll + 2);
+    }
+
+    /// A wheel over the list moves the selection, and the view follows it.
+    #[test]
+    fn the_wheel_scrolls_the_selection_and_the_view() {
+        let mut app = app_with_history(40);
+        app = step(app, Event::Viewport(6)).0;
+        let (app, cmds) = step(app, scroll(true));
+        assert!(cmds.is_empty(), "scrolling is not a Spotify write");
+        assert_eq!(app.history_cursor, 3, "three lines a notch");
+
+        let (app, _) = step(app, scroll(true));
+        assert_eq!(app.history_cursor, 6);
+        assert_eq!(app.history_scroll, 1, "and the view followed it");
+
+        let (app, _) = step(app, scroll(false));
+        assert_eq!(app.history_cursor, 3);
+        // The view does not re-centre: row 3 is still on screen from row 1, so
+        // it stays put. Scrolling only when the cursor would leave is the
+        // behaviour you can predict.
+        assert_eq!(app.history_scroll, 1);
+
+        // Far enough up and the view has to follow.
+        let app = app_with_history(40);
+        let (app, _) = step(app, Event::Viewport(6));
+        let mut app = app;
+        for _ in 0..5 {
+            app = press(app, 'k').0;
+        }
+        assert_eq!(app.history_scroll, 0, "scrolled back to the top");
+    }
+
+    /// The history can be 500 long and the pane 20 rows: the cursor must never
+    /// walk off the screen, and the view must never scroll past the end.
+    #[test]
+    fn the_view_follows_the_cursor_over_a_long_history() {
+        let mut app = with_track();
+        for i in 0..HISTORY_CAP {
+            let mut s = playing();
+            s.track.uri = Some(format!("spotify:track:t{i}"));
+            app = update(app, Event::PlayerState(Box::new(s))).app;
+        }
+        let page = 8;
+        app = step(app, Event::Viewport(page)).0;
+        for _ in 0..(HISTORY_CAP + 50) {
+            app = press(app, 'j').0;
+            assert!(
+                app.history_cursor < app.history_scroll + page,
+                "the cursor at {} is off the view starting at {}",
+                app.history_cursor,
+                app.history_scroll
+            );
+        }
+        assert_eq!(app.history_cursor, HISTORY_CAP - 1);
+        // The last page is full of history, not half history and half nothing.
+        let last = HISTORY_CAP - page;
+        assert_eq!(app.history_scroll, last);
+        assert_eq!(app.visible_history().count(), page);
+    }
+
+    /// A resize must not leave the view scrolled past the end of the list.
+    #[test]
+    fn growing_the_pane_keeps_the_view_inside_the_list() {
+        let mut app = with_track();
+        for i in 0..10 {
+            let mut s = playing();
+            s.track.uri = Some(format!("spotify:track:t{i}"));
+            app = update(app, Event::PlayerState(Box::new(s))).app;
+        }
+        app = step(app, Event::Viewport(2)).0;
+        for _ in 0..9 {
+            app = press(app, 'j').0;
+        }
+        assert!(app.history_scroll > 0);
+        // Now the pane is huge: the whole list fits, so there is nothing to
+        // scroll.
+        let app = step(app, Event::Viewport(200)).0;
+        assert_eq!(app.history_scroll, 0, "nothing to scroll when it all fits");
+        assert_eq!(app.visible_history().count(), app.history.len());
+    }
+
+    /// COMPAT rule 3: a mouse event that arrives while the setting is off must
+    /// not do anything. The loop also does not ask for events, so this is belt
+    /// and braces -- but a stray event from a terminal that ignores the setting
+    /// must not become a Spotify write.
+    #[test]
+    fn mouse_events_are_ignored_when_the_setting_is_off() {
+        let mut app = with_track();
+        app.settings.mouse = false;
+        let want = fingerprint(&app);
+        for m in [
+            Mouse {
+                action: MouseAction::Press,
+                target: Hit::Control(Control::Next),
+            },
+            Mouse {
+                action: MouseAction::Drag,
+                target: Hit::Seek(0.5),
+            },
+            Mouse {
+                action: MouseAction::ScrollDown,
+                target: Hit::HistoryPane,
+            },
+            Mouse {
+                action: MouseAction::Press,
+                target: Hit::Tab(2),
+            },
+        ] {
+            let (next, cmds) = step(app, Event::Mouse(m));
+            assert!(cmds.is_empty(), "{m:?} wrote to Spotify with mouse off");
+            assert_eq!(fingerprint(&next), want, "{m:?} changed the app");
+            app = next;
+        }
     }
 
     /// Everything about the app that a keypress could change.

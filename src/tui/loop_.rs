@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use crossterm::ExecutableCommand;
 use crossterm::event::{
     DisableMouseCapture, EnableMouseCapture, Event as TermEvent, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers, poll, read,
+    KeyModifiers, MouseButton, MouseEvent, MouseEventKind, poll, read,
 };
 use crossterm::terminal::{
     DisableLineWrap, EnableLineWrap, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode,
@@ -28,7 +28,6 @@ use crate::player::PlayerCommand;
 use crate::player::actions::Worker;
 use crate::player::actions::{CommandOutcome, WorkerResult, WriteOutcome};
 use crate::tui::app::{App, Event, update};
-use crate::tui::render::draw;
 use crate::tui::theme::{Accent, Border, Theme};
 
 /// How long to wait for a terminal event before doing anything else.
@@ -126,19 +125,27 @@ pub fn run() -> i32 {
             return 1;
         }
     };
-    // Mouse is on by default (SPEC §2); it makes the progress bar seekable and
-    // the tabs clickable (TODO 3.8).
-    let _ = terminal.backend_mut().execute(EnableMouseCapture);
+    // Mouse is on by default (SPEC §2, `[input] mouse`); it makes the progress
+    // bar seekable and the tabs clickable (TODO 3.8). It is only *asked for* when
+    // the setting is on, so a terminal that reports mouse events cannot steal
+    // text selection from a user who turned it off.
+    let settings = crate::tui::app::Settings::default();
+    if settings.mouse {
+        let _ = terminal.backend_mut().execute(EnableMouseCapture);
+    }
     let _ = terminal.clear();
 
-    let code = event_loop(&mut terminal);
+    let code = event_loop(&mut terminal, settings);
 
     let _ = terminal.backend_mut().execute(DisableMouseCapture);
     guard.restore();
     code
 }
 
-fn event_loop<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> i32 {
+fn event_loop<B: ratatui::backend::Backend>(
+    terminal: &mut Terminal<B>,
+    settings: crate::tui::app::Settings,
+) -> i32 {
     let worker = Worker::new(AppleScriptPlayer::new());
     // The notification is the fast path; the poll stays as the safety net for
     // seek / volume / shuffle / repeat, which it is silent about
@@ -150,7 +157,13 @@ fn event_loop<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> i32 {
     // nothing at all, which cost a confusing debugging round to find out.
     let notify = crate::player::notify::subscribe();
     let mut app = App::new();
+    app.settings = settings;
     let theme = Theme::new(Accent::Art, Border::Rounded);
+    // Where the last frame put the clickable things, and whether a seek drag is
+    // in progress. A drag keeps seeking after the pointer leaves the bar, which
+    // is the whole point of being able to scrub.
+    let mut regions = crate::tui::render::Regions::default();
+    let mut scrubbing = false;
 
     // `None` means "never polled", which is due straight away. Starting the
     // clock at `now` instead would leave the TUI sitting on the idle card for a
@@ -221,6 +234,13 @@ fn event_loop<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> i32 {
                         submit_all(u.commands, &worker);
                     }
                 }
+                Ok(TermEvent::Mouse(m)) => {
+                    if app.settings.mouse {
+                        let u = update(app, mouse_event(m, &regions, &mut scrubbing));
+                        app = u.app;
+                        submit_all(u.commands, &worker);
+                    }
+                }
                 Ok(TermEvent::Resize(_, _)) => {
                     app = update(app, Event::Resize).app;
                     // ratatui handles the buffer; a redraw picks the new size up.
@@ -266,9 +286,22 @@ fn event_loop<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> i32 {
             });
         }
 
-        // 6. Draw.
-        if terminal.draw(|f| draw(f, &app, &theme)).is_err() {
+        // 6. Draw, and keep the clickable regions from this frame. The next
+        //    click is resolved against what is on screen now, not against a
+        //    second copy of the layout.
+        if terminal
+            .draw(|f| crate::tui::render::draw_with(f, &app, &theme, &mut regions))
+            .is_err()
+        {
             break;
+        }
+
+        // 7. Tell the app how many history rows fit, whenever that changes, so
+        //    the view scrolls to follow the cursor.
+        if let Some(rows) = regions.history_rows()
+            && rows != app.viewport
+        {
+            app = update(app, Event::Viewport(rows)).app;
         }
         if app.should_quit {
             break;
@@ -337,6 +370,64 @@ fn run_one(
         }
         PlayerCommand::Launch => launch_spotify().map(|_| None),
     }
+}
+
+/// Turn a crossterm mouse event into one the app can act on.
+///
+/// The hit test uses the regions the previous frame recorded. While a drag is in
+/// progress the target is the progress bar whatever the pointer is over, because
+/// a scrub that stopped the moment the pointer left the bar would be useless.
+fn mouse_event(
+    m: MouseEvent,
+    regions: &crate::tui::render::Regions,
+    scrubbing: &mut bool,
+) -> Event {
+    use crate::tui::app::{Hit, Mouse, MouseAction};
+
+    let action = match m.kind {
+        MouseEventKind::Down(MouseButton::Left) => MouseAction::Press,
+        MouseEventKind::Drag(MouseButton::Left) => MouseAction::Drag,
+        MouseEventKind::Up(MouseButton::Left) => {
+            *scrubbing = false;
+            return Event::Tick;
+        }
+        MouseEventKind::ScrollUp => MouseAction::ScrollUp,
+        MouseEventKind::ScrollDown => MouseAction::ScrollDown,
+        // A middle click, a right click, a double click or a mouse move: trak
+        // has no use for any of them, and inventing one now would be a decision
+        // the SPEC does not cover.
+        _ => return Event::Tick,
+    };
+
+    let target = match regions.hit(m.column, m.row) {
+        Some(Hit::Seek(f)) => {
+            *scrubbing = true;
+            Hit::Seek(f)
+        }
+        // Mid-drag, off the bar: keep seeking rather than dropping the scrub.
+        Some(_) if *scrubbing && action == MouseAction::Drag => Hit::Seek(
+            regions
+                .progress
+                .filter(|p| p.width > 0)
+                .map(|p| {
+                    ((m.column.saturating_sub(p.x) as f64 + 0.5) / p.width as f64).clamp(0.0, 1.0)
+                })
+                .unwrap_or(0.0),
+        ),
+        Some(other) => {
+            if *scrubbing {
+                Hit::Seek(0.0)
+            } else {
+                other
+            }
+        }
+        None => {
+            *scrubbing = false;
+            return Event::Tick;
+        }
+    };
+
+    Event::Mouse(Mouse { action, target })
 }
 
 /// The char `update` should see for a key, or `None` for a key trak ignores.

@@ -280,11 +280,42 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
       plus every history entry with the same URI, so a track heard once reads `1`, not `0` — and a
       poll can never inflate it, because re-reading the same track is not a change. > An advert has
       no URI to count by, so it prints a dash rather than a number it could not have earned.
-- [ ] 3.8 **Input**: all keys in SPEC §4 that apply to B, arrows + vim, `Tab`/`Shift-Tab`, `1`–`3`,
-      `?` help overlay listing every key, `esc`. Mouse (click tabs and rows, click/drag progress bar to
-      seek, wheel scroll, click ⏮⏯⏭) gated by the config flag (default on). Done when: each key has
-      an `update()` test; help overlay matches the SPEC table (add a test that fails if a key in the
-      table is missing from the help text).
+- [x] 3.8 **Input.** Every B key in SPEC §4 is bound and each has an `update()` test; arrows fold onto
+      their vim equivalents so one binding serves both; `Tab`/`Shift-Tab` cycle the tabs; `?` opens a
+      centred help overlay that **swallows keys so nothing fires behind it**, while `q` still quits.
+      > **`esc` closes the overlay** (SPEC §4) and is inert everywhere else, so it cannot quit by
+      accident. > **The help overlay is checked against `docs/SPEC.md` itself, not a copy of it.** The
+      old test listed sixteen strings inside the test file, which is a copy that goes stale — the
+      exact failure it existed to catch. The new one parses the §4 table, keeps the rows marked
+      `both`, and requires every key in it to be either a token in the overlay's key column or listed
+      in `NOT_YET` **with a reason**. Tokens, not substrings: a substring search passes for `a` because
+      `tab` contains it, and case matters because `L` is not `l`. The overlay **no longer advertises
+      keys that do nothing yet** (`a`, `v`, `L`, `,`) — listing a dead key is a small lie. > Both
+      directions are checked, because either alone is a test that cannot fail: dropping a key from the
+      help fails the first, and an excuse that has quietly become *false* fails the second — every
+      `NOT_YET` key is pressed through `update` and the whole app state fingerprinted. Five mutations
+      were run against it and each one fails the build.
+- [x] 3.8 **Input, mouse.** Click a tab, a history row or a transport control; click or drag the
+      progress bar to seek; wheel over the list to scroll. Gated by `[input] mouse` (default on): when
+      off the loop does not ask the terminal for events, **and `update` ignores any that arrive anyway**
+      — a terminal that reports them regardless must not turn them into Spotify writes (COMPAT rule 3).
+      > **Clicks are hit-tested against the regions the last frame recorded, not against a second copy
+      of the layout.** `draw_with` fills a `Regions` as it draws and the loop keeps it, so a click
+      lands where the pixels are and there is no second layout calculation to drift. A test reads the
+      *rendered buffer* at each region and checks something is actually drawn there: a tab region must
+      sit over its label, a control over a transport glyph, the bar over a row of ─. > Two things only
+      a real terminal shows: **ratatui draws a block title over the top border, not inside the body**,
+      so the tab strip is a row higher than the pane's inner area; and a click resolves to the
+      **middle of the cell** it landed in, so the ends of the bar are half a cell in, not 0 and 1.
+      > **The history list scrolls.** It can be 500 rows in a 20-row pane, and `j` used to walk the
+      cursor off the screen with nothing to show for it. The app keeps a scroll that follows the
+      selection, the loop tells it how many rows fit, and the view scrolls only when the cursor would
+      leave it — not re-centring on every notch, which is the behaviour you can predict. The cursor is
+      now clamped to the *list*, not to `HISTORY_VIEW`, so the oldest rows of a long session are
+      reachable; a test walks 570 `j` presses and asserts the cursor is always one of the rows on
+      screen. > **Verified live against real Spotify**: clicking ⏭ skipped the track, clicking the
+      Info label switched tab, dragging the bar seeked to 41 s, the wheel scrolled the list, and
+      clicking a history row then pressing enter played the remembered track.
 - [x] 3.9 **Subscribe to `PlaybackStateChanged`.** `src/player/notify.rs`, and `cargo run --release
       --example notify-probe` measures it. **Measured 172.7 ms and 173.1 ms for pause and play**
       against a real Spotify, inside the 300 ms budget. > **The notification is delivered on the
