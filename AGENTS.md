@@ -171,5 +171,6 @@ docs/  SPEC.md  COMPAT.md  ARCHITECTURE.md  AGENT-PROMPTS.md
        (created by tasks: APPLESCRIPT.md KEYCHAIN.md TERMINALS.md AUDIO-TAP.md README-NOTES.md RELEASING.md)
 .github/workflows/ci.yml
 tests/fixtures/   (created by task 1.1)
+spikes/          (throwaway spike crates: applescript/ notify/ keychain/ images/ viz/)
 scripts/          (created by task 9.1: package-release.sh)
 ```

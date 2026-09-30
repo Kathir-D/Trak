@@ -96,17 +96,28 @@ Each spike ends with facts written to a doc, not just working code. Throwaway co
       `(10,20)` in Terminal.app — and the art layout must use it. > **Trap:** `new_protocol()`
       *succeeds* for all four protocols in both terminals, so `is_ok()` proves nothing about
       rendering; 4.1's "done when" cannot be met by a unit test alone.
-- [ ] 1.5 **Process-tap visualizer spike (R1, R6).** Using `cidre`'s `core-audio-record` example as
-      the base, tap **Spotify's process only** (by bundle ID → pid → tap description) and print RMS
-      levels while a track plays. Test from the terminal app the owner uses. Record: does macOS show a
-      "System Audio Recording" prompt for the terminal? does it work after granting? what happens on
-      denial (error code, silence, or hang)? Does it work while Sonar's own tap is active?
-      Done when: `docs/AUDIO-TAP.md` answers those four questions with evidence and states the
-      go / no-go for real audio. **[owner]** may need to click a permission prompt.
-- [ ] 1.6 **cavacore feasibility.** Feed 1 s of synthetic sine + the tapped samples through
-      `cavacore` and print bar heights; confirm the crate builds on stable Rust for both
-      `aarch64-apple-darwin` and `x86_64-apple-darwin`. Done when: findings + chosen bar count and
-      sample rate in `docs/AUDIO-TAP.md`.
+- [ ] 1.5 **Process-tap visualizer spike (R1, R6).** > **Blocked on the owner** — the "System Audio
+      Recording" prompt is a modal system panel and an unattended session cannot click it. The
+      *analysis* half is already proven by 1.6, so nothing else in phase 8 depends on this.
+      > **[owner]** steps are written out in `docs/AUDIO-TAP.md` §3: build the spike from cidre's
+      `core-audio-record` example, run it **in cmux** (not Terminal.app), click Allow on the
+      prompt, and report (a) whether a prompt appeared at all for an un-bundled CLI, (b) what
+      denial looks like, (c) whether it works while Sonar's tap is active. Take
+      `system_profiler SPAudioDataType` before and after. > 8.3's fallback is already decided: if an
+      un-bundled CLI cannot get the grant, ship simulated as the default and make real audio an
+      explicit opt-in.
+- [x] 1.6 **cavacore feasibility.** `docs/AUDIO-TAP.md`; spike is `spikes/viz`; bar output is a
+      committed fixture at `tests/fixtures/visualizer/cavacore-bars.txt`. > **Builds on stable
+      (rustc 1.98.1) for both `aarch64-apple-darwin` and `x86_64-apple-darwin`** — 1.6's
+      cross-target requirement is met. **Chosen: 44 100 Hz, 32 bars, mono** (96 kHz and 16–96 bars
+      all build too), but **8.3 must take the rate from the tap's format, not a constant** —
+      `cavacore` trusts the sample rate it is given. > Frequency discrimination is real: 80 Hz →
+      bars 0–12, 440 Hz → bars 21–26, noise → broadband, silence → nothing. > **Two traps:** the
+      crate carries peak/autosens state inside a `Cava`, so **one instance per stream** (reusing one
+      made an 80 Hz and a 440 Hz sine report identical spectra), and the **output is not
+      normalised** — autosens ramps over ~1 s, so renderers must scale against pane height and a
+      recent peak. > API notes for `viz/dsp.rs`: `CavaBuilder::default()` (no `new()`), and
+      `SampleRate::new(x)` not `SampleRate::Hz(x)`.
 - [x] 1.7 **Spotify Web API reality check (R4).** `docs/WEB-API.md`, every claim cited and dated,
       two of the most plan-changing (the `localhost` ban and the Feb 2026 removal list) verified a
       second time by hand against the live docs. > Later agents: **`localhost` is banned** — register

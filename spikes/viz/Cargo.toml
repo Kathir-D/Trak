@@ -1,0 +1,11 @@
+[package]
+name = "viz-spike"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+cavacore = "2.0.2"
+bounded-integer = "0.5"
+
+[workspace]
