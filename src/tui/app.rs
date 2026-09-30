@@ -1127,7 +1127,7 @@ mod tests {
     /// COMPAT rule 5: an ignored volume write hides the meter and says why.
     #[test]
     fn an_ignored_volume_write_hides_the_meter_and_explains_itself() {
-        let (mut app, _) = press(with_track(), '-');
+        let (app, _) = press(with_track(), '-');
         let app = update(
             app,
             Event::CommandDone(CommandOutcome::read_back(
