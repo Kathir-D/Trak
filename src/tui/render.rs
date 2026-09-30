@@ -394,7 +394,7 @@ pub fn draw_with(
             draw_help(f, area);
         }
         if let Some(t) = &app.toast {
-            draw_toast(f, area, &t.text);
+            draw_toast(f, area, &t.text, theme);
         }
         return;
     }
@@ -410,7 +410,7 @@ pub fn draw_with(
         draw_help(f, area);
     }
     if let Some(t) = &app.toast {
-        draw_toast(f, area, &t.text);
+        draw_toast(f, area, &t.text, theme);
     }
 }
 
@@ -428,9 +428,11 @@ fn inner(r: Rect) -> Rect {
     }
 }
 
-fn pane_block<'a>(title: &'a str, theme: &Theme, focused: bool) -> Block<'a> {
+/// A bordered pane with a title. The title may be styled per span, which is how
+/// the selected tab gets the accent background (TODO 4.2).
+fn pane_block<'a>(title: impl Into<Line<'a>>, theme: &Theme, focused: bool) -> Block<'a> {
     let mut b = Block::bordered()
-        .title(title)
+        .title(title.into())
         .border_type(
             theme
                 .border
@@ -839,12 +841,14 @@ fn progress(app: &App) -> f64 {
 }
 
 fn draw_tabs(f: &mut Frame, area: Rect, app: &App, theme: &Theme, regions: &mut Regions) {
+    let selected_style = Style::default()
+        .fg(theme.accent_text())
+        .bg(theme.accent_colour());
     // The segments come first: the title is built from them and the clickable
     // rects come from them, so a tab cannot be drawn in one place and clicked
     // somewhere else.
-    let strip = tab_strip(app);
-    let title = format!(" {} ", strip.text);
-    let block = pane_block(&title, theme, false);
+    let strip = tab_strip(app, selected_style);
+    let block = pane_block(strip.line(), theme, false);
     f.render_widget(block, area);
     let body = inner(area);
     if body.width == 0 || body.height == 0 {
@@ -890,28 +894,41 @@ fn draw_tabs(f: &mut Frame, area: Rect, app: &App, theme: &Theme, regions: &mut 
 /// because a tab strip rendered from one description and clicked from another is
 /// a tab strip that eventually stops lining up.
 struct TabStrip {
-    text: String,
-    /// Cell offset from the start of the text, and the text, per tab.
+    /// Cell offset from the start of the title, and the text, per tab.
     segments: Vec<(u16, String)>,
+    spans: Vec<Span<'static>>,
 }
 
-fn tab_strip(app: &App) -> TabStrip {
+impl TabStrip {
+    /// The title, leading space included, as one line of styled spans.
+    fn line(&self) -> Line<'static> {
+        let mut spans = vec![Span::raw(" ")];
+        spans.extend(self.spans.iter().cloned());
+        spans.push(Span::raw(" "));
+        Line::from(spans)
+    }
+}
+
+fn tab_strip(app: &App, selected: Style) -> TabStrip {
     let mut segments = Vec::new();
-    let mut text = String::new();
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut width = 0usize;
     for (i, t) in Tab::ALL.iter().enumerate() {
         let n = i + 1;
-        let label = if *t == app.tab {
-            format!("[{n}]{}", t.label())
+        let (label, style) = if *t == app.tab {
+            (format!("[{n}]{}", t.label()), selected)
         } else {
-            format!(" {n} {} ", t.label())
+            (format!(" {n} {} ", t.label()), Style::default())
         };
-        if !text.is_empty() {
-            text.push(' ');
+        if width > 0 {
+            spans.push(Span::raw(" "));
+            width += 1;
         }
-        segments.push((text.chars().count() as u16, label.clone()));
-        text.push_str(&label);
+        segments.push((width as u16, label.clone()));
+        width += label.chars().count();
+        spans.push(Span::styled(label, style));
     }
-    TabStrip { text, segments }
+    TabStrip { segments, spans }
 }
 
 fn history_lines<'a>(app: &'a App, theme: &'a Theme) -> Vec<Line<'a>> {
@@ -1140,7 +1157,7 @@ fn line(k: &str, v: &str) -> Line<'static> {
     ])
 }
 
-fn draw_toast(f: &mut Frame, area: Rect, text: &str) {
+fn draw_toast(f: &mut Frame, area: Rect, text: &str, theme: &Theme) {
     // Bottom right, one line, and never over the footer keys (TODO 4.8).
     let w = (text.chars().count() as u16 + 4).min(area.width);
     if w < 8 || area.height < 2 {
@@ -1155,10 +1172,18 @@ fn draw_toast(f: &mut Frame, area: Rect, text: &str) {
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
             format!(" {text} "),
-            Style::default().fg(Color::Black).bg(Color::Cyan),
+            toast_style(theme),
         ))),
         popup,
     );
+}
+
+/// The toast sits on the accent, so its text colour has to follow the accent too
+/// (TODO 4.2: a contrast rule that holds for every colour the cover can produce).
+fn toast_style(theme: &Theme) -> Style {
+    Style::default()
+        .fg(theme.accent_text())
+        .bg(theme.accent_colour())
 }
 
 #[cfg(test)]

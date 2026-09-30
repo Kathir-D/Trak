@@ -159,7 +159,9 @@ fn event_loop<B: ratatui::backend::Backend>(
     let notify = crate::player::notify::subscribe();
     let mut app = App::new();
     app.settings = settings;
-    let theme = Theme::new(Accent::Art, Border::Rounded);
+    // The accent comes off the cover, so the theme is mutable for the life of the
+    // session (TODO 4.2).
+    let mut theme = Theme::new(Accent::Art, Border::Rounded);
     // Where the last frame put the clickable things, and whether a seek drag is
     // in progress. A drag keeps seeking after the pointer leaves the bar, which
     // is the whole point of being able to scrub.
@@ -196,7 +198,21 @@ fn event_loop<B: ratatui::backend::Backend>(
                     next
                 }
                 WorkerResult::Command(outcome) => update(app, Event::CommandDone(outcome)).app,
-                WorkerResult::Art { url, result } => update(app, Event::Art { url, result }).app,
+                WorkerResult::Art { url, result } => {
+                    let u = update(app, Event::Art { url, result });
+                    // Take the accent from the cover that just arrived, if there
+                    // is one and it has a usable colour. The pixels are already
+                    // in the app; the theme needs a look at them.
+                    if let Some(art) = u.app.art.loaded.as_ref()
+                        && theme.set_art_colour(&art.image)
+                    {
+                        // A new accent means every cell that was the old colour
+                        // has to be repainted, so the frame is forced rather than
+                        // left to the diff.
+                        terminal.clear().ok();
+                    }
+                    u.app
+                }
             };
         }
 

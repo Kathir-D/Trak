@@ -4,6 +4,7 @@
 //! calls into here; an example or an integration test can use any of it without
 //! going through the binary, which is what makes the player layer testable.
 
+pub mod accent;
 pub mod art;
 pub mod cli;
 pub mod player;

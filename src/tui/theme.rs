@@ -6,6 +6,7 @@
 use ratatui::style::{Color, Style};
 use ratatui::widgets::BorderType;
 
+use crate::accent;
 use crate::player::PlaybackState;
 
 /// The green from the Spotify brand, used when `accent = "green"` (SPEC §2).
@@ -74,7 +75,9 @@ impl Border {
 pub struct Theme {
     pub accent: Accent,
     pub border: Border,
-    /// The dominant colour of the current cover, once TODO 4.2 extracts one.
+    /// The dominant colour of the current cover (TODO 4.2). `None` until an
+    /// image has been extracted, and for a cover that has no usable colour --
+    /// a black-and-white sleeve should leave the accent alone.
     pub art_colour: Option<Color>,
 }
 
@@ -98,14 +101,37 @@ impl Theme {
     }
 
     /// The one accent colour. `Terminal` deliberately means "no colour from us".
+    ///
+    /// `Accent::Art` uses the cover's colour when there is a usable one and falls
+    /// back to green otherwise, so a monochrome sleeve never leaves the interface
+    /// looking broken (SPEC §8: `accent = "art" | "green" | "terminal"`).
     pub fn accent_colour(&self) -> Color {
         match self.accent {
             Accent::Green => SPOTIFY_GREEN,
-            // Falls back to green until the art extractor exists, so the UI never
-            // renders un-accented and looks broken.
-            Accent::Art => self.art_colour.unwrap_or(SPOTIFY_GREEN),
+            Accent::Art => self
+                .art_colour
+                .filter(|c| accent::is_usable(*c))
+                .unwrap_or(SPOTIFY_GREEN),
             Accent::Terminal => Color::Reset,
         }
+    }
+
+    /// Set the accent from a freshly fetched cover.
+    ///
+    /// Returns whether the colour was accepted, so the caller can tell the
+    /// difference between "this cover has no colour" and "the colour is
+    /// unchanged" without keeping the old value around.
+    pub fn set_art_colour(&mut self, image: &image::DynamicImage) -> bool {
+        let found = accent::dominant_colour(image).map(accent::ensure_contrast);
+        let usable = found.filter(|c| accent::is_usable(*c));
+        let changed = usable != self.art_colour;
+        self.art_colour = usable;
+        changed
+    }
+
+    /// The text colour to put on the accent, for the selected tab.
+    pub fn accent_text(&self) -> Color {
+        accent::text_on(self.accent_colour())
     }
 
     pub fn accent_style(&self) -> Style {
@@ -195,16 +221,122 @@ mod tests {
         assert_eq!(Theme::default().border, Border::Rounded);
     }
 
+    /// `art` must never render an interface that looks broken, and it must never
+    /// render one that cannot be read (TODO 4.2).
     #[test]
-    fn the_accent_falls_back_to_green_until_art_works() {
+    fn the_art_accent_is_used_only_when_it_is_usable() {
         let t = Theme::new(Accent::Art, Border::Rounded);
         assert_eq!(t.accent_colour(), SPOTIFY_GREEN, "never render un-accented");
+
+        // A usable cover colour is used.
         let t = Theme {
             accent: Accent::Art,
             border: Border::Rounded,
-            art_colour: Some(Color::Rgb(1, 2, 3)),
+            art_colour: Some(Color::Rgb(200, 40, 40)),
         };
-        assert_eq!(t.accent_colour(), Color::Rgb(1, 2, 3));
+        assert_eq!(t.accent_colour(), Color::Rgb(200, 40, 40));
+
+        // An unusable one -- near-black here, and near-white below -- is refused
+        // and green takes over. This used to assert the opposite, and the
+        // opposite is the bug: an interface tinted Rgb(1, 2, 3) is unreadable on
+        // a dark terminal.
+        for unusable in [
+            Color::Rgb(1, 2, 3),
+            Color::Rgb(255, 255, 255),
+            Color::Rgb(128, 128, 128),
+        ] {
+            let t = Theme {
+                accent: Accent::Art,
+                border: Border::Rounded,
+                art_colour: Some(unusable),
+            };
+            assert_eq!(
+                t.accent_colour(),
+                SPOTIFY_GREEN,
+                "{unusable:?} should have been refused"
+            );
+        }
+
+        // `green` ignores the cover entirely, and `terminal` borrows the palette.
+        let t = Theme {
+            accent: Accent::Green,
+            border: Border::Rounded,
+            art_colour: Some(Color::Rgb(200, 40, 40)),
+        };
+        assert_eq!(t.accent_colour(), SPOTIFY_GREEN);
+        let t = Theme {
+            accent: Accent::Terminal,
+            border: Border::Rounded,
+            art_colour: Some(Color::Rgb(200, 40, 40)),
+        };
+        assert_eq!(t.accent_colour(), Color::Reset);
+    }
+
+    /// The three modes of SPEC §8, end to end from an actual cover.
+    #[test]
+    fn the_three_accent_modes_all_work() {
+        use image::{Rgb, RgbImage};
+        let mut img = RgbImage::new(32, 32);
+        for p in img.pixels_mut() {
+            *p = Rgb([210, 60, 30]);
+        }
+        let art = image::DynamicImage::ImageRgb8(img);
+
+        let mut t = Theme::new(Accent::Art, Border::Rounded);
+        assert!(t.set_art_colour(&art), "a strong cover changes the accent");
+        let from_art = t.accent_colour();
+        assert_ne!(from_art, SPOTIFY_GREEN, "and it is not the fallback");
+
+        let mut green = Theme::new(Accent::Green, Border::Rounded);
+        green.set_art_colour(&art);
+        assert_eq!(green.accent_colour(), SPOTIFY_GREEN);
+
+        let mut terminal = Theme::new(Accent::Terminal, Border::Rounded);
+        terminal.set_art_colour(&art);
+        assert_eq!(terminal.accent_colour(), Color::Reset);
+
+        // And the text on the accent is legible whatever the accent turned out to
+        // be, which is the property that makes all three modes safe.
+        for theme in [&t, &green, &terminal] {
+            let bg = theme.accent_colour();
+            let fg = theme.accent_text();
+            if bg != Color::Reset {
+                assert!(
+                    crate::accent::contrast_ratio(bg, fg) >= 3.0,
+                    "{bg:?} with {fg:?} is not readable"
+                );
+            }
+        }
+    }
+
+    /// A monochrome cover is a real answer, not a failure: it leaves the accent
+    /// alone rather than picking grey out of the noise.
+    #[test]
+    fn a_greyscale_cover_leaves_the_accent_alone() {
+        use image::{Rgb, RgbImage};
+        let mut img = RgbImage::new(32, 32);
+        for p in img.pixels_mut() {
+            *p = Rgb([128, 128, 128]);
+        }
+        let mut t = Theme::new(Accent::Art, Border::Rounded);
+        assert!(!t.set_art_colour(&image::DynamicImage::ImageRgb8(img)));
+        assert_eq!(t.art_colour, None);
+        assert_eq!(t.accent_colour(), SPOTIFY_GREEN);
+    }
+
+    /// Setting the same cover twice is not a change, so the caller can skip a
+    /// redraw.
+    #[test]
+    fn setting_the_same_cover_twice_reports_no_change() {
+        use image::{Rgb, RgbImage};
+        let mut img = RgbImage::new(32, 32);
+        for p in img.pixels_mut() {
+            *p = Rgb([30, 120, 220]);
+        }
+        let art = image::DynamicImage::ImageRgb8(img);
+        let mut t = Theme::new(Accent::Art, Border::Rounded);
+        assert!(t.set_art_colour(&art));
+        assert!(!t.set_art_colour(&art), "nothing changed the second time");
     }
 
     #[test]

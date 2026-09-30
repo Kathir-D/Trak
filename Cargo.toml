@@ -41,6 +41,12 @@ ureq = "3"
 [[example]]
 name = "notify-probe"
 
+# A probe that reports the accent a cover produces, and why when it produces
+# none. "This sleeve got no colour" is either the filter working or a bug, and
+# this is how you tell them apart without a debugger.
+[[example]]
+name = "accent-probe"
+
 [dev-dependencies]
 assert_cmd = "2"
 filetime = "0.2.29"

@@ -380,10 +380,27 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
       half-block path is snapshot-tested: a red/blue fixture must put both colours in the buffer.
       > **[owner]** still worth one look: real cover art in a real cmux window, since a pty can only
       prove the bytes trak sends, not how they land on screen.
-- [ ] 4.2 **Accent colour from art**: dominant colour (skip near-black/near-white, bias saturation),
-      applied to borders, progress, highlights; smooth-ish change on track change; settings `accent =
-      art|green|terminal`. Ensure contrast on dark *and* light terminals. Done when: three modes
-      visibly work; a unit test on the extractor with fixture images.
+- [x] 4.2 **Accent colour from art.** `src/accent.rs`; the three `accent = art|green|terminal` modes
+      are `Theme::accent_colour`. > **One measure throughout: WCAG relative luminance.** The first
+      version filtered pixels by HSL lightness and fixed up the result by WCAG luminance, so colours
+      the filter had approved came back as *different* colours. Lightness and luminance are different
+      scales; using both is just wrong. > **The band is 0.10–0.60 luma**, because the terminal's own
+      colours are unknown: below it an accent vanishes into a dark background, above it into a light
+      one. Saturation must clear 0.20, because a grey accent is indistinguishable from no accent. > A
+      **strongly** saturated candidate (≥ 0.45) beats a more central mild one: it is the colour a
+      person would name if asked what colour the album is. > `is_usable` is the single gate the theme
+      asks, and it also requires **3:1 contrast against whichever of black or white goes on top**,
+      which is what makes the accent safe on a light terminal and a dark one at once. The selected tab
+      and the toast take `accent_text()` rather than hardcoded black-on-cyan, which was unreadable on
+      a dark cover. > **A monochrome cover is a real answer**: `None`, and green stays. A test that
+      used to assert the opposite (that `Rgb(1,2,3)` is used as the accent) was the bug. > `set_art_colour`
+      returns whether the colour *changed*, so an unchanged cover does not force a redraw; a changed one
+      clears the terminal, because every cell that was the old colour has to be repainted. > The
+      tab strip is now a styled `Line` rather than a string, since ratatui draws a block title over the
+      border and the selected tab needs its own background. > `cargo run --release --example
+      accent-probe` reports the accent for every cached cover, and why when there is none — "this
+      sleeve got no colour" is otherwise impossible to tell from a bug. **All three real cached covers
+      produce a usable accent**, and the live TUI's backgrounds contain the extracted colour.
 - [ ] 4.3 **Art / visualizer toggle plumbing** (`a`): `display.mode`. With `visualizer`, art is not
       drawn but is still fetched for colour. Visualizer content arrives in phase 8; until then show a
       placeholder pane. Done when: toggling swaps the pane and persists in config (after 5.x).
