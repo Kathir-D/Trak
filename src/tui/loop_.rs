@@ -43,6 +43,10 @@ const INPUT_WAIT: Duration = Duration::from_millis(100);
 /// this is only the safety net, so it is deliberately slow. An AppleScript read is
 /// ~430 ms and covers only what the notification is silent about
 /// (docs/APPLESCRIPT.md §4 and §9).
+/// How long a cell of a scrolling title stays put. Slow enough to read a word at a
+/// time; fast enough that the title does not feel stuck.
+const SCROLL_EVERY: Duration = Duration::from_millis(220);
+
 const POLL_PLAYING: Duration = Duration::from_secs(3);
 const POLL_IDLE: Duration = Duration::from_secs(5);
 
@@ -176,6 +180,7 @@ fn event_loop<B: ratatui::backend::Backend>(
     // whole poll interval before it found out Spotify was running.
     let mut last_poll: Option<Instant> = None;
     let mut last_clock_tick = Instant::now();
+    let mut last_scroll = Duration::ZERO;
 
     loop {
         // 1. Finished writes first, so a completed command is applied before the
@@ -346,6 +351,17 @@ fn event_loop<B: ratatui::backend::Backend>(
             && rows != app.viewport
         {
             app = update(app, Event::Viewport(rows)).app;
+        }
+
+        // 8. A title too long for the pane scrolls. The renderer knows whether it
+        //    fits -- only it knows the pane width -- so it reports the span and
+        //    this owns the clock. A title that fits never moves.
+        if regions.title_span > 0 {
+            last_scroll += Duration::from_millis(100);
+            if last_scroll >= SCROLL_EVERY {
+                last_scroll = Duration::ZERO;
+                app.marquee_offset = (app.marquee_offset + 1) % regions.title_span;
+            }
         }
         if app.should_quit {
             break;

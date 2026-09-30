@@ -475,9 +475,9 @@ pub fn gradient_bar(
     // whimsy that costs nothing: it is three cells.
     let head_from = filled.saturating_sub(3);
     let mut spans = Vec::with_capacity(width);
-    for i in 0..width {
+    for (i, colour) in (0..width).zip(ramp.iter()) {
         let (glyph, colour) = if i < filled {
-            let base = ramp[i];
+            let base = *colour;
             let colour = if i >= head_from && filled > 3 {
                 crate::accent::mix(base, Color::White, 0.35)
             } else {
@@ -492,6 +492,22 @@ pub fn gradient_bar(
             style = style.add_modifier(Modifier::DIM);
         }
         spans.push(Span::styled(glyph, style));
+    }
+    spans
+}
+
+/// The volume meter: the same ramp as the bar but in its own glyphs, so the two
+/// do not read as two progress bars pointing at different things.
+pub fn gradient_meter(
+    fraction: f64,
+    width: usize,
+    palette: &crate::accent::Palette,
+    dim: bool,
+) -> Vec<Span<'static>> {
+    let mut spans = gradient_bar(fraction, width, palette, dim);
+    for span in &mut spans {
+        let filled = span.content == "●";
+        *span = Span::styled(if filled { "▰" } else { "▱" }, span.style);
     }
     spans
 }
@@ -522,4 +538,271 @@ pub fn edge_styles(palette: &crate::accent::Palette) -> [Style; 4] {
         Style::default().fg(palette.end()),   // bottom
         Style::default().fg(crate::accent::mix(palette.primary, palette.tertiary, 0.5)), // left
     ]
+}
+
+/// A title that scrolls when it does not fit.
+///
+/// A TUI pane is narrow and album titles are long. Two behaviours are both bad:
+/// truncating loses the chorus, and wrapping makes the layout jump as the track
+/// changes. Scrolling keeps the whole title reachable and the layout still, and
+/// it costs one integer of state.
+///
+/// The text is padded so the loop has something to scroll into: without the
+/// trailing gap the tail snaps back to the head on every wrap.
+pub fn marquee(text: &str, width: usize, offset: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= width {
+        return text.to_string();
+    }
+    let gap = 3;
+    let span = chars.len() + gap;
+    let start = offset % span;
+    let mut out = String::new();
+    for i in 0..width {
+        let idx = (start + i) % span;
+        out.push(if idx < chars.len() { chars[idx] } else { ' ' });
+    }
+    out
+}
+
+/// How many characters the marquee has to scroll through: the text plus the gap,
+/// or zero when it fits and therefore does not move at all.
+pub fn marquee_span(text: &str, width: usize) -> usize {
+    let len = text.chars().count();
+    if width == 0 || len <= width {
+        0
+    } else {
+        len + 3
+    }
+}
+
+/// The status dot, which breathes while music plays.
+///
+/// A static dot says "something is playing". A dot that pulses says it is
+/// *playing*, and it is the cheapest way to make a header feel alive: one glyph
+/// chosen from the clock, no animation state and no redraw of its own.
+pub fn status_dot(playing: bool, elapsed: f64) -> &'static str {
+    if !playing {
+        return "●";
+    }
+    // A 1.6s cycle through five glyphs. Chosen so that consecutive frames always
+    // differ, which is what makes it read as movement rather than as noise.
+    const CYCLE: [f64; 5] = [1.6, 2.4, 2.8, 2.4, 1.6];
+    let mut t = elapsed % 4.0;
+    let mut i = 0;
+    while i < CYCLE.len() && t > CYCLE[i] {
+        t -= CYCLE[i];
+        i += 1;
+    }
+    ["◉", "◍", "◌", "◍", "◎"][i.min(4)]
+}
+
+/// Small caps, for the artist line.
+///
+/// The terminal has no small caps, so this is the nearest honest thing: upper
+/// case with a hair space between letters, which reads as a label rather than as
+/// shouting.
+pub fn spaced_caps(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::new();
+    for (i, c) in chars.iter().enumerate() {
+        if !c.is_alphanumeric() {
+            out.push(*c);
+            continue;
+        }
+        out.push(c.to_ascii_uppercase());
+        // A hair space only *between* two letters. Adding one before a word space
+        // puts two spaces side by side, and after the last letter it is a trailing
+        // space nothing trims.
+        if chars.get(i + 1).is_some_and(|n| n.is_alphanumeric()) {
+            out.push('\u{2009}');
+        }
+    }
+    out
+}
+
+/// A vertical gradient bar, used as the spine beside the cover art.
+///
+/// Two columns of colour running down the side of the artwork: it ties the cover
+/// to the text below it, which is the whole reason the accent exists.
+pub fn spine(height: usize, palette: &crate::accent::Palette) -> Vec<Span<'static>> {
+    let ramp = palette.ramp(height.max(2));
+    (0..height)
+        .map(|i| {
+            let c = ramp[i % ramp.len()];
+            Span::styled("██", Style::default().fg(c))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod whimsy_tests {
+    use super::*;
+
+    /// A title that fits must not move at all, or it reads as a rendering fault
+    /// rather than as a scroll.
+    #[test]
+    fn a_short_title_does_not_scroll() {
+        assert_eq!(marquee("Census", 20, 0), "Census");
+        assert_eq!(marquee("Census", 6, 0), "Census");
+        assert_eq!(marquee_span("Census", 20), 0);
+        assert_eq!(marquee_span("Census", 6), 0);
+        assert_eq!(marquee_span("Census", 0), 0);
+    }
+
+    /// A title that does not fit has to be readable at every offset, and it has
+    /// to come back round to its own beginning.
+    #[test]
+    fn a_long_title_scrolls_through_itself() {
+        let text = "a very long track title indeed";
+        let width = 10;
+        let span = marquee_span(text, width);
+        assert_eq!(span, text.chars().count() + 3);
+        // Whatever the offset, the answer is the width, and it never panics.
+        for offset in 0..(span * 2) {
+            assert_eq!(marquee(text, width, offset).chars().count(), width);
+        }
+        // Wrapping round returns the first window exactly.
+        assert_eq!(marquee(text, width, 0), marquee(text, width, span));
+        // And the whole title is reachable: every character appears in some
+        // window. This is the property that matters -- a scroll that skips a word
+        // is worse than truncation.
+        let mut seen = String::new();
+        for offset in 0..span {
+            seen.push_str(&marquee(text, width, offset));
+        }
+        for c in text.chars().filter(|c| !c.is_whitespace()) {
+            assert!(seen.contains(c), "{c:?} was never shown");
+        }
+    }
+
+    #[test]
+    fn a_zero_width_marquee_is_empty() {
+        assert_eq!(marquee("anything", 0, 0), "");
+    }
+
+    /// The dot has to change, or it is not breathing.
+    #[test]
+    fn the_status_dot_breathes_while_playing() {
+        let mut seen = std::collections::HashSet::new();
+        for ms in 0..4000 {
+            seen.insert(status_dot(true, f64::from(ms) / 1000.0));
+        }
+        assert!(seen.len() > 1, "a static dot is not breathing: {seen:?}");
+        // Paused, it settles.
+        for ms in 0..4000 {
+            assert_eq!(status_dot(false, f64::from(ms) / 1000.0), "●");
+        }
+    }
+
+    /// Every glyph the dot can produce has to be one cell wide, or the header
+    /// tears.
+    #[test]
+    fn the_dot_glyphs_are_one_cell_wide() {
+        for ms in 0..4000 {
+            assert_eq!(
+                unicode_width::UnicodeWidthStr::width(status_dot(true, f64::from(ms) / 1000.0)),
+                1,
+                "the dot must be one cell"
+            );
+        }
+    }
+
+    #[test]
+    fn small_caps_are_uppercase_and_padded() {
+        // Asserted as properties rather than as a literal, because a literal would just
+        // be the implementation written down twice.
+        let out: String = spaced_caps("jane remover");
+        let letters = "jane remover"
+            .chars()
+            .filter(|c| c.is_alphanumeric())
+            .count();
+        let spaces = "jane remover".chars().filter(|c| *c == ' ').count();
+        // One hair space between each pair of letters *within* a word, so the
+        // count is the letters plus the letters that are not word-final.
+        let words = spaces + 1;
+        assert_eq!(
+            out.chars().count(),
+            letters + (letters - words) + spaces,
+            "one hair space between the letters of a word: {out:?}"
+        );
+        assert!(
+            !out.ends_with('\u{2009}'),
+            "the trailing hair space is trimmed: {out:?}"
+        );
+        assert!(
+            !out.contains("\u{2009} "),
+            "a hair space next to a word space would read as two spaces: {out:?}"
+        );
+        assert!(
+            !out.contains(" \u{2009}"),
+            "and the other way round: {out:?}"
+        );
+        let stripped: String = out.chars().filter(|c| *c != '\u{2009}').collect();
+        assert_eq!(stripped, "JANE REMOVER", "and it reads as small caps");
+        assert_eq!(spaced_caps("!!!"), "!!!", "punctuation is left alone");
+        assert_eq!(spaced_caps(""), "");
+    }
+
+    /// The bar's colours have to change across its length, or it is one flat
+    /// colour wearing a gradient's name.
+    #[test]
+    fn the_bar_is_actually_a_gradient() {
+        let p = crate::accent::Palette::from_accent(SPOTIFY_GREEN);
+        let spans = gradient_bar(0.5, 40, &p, false);
+        assert_eq!(spans.len(), 40);
+        let colours: std::collections::HashSet<_> =
+            spans.iter().map(|s| s.style.fg.unwrap()).collect();
+        assert!(
+            colours.len() > 8,
+            "a gradient should be many colours, got {}",
+            colours.len()
+        );
+        // The playhead is brighter than the bar behind it.
+        let filled: Vec<_> = spans.iter().take(20).collect();
+        let head = filled[19].style.fg.unwrap();
+        let middle = filled[10].style.fg.unwrap();
+        let Color::Rgb(hr, hg, hb) = head else {
+            panic!("rgb")
+        };
+        let Color::Rgb(mr, mg, mb) = middle else {
+            panic!("rgb")
+        };
+        assert!(
+            i32::from(hr) + i32::from(hg) + i32::from(hb)
+                > i32::from(mr) + i32::from(mg) + i32::from(mb),
+            "the head should be brighter: {head:?} vs {middle:?}"
+        );
+        // The unfilled part is not part of the gradient.
+        assert!(spans[25].content == "─");
+    }
+
+    #[test]
+    fn a_bar_with_no_room_is_empty() {
+        let p = crate::accent::Palette::from_accent(SPOTIFY_GREEN);
+        assert!(gradient_bar(0.5, 0, &p, false).is_empty());
+    }
+
+    #[test]
+    fn the_meter_uses_its_own_glyphs() {
+        let p = crate::accent::Palette::from_accent(SPOTIFY_GREEN);
+        let spans = gradient_meter(0.5, 20, &p, false);
+        assert!(spans.iter().take(10).all(|s| s.content == "▰"));
+        assert!(spans.iter().skip(10).all(|s| s.content == "▱"));
+    }
+
+    #[test]
+    fn the_spine_is_two_cells_wide_and_as_tall_as_asked() {
+        let p = crate::accent::Palette::from_accent(SPOTIFY_GREEN);
+        let spine = spine(10, &p);
+        assert_eq!(spine.len(), 10);
+        assert!(spine.iter().all(|s| s.content == "██"));
+        // And it is a gradient down its length, not one colour repeated.
+        let colours: std::collections::HashSet<_> =
+            spine.iter().map(|s| s.style.fg.unwrap()).collect();
+        assert!(colours.len() > 4, "got {} colours", colours.len());
+    }
 }

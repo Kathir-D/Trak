@@ -282,6 +282,12 @@ pub struct App {
     pub should_quit: bool,
     /// Local clock, for the header.
     pub clock: String,
+    /// How far the title has scrolled, so a long title is readable rather than
+    /// truncated. Reset when the track changes.
+    pub marquee_offset: usize,
+    /// Seconds since the app started, used by the breathing status dot. Ticked
+    /// locally so the renderer needs no clock of its own.
+    pub tick_secs: f64,
     /// Whether a poll is due. Ticked locally so the loop stays testable.
     pub poll_due: bool,
 }
@@ -317,6 +323,8 @@ impl App {
             art_enabled: true,
             should_quit: false,
             clock: String::new(),
+            marquee_offset: 0,
+            tick_secs: 0.0,
             poll_due: true,
         }
     }
@@ -466,6 +474,7 @@ pub fn update(mut app: App, event: Event) -> Updated {
         }
 
         Event::Tick => {
+            app.tick_secs += 0.1;
             app.expire_toast();
             // A command in flight is still running. Do not stack a poll behind it
             // or the queue grows without bound.
