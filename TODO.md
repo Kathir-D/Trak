@@ -485,8 +485,19 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
 
 ## Phase 5 — Config and the settings screen
 
-- [ ] 5.1 **`config.rs`** per SPEC §8: load/save/defaults/unknown keys ignored/corrupt file backed up,
-      atomic write, `XDG_CONFIG_HOME` respected, file mode `0600`. Done when: unit tests for each case.
+- [x] 5.1 **`config.rs`** per SPEC §8. Hand-written TOML subset, no new dependency. > **A wrong
+      *type* on one key falls back to that key's default and leaves the rest of the file alone** — it
+      does not make the file corrupt. Corrupt is a rename-the-whole-thing path a user has to recover
+      from by hand, and one typo in one setting must not throw away the other forty. > **A leading
+      BOM is stripped**: TextEdit writes one, and refusing the file would silently reset every setting
+      the moment someone edited it in the obvious editor. > Unknown keys *and* unknown tables are
+      ignored, so the file can gain keys before trak knows them. > Save is atomic (temp + rename) and
+      `0600`, and fixes the mode even over an existing `0644` file. > 77 tests, including a
+      **round-trip with every key set to a non-default value** and a truncation sweep over all 1,378
+      cut points of a real file. > `Paths` takes `HOME`/`XDG_CONFIG_HOME` as arguments, so no test can
+      touch a real config. > `[volume] control` is in the file although SPEC §8's block does not show
+      it: 4.4 pins it there, and without it the setting would be unreachable from disk. SPEC §8 wants
+      that line added.
 - [ ] 5.2 **Settings screen** (`trak config` and `,` overlay): grouped checklist (Display, Theme,
       Visualizer, Input, Notifications, Spotify API) with `space` toggle, `←/→` change enum values,
       `enter` for text/guided flows, `q`/`esc` save-and-close; live preview: changes apply instantly to
@@ -608,20 +619,20 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
 
 ## Phase 9 — Release and Homebrew (no paid signing)
 
-- [ ] 9.1 **`scripts/package-release.sh`**: build both targets (`rustup target add x86_64-apple-darwin`),
+- [x] 9.1 **`scripts/package-release.sh`**: build both targets (`rustup target add x86_64-apple-darwin`),
       `lipo` into a universal binary, `codesign --force -s -` (ad-hoc), tarball
       `trak-<version>-macos.tar.gz` containing `trak`, `LICENSE`, `README.md`, `THIRD-PARTY-NOTICES.md`,
       plus `SHA256SUMS.txt`. VERSION is the source of truth; the tag must be `v$(cat VERSION)`.
       Done when: script runs locally; `file` shows both archs; `codesign -dv` shows ad-hoc; the binary
       runs on arm64 with `--version`; `xattr` shows no quarantine after `curl` download.
       Alternative if lipo/sign misbehaves: two tarballs + `on_arm`/`on_intel` (see ARCHITECTURE).
-- [ ] 9.2 **`.github/workflows/release.yml`** on `v*` tags: verify tag == VERSION, build, package,
+- [x] 9.2 **`.github/workflows/release.yml`** on `v*` tags: verify tag == VERSION, build, package,
       create the GitHub release with tarball + checksums, then update `Formula/trak.rb` in
       `Kathir-D/homebrew-tap` (needs a `HOMEBREW_TAP_TOKEN` secret). Model it on
       `../headless-spotify/.github/workflows/release.yml`. Done when: a dry-run on a pre-release tag
       produces a release and a tap commit. **[owner]** adds the secret (fine-grained PAT, contents:write
       on the tap repo only).
-- [ ] 9.3 **`Formula/trak.rb`**: `desc`, `homepage`, `url`, `sha256`, `license "MIT"`,
+- [x] 9.3 **`Formula/trak.rb`**: `desc`, `homepage`, `url`, `sha256`, `license "MIT"`,
       `depends_on macos: :sonoma` (14.x; the audio tap needs 14.2 — note this in `caveats` since Homebrew
       cannot express minor versions), `def install; bin.install "trak"; end`, caveats (optional Client
       ID via `trak config`, terminal permissions, optional Sonar / headless-spotify), `test do`
@@ -634,7 +645,7 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
 - [ ] 9.6 **Fresh-machine test**: `brew install kathir-d/tap/trak` on a clean user/VM (or after
       `brew uninstall`), run `trak --version`, `trak status`, open the TUI. Done when: no Gatekeeper
       prompt, no manual steps. Record in `docs/RELEASING.md`.
-- [ ] 9.7 **`docs/RELEASING.md`**: bump VERSION and Cargo.toml, changelog entry, tag, what CI does,
+- [x] 9.7 **`docs/RELEASING.md`**: bump VERSION and Cargo.toml, changelog entry, tag, what CI does,
       how to yank a bad release. Add `CHANGELOG.md` (Keep a Changelog format).
 - [ ] 9.8 Tag **v0.1.0** when phases 2–8 are done and phase 10 rows pass. **[owner]** approves the
       release before tagging.
