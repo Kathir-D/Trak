@@ -7,6 +7,7 @@
 pub mod accent;
 pub mod art;
 pub mod cli;
+pub mod lyrics;
 pub mod player;
 pub mod tui;
 

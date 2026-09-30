@@ -196,6 +196,14 @@ pub enum WorkerResult {
         url: String,
         result: Result<LoadedArt, crate::art::ArtError>,
     },
+    /// A lyrics lookup finished. Not a Spotify job either; it runs here so the
+    /// render loop never waits on a network round trip (TODO 6.1).
+    Lyrics {
+        /// The track the lyrics were fetched *for*. A result for a track the user
+        /// has skipped past is dropped rather than shown under the wrong title.
+        uri: Option<String>,
+        result: Result<crate::lyrics::Lyrics, crate::lyrics::LyricsError>,
+    },
 }
 
 /// Runs player writes on a worker thread so the render loop never blocks.
@@ -287,20 +295,28 @@ impl Worker {
         }
     }
 
-    /// Queue a command. Does nothing if one is already running, which is what
-    /// keeps a repeated keypress from building a backlog.
-    pub fn submit<F>(&self, f: F)
+    /// Queue a command, and say whether it was accepted.
+    ///
+    /// Does nothing if one is already running, which is what keeps a repeated
+    /// keypress from building a backlog. **The bool matters**: a caller that has
+    /// already recorded "a fetch is in flight" needs to know whether it really
+    /// is, or the state is stuck at Loading forever with nothing on its way.
+    /// That is not hypothetical -- it is how the lyrics tab ended up saying
+    /// "looking for lyrics…" for every track.
+    pub fn submit<F>(&self, f: F) -> bool
     where
         F: FnOnce(&mut dyn Player) -> WorkerResult + Send + 'static,
     {
-        let Some(tx) = &self.job_tx else { return };
+        let Some(tx) = &self.job_tx else { return false };
         if self.busy.load(Ordering::Acquire) {
-            return;
+            return false;
         }
         self.busy.store(true, Ordering::Release);
         if tx.send(Box::new(f)).is_err() {
             self.busy.store(false, Ordering::Release);
+            return false;
         }
+        true
     }
 
     pub fn is_busy(&self) -> bool {

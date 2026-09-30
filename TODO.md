@@ -379,7 +379,17 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
       half-block glyphs. Without an answer it fell back to half-blocks and drew 64 `▀` cells. The
       half-block path is snapshot-tested: a red/blue fixture must put both colours in the buffer.
       > **[owner]** still worth one look: real cover art in a real cmux window, since a pty can only
-      prove the bytes trak sends, not how they land on screen.
+      prove the bytes trak sends, not how they land on screen. > **The protocol is detected from the
+      environment, not by asking the terminal**, and that is not a shortcut. `Picker::
+      from_query_stdio()` starts a thread that calls `enable_raw_mode`, reads the reply from stdin and
+      then calls `disable_raw_mode` -- and when the terminal does not answer inside its one second,
+      that thread is still running after trak has re-enabled raw mode and switches it back off
+      underneath. crossterm then sees canonical mode and **every single keypress is silently
+      discarded**: the clock ticks, the frame redraws, nothing responds to anything. Found by
+      running the TUI in a pty and logging `poll`, which returned `Ok(false)` for every key pressed,
+      with the picker removed answering all of them. `TERM_PROGRAM=ghostty` and `KITTY_WINDOW_ID` are
+      the signals, and anything unrecognised gets halfblocks -- so being wrong costs a blocky cover,
+      not an unusable interface.
 - [x] 4.2 **Accent colour from art.** `src/accent.rs`; the three `accent = art|green|terminal` modes
       are `Theme::accent_colour`. > **One measure throughout: WCAG relative luminance.** The first
       version filtered pixels by HSL lightness and fixed up the result by WCAG luminance, so colours
@@ -401,6 +411,16 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
       accent-probe` reports the accent for every cached cover, and why when there is none — "this
       sleeve got no colour" is otherwise impossible to tell from a bug. **All three real cached covers
       produce a usable accent**, and the live TUI's backgrounds contain the extracted colour.
+- [x] 6.1 **(partly) The Lyrics tab is live.** Ahead of its turn in the list, because a tab that
+      says "no lyrics yet" is worse than no tab. `src/lyrics.rs` fetches from LRCLIB on the worker and
+      the tab shows the line being sung in the album's gradient with four lines of lead-in and a dozen
+      ahead. > **The worker refused jobs silently**, so a lyrics lookup that lost the race against an
+      art download was dropped while the status stayed `Loading` — every track said "looking for
+      lyrics…" forever. `Worker::submit` now returns whether it was accepted, and a caller that has
+      claimed a slot undoes the claim when the job is refused. > Lyrics are cleared on a track change
+      and a lookup that lands after the user has skipped is dropped: showing the wrong chorus under a
+      new title is worse than showing none. > Rest of phase 6 still owed: `L` for full-screen,
+      translations, caching to disk, and the other providers.
 - [ ] 4.3 **Art / visualizer toggle plumbing** (`a`): `display.mode`. With `visualizer`, art is not
       drawn but is still fetched for colour. Visualizer content arrives in phase 8; until then show a
       placeholder pane. Done when: toggling swaps the pane and persists in config (after 5.x).

@@ -172,6 +172,7 @@ fn event_loop<B: ratatui::backend::Backend>(
     let mut regions = crate::tui::render::Regions::default();
     // The protocol is negotiated once, here, after the alternate screen is up and
     // before any event is read (TODO 1.4's ordering requirement).
+    //
     let mut images = crate::tui::render::Images::from_terminal();
     let mut scrubbing = false;
 
@@ -203,6 +204,9 @@ fn event_loop<B: ratatui::backend::Backend>(
                     next
                 }
                 WorkerResult::Command(outcome) => update(app, Event::CommandDone(outcome)).app,
+                WorkerResult::Lyrics { uri, result } => {
+                    update(app, Event::Lyrics { uri, result }).app
+                }
                 WorkerResult::Art { url, result } => {
                     let u = update(app, Event::Art { url, result });
                     // Take the accent from the cover that just arrived, if there
@@ -255,7 +259,10 @@ fn event_loop<B: ratatui::backend::Backend>(
             && app.art.wants(track)
             && app.art.begin(&url)
         {
-            worker.submit(move |_| {
+            // `begin` above already claimed the slot, so a refused submission
+            // has to be undone: otherwise the art is "loading" for the rest of
+            // the session with nothing on its way.
+            let accepted = worker.submit(move |_| {
                 use crate::player::actions::{LoadedArt, WorkerResult};
                 // The result is a decoded image or a reason, not a PlayerError: a
                 // missing cover is not a Spotify failure.
@@ -263,6 +270,34 @@ fn event_loop<B: ratatui::backend::Backend>(
                     .and_then(|path| art::decode(&path).map(|image| LoadedArt { path, image }));
                 WorkerResult::Art { url, result }
             });
+            if !accepted {
+                app.art.abandon();
+            }
+        }
+
+        // 2c. Lyrics (TODO 6.1). One lookup per track, on the worker, and only
+        //     when they are switched on. An advert is skipped outright: it is not
+        //     a song and LRCLIB will not have heard of it.
+        if app.settings.lyrics
+            && app.lyrics.status == crate::tui::app::LyricsStatus::Idle
+            && let Some(track) = app.track()
+        {
+            if track.is_ad() {
+                app.lyrics.status = crate::tui::app::LyricsStatus::NotFound;
+            } else {
+                let uri = track.uri.clone();
+                let title = track.title.clone();
+                let artist = track.artist.clone();
+                let album = track.album.clone();
+                let dur = track.duration_secs();
+                app.lyrics.uri = uri.clone();
+                app.lyrics.status = crate::tui::app::LyricsStatus::Loading;
+                worker.submit(move |_| {
+                    let album = (!album.is_empty()).then_some(album);
+                    let result = crate::lyrics::fetch(&title, &artist, album.as_deref(), Some(dur));
+                    WorkerResult::Lyrics { uri, result }
+                });
+            }
         }
 
         // 3. Terminal input. The wait is a run-loop pump, not a sleep:

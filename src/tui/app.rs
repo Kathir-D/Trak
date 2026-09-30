@@ -78,6 +78,13 @@ impl ArtState {
         true
     }
 
+    /// Give up a claimed slot without a result coming back, because the job was
+    /// never accepted in the first place.
+    pub fn abandon(&mut self) {
+        self.loading = false;
+        self.url = None;
+    }
+
     /// True when the art for the current track still has to be fetched, or is
     /// being fetched. The loop asks this after every read.
     pub fn wants(&self, track: &TrackInfo) -> bool {
@@ -109,6 +116,11 @@ pub enum Event {
     NotRunning,
     /// Local tick, for interpolating the bar and expiring toasts.
     Tick,
+    /// A lyrics lookup finished.
+    Lyrics {
+        uri: Option<String>,
+        result: Result<crate::lyrics::Lyrics, crate::lyrics::LyricsError>,
+    },
     /// An image finished downloading and decoding, or failed to.
     Art {
         url: String,
@@ -196,6 +208,52 @@ impl Tab {
     }
 }
 
+/// Where a lyrics lookup has got to. Four states rather than an `Option`,
+/// because "looked and found nothing" and "never looked" are different answers
+/// and the tab has to say which one it is showing.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LyricsStatus {
+    /// Nothing looked up yet for this track.
+    Idle,
+    /// A lookup is in flight.
+    Loading,
+    /// Lines are here. May be synced or not, and may be zero lines for an
+    /// instrumental.
+    Ready,
+    /// LRCLIB has nothing for this track. Common, and not an error.
+    NotFound,
+    /// The lookup failed for some other reason. One line explains it.
+    Failed(String),
+}
+
+/// The lyrics for the current track.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LyricsState {
+    pub status: LyricsStatus,
+    pub lyrics: Option<crate::lyrics::Lyrics>,
+    /// The URI the lyrics belong to, so a lookup for a track the user has left is
+    /// dropped rather than shown under a new title.
+    pub uri: Option<String>,
+}
+
+impl Default for LyricsState {
+    fn default() -> Self {
+        Self {
+            status: LyricsStatus::Idle,
+            lyrics: None,
+            uri: None,
+        }
+    }
+}
+
+impl LyricsState {
+    /// The index of the line to show at this playback position, or `None` when
+    /// there is nothing to show.
+    pub fn active(&self, position_secs: f64) -> Option<usize> {
+        crate::lyrics::index_at(self.lyrics.as_ref()?, position_secs)
+    }
+}
+
 /// A transient message, bottom right (TODO 4.8).
 #[derive(Debug, Clone)]
 pub struct Toast {
@@ -213,6 +271,8 @@ pub struct Settings {
     pub show_volume: bool,
     pub show_key_hints: bool,
     pub side_pane: bool,
+    /// SPEC §8 `[lyrics] enabled`, on by default.
+    pub lyrics: bool,
     /// SPEC §8 `[input] mouse`, on by default. When off the loop does not even
     /// ask the terminal for mouse events.
     pub mouse: bool,
@@ -229,6 +289,7 @@ impl Default for Settings {
             show_volume: true,
             show_key_hints: true,
             side_pane: true,
+            lyrics: true,
             mouse: true,
             rounded: true,
         }
@@ -279,6 +340,8 @@ pub struct App {
     pub art: ArtState,
     /// `[display] art` (SPEC §8). Off means never fetch, never draw.
     pub art_enabled: bool,
+    /// The lyrics tab (TODO 6.1).
+    pub lyrics: LyricsState,
     pub should_quit: bool,
     /// Local clock, for the header.
     pub clock: String,
@@ -321,6 +384,7 @@ impl App {
             settings: Settings::default(),
             art: ArtState::default(),
             art_enabled: true,
+            lyrics: LyricsState::default(),
             should_quit: false,
             clock: String::new(),
             marquee_offset: 0,
@@ -493,6 +557,28 @@ pub fn update(mut app: App, event: Event) -> Updated {
                 app.viewport = rows;
                 // A resize can leave the view scrolled past the end.
                 app.scroll_to_cursor();
+            }
+        }
+
+        Event::Lyrics { uri, result } => {
+            // Lyrics for a track the user has already skipped past: drop them.
+            if uri == app.track().and_then(|t| t.uri.clone()) {
+                app.lyrics.status = match result {
+                    Ok(l) => {
+                        app.lyrics.lyrics = Some(l);
+                        LyricsStatus::Ready
+                    }
+                    // "Not found" is the common case, not a failure: most tracks
+                    // are not in LRCLIB.
+                    Err(crate::lyrics::LyricsError::NotFound) => {
+                        app.lyrics.lyrics = None;
+                        LyricsStatus::NotFound
+                    }
+                    Err(e) => {
+                        app.lyrics.lyrics = None;
+                        LyricsStatus::Failed(e.notice())
+                    }
+                };
             }
         }
 
@@ -794,6 +880,11 @@ fn apply_state(app: &mut App, s: PlayerState) {
     };
     app.state = Some(s);
     app.last_read = Some(Instant::now());
+    // A new track's title starts at its beginning, and the last track's chorus
+    // does not follow it: showing the wrong lyrics under a new title is worse
+    // than showing none.
+    app.marquee_offset = 0;
+    app.lyrics = LyricsState::default();
 }
 
 #[cfg(test)]
@@ -1990,5 +2081,149 @@ mod tests {
         let t = sample_track();
         assert!(t.uri.is_some() && t.artwork_url.is_some());
         assert!(!t.is_ad());
+    }
+}
+
+#[cfg(test)]
+mod lyrics_tests {
+    use super::*;
+    use crate::lyrics::index_at;
+
+    fn playing() -> PlayerState {
+        crate::player::parse::parse(&crate::testutil::fixture("playing_track.txt")).unwrap()
+    }
+
+    fn with_track() -> App {
+        update(App::new(), Event::PlayerState(Box::new(playing()))).app
+    }
+
+    fn lyrics_for(texts: &[(&str, f64)]) -> crate::lyrics::Lyrics {
+        crate::lyrics::Lyrics {
+            lines: texts
+                .iter()
+                .map(|(t, s)| crate::lyrics::LyricLine {
+                    time_secs: *s,
+                    text: (*t).to_string(),
+                })
+                .collect(),
+            synced: true,
+            source: "test".into(),
+            instrumental: false,
+        }
+    }
+
+    /// The whole point of the tab: the line being sung at 0:30 is the one that
+    /// starts at 0:29, not the next one and not the one before.
+    #[test]
+    fn the_active_line_follows_the_music() {
+        let app = with_track();
+        let l = lyrics_for(&[("one", 10.0), ("two", 20.0), ("three", 30.0)]);
+        for (at, want) in [
+            (5.0, None),
+            (10.0, Some(0)),
+            (19.9, Some(0)),
+            (20.0, Some(1)),
+            (35.0, Some(2)),
+        ] {
+            assert_eq!(index_at(&l, at), want, "at {at}s");
+        }
+        let _ = app;
+    }
+
+    /// A track's lyrics must not survive into the next track. Carrying a chorus
+    /// over is worse than showing nothing.
+    #[test]
+    fn a_new_track_takes_its_lyrics_with_it() {
+        let mut app = with_track();
+        let uri = app.track().unwrap().uri.clone();
+        app = update(
+            app,
+            Event::Lyrics {
+                uri: uri.clone(),
+                result: Ok(lyrics_for(&[("hello", 1.0)])),
+            },
+        )
+        .app;
+        assert_eq!(app.lyrics.status, LyricsStatus::Ready);
+        assert!(app.lyrics.active(2.0).is_some());
+
+        let mut other = playing();
+        other.track.uri = Some("spotify:track:NEXT".into());
+        app = update(app, Event::PlayerState(Box::new(other))).app;
+        assert_eq!(
+            app.lyrics.status,
+            LyricsStatus::Idle,
+            "cleared on a new track"
+        );
+        assert!(app.lyrics.lyrics.is_none());
+        assert_eq!(app.lyrics.active(2.0), None);
+    }
+
+    /// Lyrics that arrive after the user has skipped past are dropped rather than
+    /// shown under a title they do not belong to.
+    #[test]
+    fn lyrics_for_a_track_we_have_left_are_dropped() {
+        let app = with_track();
+        let app = update(
+            app,
+            Event::Lyrics {
+                uri: Some("spotify:track:SOMETHING-ELSE".into()),
+                result: Ok(lyrics_for(&[("stale", 1.0)])),
+            },
+        )
+        .app;
+        assert_eq!(app.lyrics.status, LyricsStatus::Idle, "nothing was here");
+        assert!(app.lyrics.lyrics.is_none());
+    }
+
+    /// "Not in the database" is the common case, and it is not a failure.
+    #[test]
+    fn not_found_is_its_own_state() {
+        let mut app = with_track();
+        let uri = app.track().unwrap().uri.clone();
+        app = update(
+            app,
+            Event::Lyrics {
+                uri,
+                result: Err(crate::lyrics::LyricsError::NotFound),
+            },
+        )
+        .app;
+        assert_eq!(app.lyrics.status, LyricsStatus::NotFound);
+        // And the tab can still ask again on the next track.
+        let mut other = playing();
+        other.track.uri = Some("spotify:track:NEXT".into());
+        let app = update(app, Event::PlayerState(Box::new(other))).app;
+        assert_eq!(app.lyrics.status, LyricsStatus::Idle);
+    }
+
+    #[test]
+    fn a_failure_says_why_in_one_line() {
+        let mut app = with_track();
+        let uri = app.track().unwrap().uri.clone();
+        app = update(
+            app,
+            Event::Lyrics {
+                uri,
+                result: Err(crate::lyrics::LyricsError::Unreachable),
+            },
+        )
+        .app;
+        match &app.lyrics.status {
+            LyricsStatus::Failed(why) => assert!(!why.contains('\n'), "{why:?}"),
+            other => panic!("expected a failure, got {other:?}"),
+        }
+    }
+
+    /// Switching lyrics off means never looking, not looking and hiding it.
+    #[test]
+    fn lyrics_can_be_switched_off() {
+        let mut app = with_track();
+        app.settings.lyrics = false;
+        assert!(!app.settings.lyrics);
+        assert!(
+            Settings::default().lyrics,
+            "on by default, per SPEC section 8"
+        );
     }
 }

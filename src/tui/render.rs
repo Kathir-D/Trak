@@ -16,7 +16,6 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 use ratatui_image::Resize;
 use ratatui_image::StatefulImage;
-use ratatui_image::picker::Picker;
 use ratatui_image::protocol::{ImageSource, StatefulProtocol, StatefulProtocolType};
 
 use crate::player::PlaybackState;
@@ -131,7 +130,6 @@ pub struct Images {
 /// terminal knows what it can draw; a fixed one in tests, because a test has no
 /// terminal to ask and `Picker`'s fields are private.
 enum Backend {
-    Picker(Box<Picker>),
     Fixed {
         font: (u16, u16),
         kind: StatefulProtocolType,
@@ -154,24 +152,34 @@ impl Default for Images {
 }
 
 impl Images {
-    /// Ask the terminal what it supports. Never fails: a terminal that answers
-    /// nothing gets halfblocks, which every terminal can draw.
+    /// Work out what the terminal supports from the environment.
     ///
-    /// Writes and reads stdio, so it must be called after entering the alternate
-    /// screen and before reading events (TODO 1.4).
+    /// **Deliberately not `Picker::from_query_stdio()`**, which asks the terminal
+    /// directly and is the obvious way to do this. It starts a thread that calls
+    /// `enable_raw_mode`, reads the reply from stdin, and then calls
+    /// `disable_raw_mode` -- and when the terminal does not answer within its one
+    /// second, that thread is still running after the TUI has re-enabled raw
+    /// mode and switches it back off underneath. crossterm's event reader then
+    /// sees canonical mode, so **every single keypress is silently discarded**:
+    /// the interface looks alive, the clock ticks, and nothing responds to
+    /// anything. That is a horrible failure and avoiding it is the entire reason
+    /// this function exists.
+    ///
+    /// Every terminal trak cares about announces itself, and 1.4 verified what
+    /// each one can actually draw. A terminal that announces nothing gets
+    /// halfblocks, which every terminal can draw -- so being wrong here costs a
+    /// blocky cover, not an unusable interface.
     pub fn from_terminal() -> Self {
-        match Picker::from_query_stdio() {
-            Ok(picker) => Self {
-                backend: Backend::Picker(Box::new(picker)),
-                protocol: None,
-                built_for: None,
+        let env = |k: &str| std::env::var(k).unwrap_or_default();
+        let (protocol, cell) =
+            detect_protocol(&env("TERM_PROGRAM"), &env("TERM"), &env("KITTY_WINDOW_ID"));
+        Self {
+            backend: Backend::Fixed {
+                font: cell,
+                kind: kind_for(protocol),
             },
-            Err(e) => {
-                // Not an error worth a toast: halfblocks always work, and the art
-                // is a bonus, not the point of trak.
-                let _ = e;
-                Self::default()
-            }
+            protocol: None,
+            built_for: None,
         }
     }
 
@@ -265,8 +273,6 @@ impl Backend {
     fn cell(&self) -> (u16, u16) {
         match self {
             Backend::Fixed { font, .. } => *font,
-            // 1.4's measurement in cmux, which is the terminal trak is used in.
-            Backend::Picker(_) => (8, 17),
         }
     }
 
@@ -289,16 +295,66 @@ impl Backend {
         );
         let scaled = DynamicImage::ImageRgba8(scaled);
         match self {
-            // The picker builds its own source from the image, so handing it the
-            // pre-scaled pixels is enough: the area it reports is the one we
-            // asked for.
-            Backend::Picker(p) => p.new_resize_protocol(scaled),
             Backend::Fixed { font, kind } => StatefulProtocol::new(
                 ImageSource::new(scaled, *font, Rgba([0, 0, 0, 0])),
                 *font,
                 kind.clone(),
             ),
         }
+    }
+}
+
+/// The graphics protocols trak can draw with, in the order `from_terminal`
+/// considers them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraphicsProtocol {
+    /// Kitty and anything that implements it, including Ghostty and WezTerm.
+    Kitty,
+    Iterm2,
+    Sixel,
+    /// The fallback. Every terminal can draw it, and 1.4 measured Terminal.app
+    /// rendering it correctly while printing the others as visible text.
+    Halfblocks,
+}
+
+/// Work out the protocol from what the terminal says about itself.
+///
+/// The cell size comes from TODO 1.4's measurements rather than from a query:
+/// (8, 17) in cmux, which is Ghostty, and (10, 20) in Terminal.app. Halfblocks
+/// only needs the ratio to be roughly 1:2, so its cell size barely matters.
+pub fn detect_protocol(
+    term_program: &str,
+    term: &str,
+    kitty_window: &str,
+) -> (GraphicsProtocol, (u16, u16)) {
+    let tp = term_program.to_ascii_lowercase();
+    let tm = term.to_ascii_lowercase();
+    if !kitty_window.is_empty()
+        || tp.contains("ghostty")
+        || tp.contains("kitty")
+        || tm.contains("kitty")
+    {
+        return (GraphicsProtocol::Kitty, (8, 17));
+    }
+    if tp.contains("iterm") {
+        return (GraphicsProtocol::Iterm2, (10, 20));
+    }
+    if tp.contains("wezterm") || tm.contains("sixel") {
+        return (GraphicsProtocol::Sixel, (10, 20));
+    }
+    (GraphicsProtocol::Halfblocks, (10, 20))
+}
+
+fn kind_for(p: GraphicsProtocol) -> StatefulProtocolType {
+    match p {
+        GraphicsProtocol::Kitty => StatefulProtocolType::Kitty(
+            ratatui_image::protocol::kitty::StatefulKitty::new(1, false),
+        ),
+        GraphicsProtocol::Iterm2 => StatefulProtocolType::ITerm2(Default::default()),
+        GraphicsProtocol::Sixel => StatefulProtocolType::Sixel(Default::default()),
+        GraphicsProtocol::Halfblocks => StatefulProtocolType::Halfblocks(
+            ratatui_image::protocol::halfblocks::Halfblocks::default(),
+        ),
     }
 }
 
@@ -983,12 +1039,115 @@ fn draw_tabs(f: &mut Frame, area: Rect, app: &App, theme: &Theme, regions: &mut 
             history_lines(app, theme)
         }
         Tab::Info => info_lines(app, theme),
-        Tab::Lyrics => vec![Line::from(Span::styled(
-            if app.is_idle() { "" } else { "no lyrics yet" },
-            Theme::dim(),
-        ))],
+        Tab::Lyrics => lyrics_lines(app, theme),
     };
     f.render_widget(Paragraph::new(lines), body);
+}
+
+/// The Lyrics tab: the line being sung, the ones coming, and the ones just gone.
+///
+/// Synced lyrics are the whole reason this tab exists, so the current line is set
+/// in the album's own gradient and everything else recedes -- dimmer, and further
+/// back. Four lines above and a dozen below is what fits a pane without turning
+/// it into a wall of text.
+fn lyrics_lines<'a>(app: &App, theme: &'a Theme) -> Vec<Line<'a>> {
+    use crate::tui::app::LyricsStatus;
+
+    let dim = Theme::dim();
+    let wrap_hint = |t: &str| {
+        vec![
+            Line::from(Span::styled(t.to_string(), dim)),
+            Line::from(""),
+            Line::from(Span::styled(
+                "no lyrics for this one",
+                dim.add_modifier(Modifier::ITALIC),
+            )),
+            Line::from(Span::styled(
+                "LRCLIB has most songs but not all of them",
+                dim,
+            )),
+        ]
+    };
+
+    match &app.lyrics.status {
+        LyricsStatus::Idle | LyricsStatus::Loading => {
+            let title = app.track().map(|t| t.title.clone()).unwrap_or_default();
+            vec![
+                Line::from(Span::styled(
+                    title,
+                    Style::default().add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+                Line::from(Span::styled(
+                    if app.is_idle() {
+                        ""
+                    } else {
+                        "looking for lyrics…"
+                    },
+                    dim.add_modifier(Modifier::ITALIC),
+                )),
+            ]
+        }
+        LyricsStatus::NotFound => wrap_hint("no lyrics for this one"),
+        LyricsStatus::Failed(why) => {
+            let mut out = vec![Line::from(Span::styled(
+                why.clone(),
+                dim.add_modifier(Modifier::ITALIC),
+            ))];
+            out.push(Line::from(""));
+            out.push(Line::from(Span::styled("try again on the next track", dim)));
+            out
+        }
+        LyricsStatus::Ready => {
+            let Some(lyrics) = app.lyrics.lyrics.as_ref() else {
+                return wrap_hint("nothing to show");
+            };
+            if lyrics.instrumental {
+                return wrap_hint("this one is instrumental");
+            }
+            if lyrics.lines.is_empty() {
+                return wrap_hint("no lyrics for this one");
+            }
+            let pos = app.interpolated_position();
+            let active = lyrics
+                .lines
+                .iter()
+                .rposition(|l| !l.time_secs.is_nan() && l.time_secs <= pos)
+                .unwrap_or(0);
+            // Only synced lyrics have a position; unsynced ones are shown from
+            // the top, which is all that can honestly be done with them.
+            let synced = lyrics.synced && !lyrics.lines[active].time_secs.is_nan();
+
+            let mut out: Vec<Line> = Vec::new();
+            // A few lines of lead-in, dimmer the further back they are.
+            let from = active.saturating_sub(4);
+            for (i, line) in lyrics.lines[from..=active].iter().enumerate() {
+                let back = active - (from + i);
+                let style = if back == 0 && synced {
+                    Style::default()
+                } else {
+                    dim.add_modifier(Modifier::DIM)
+                };
+                out.push(if back == 0 && synced {
+                    crate::tui::theme::gradient_line(&line.text, &theme.palette)
+                } else {
+                    Line::from(Span::styled(line.text.clone(), style))
+                });
+            }
+            // And the ones coming.
+            for line in lyrics.lines.iter().skip(active + 1).take(14) {
+                out.push(Line::from(Span::styled(
+                    line.text.clone(),
+                    dim.add_modifier(Modifier::DIM),
+                )));
+            }
+            if !lyrics.synced {
+                out.push(Line::from(""));
+                out.push(Line::from(Span::styled("unsynced lyrics", dim)));
+            }
+            out
+        }
+    }
 }
 
 /// The tab strip, as text plus the pieces it is made of.
@@ -2311,6 +2470,83 @@ mod tests {
                 height: 0
             }),
             Rect::ZERO
+        );
+    }
+}
+
+#[cfg(test)]
+mod protocol_tests {
+    use super::{GraphicsProtocol, detect_protocol};
+
+    /// The owner's terminal, and the one 1.4 measured. If this changes, 1.4's
+    /// conclusions change with it.
+    #[test]
+    fn cmux_is_recognised_as_kitty() {
+        let (p, cell) = detect_protocol("ghostty", "xterm-ghostty", "");
+        assert_eq!(p, GraphicsProtocol::Kitty);
+        assert_eq!(cell, (8, 17), "1.4 measured (8, 17) in cmux");
+    }
+
+    #[test]
+    fn the_known_terminals_all_land_somewhere_sensible() {
+        for (tp, term, want) in [
+            ("ghostty", "xterm-ghostty", GraphicsProtocol::Kitty),
+            ("WezTerm", "xterm-256color", GraphicsProtocol::Sixel),
+            ("iTerm.app", "xterm-256color", GraphicsProtocol::Iterm2),
+            (
+                "Apple_Terminal",
+                "xterm-256color",
+                GraphicsProtocol::Halfblocks,
+            ),
+            ("", "xterm-kitty", GraphicsProtocol::Kitty),
+            ("", "", GraphicsProtocol::Halfblocks),
+            (
+                "something-unheard-of",
+                "xterm-256color",
+                GraphicsProtocol::Halfblocks,
+            ),
+        ] {
+            assert_eq!(
+                detect_protocol(tp, term, "").0,
+                want,
+                "TERM_PROGRAM={tp:?} TERM={term:?}"
+            );
+        }
+        // KITTY_WINDOW_ID is set by kitty itself and is the most direct signal.
+        assert_eq!(
+            detect_protocol("", "xterm-256color", "1").0,
+            GraphicsProtocol::Kitty
+        );
+    }
+
+    /// Halfblocks is the only protocol that works everywhere, so anything
+    /// unrecognised must land there rather than on a guess that would draw
+    /// escape sequences as visible text (1.4).
+    #[test]
+    fn an_unknown_terminal_never_gets_a_protocol_that_would_print_escape_codes() {
+        for (tp, term) in [
+            ("Alacritty", "alacritty"),
+            ("hyper", "xterm-256color"),
+            ("contour", "xterm-256color"),
+            ("", "linux"),
+        ] {
+            assert_eq!(
+                detect_protocol(tp, term, "").0,
+                GraphicsProtocol::Halfblocks,
+                "{tp:?}/{term:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_halfblocks_cell_size_is_about_one_to_two() {
+        // The art is sized in cells, and halfblocks packs two vertical pixels per
+        // cell, so a wildly wrong cell size stretches the cover.
+        let (_, cell) = detect_protocol("", "xterm-256color", "");
+        let ratio = f64::from(cell.1) / f64::from(cell.0);
+        assert!(
+            (1.5..=2.5).contains(&ratio),
+            "a cell should be about twice as tall as it is wide: {cell:?}"
         );
     }
 }
