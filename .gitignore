@@ -1,0 +1,15 @@
+# Rust
+/target/
+# Release artifacts (rebuilt by scripts/package-release.sh)
+/dist/
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+# Logs
+*.log
+# Env / secrets — never commit API keys, tokens, certs
+.env
+*.p12
+# Local agent settings
+.claude/settings.local.json

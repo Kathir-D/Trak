@@ -1,0 +1,20 @@
+[package]
+name = "trak"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.85"
+description = "A fast, interactive terminal UI for the Spotify desktop app on macOS"
+license = "MIT"
+repository = "https://github.com/Kathir-D/trak"
+homepage = "https://github.com/Kathir-D/trak"
+readme = "README.md"
+keywords = ["spotify", "tui", "terminal", "macos", "music"]
+categories = ["command-line-utilities", "multimedia::audio"]
+
+[dependencies]
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

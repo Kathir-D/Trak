@@ -1,0 +1,43 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy && rustup default stable
+      - name: Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Test
+        run: cargo test
+      - name: Release build
+        run: cargo build --release
+      - name: VERSION matches Cargo.toml
+        # VERSION is the release source of truth (the tag must be v$(cat VERSION)); Cargo.toml
+        # has to agree or `trak --version` lies.
+        run: |
+          set -eu
+          CARGO_VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
+          FILE_VERSION="$(cat VERSION)"
+          if [ "$CARGO_VERSION" != "$FILE_VERSION" ]; then
+            echo "::error::VERSION is $FILE_VERSION but Cargo.toml says $CARGO_VERSION"
+            exit 1
+          fi
+          echo "ok: $FILE_VERSION"
+      - name: Binary reports its version
+        run: test "$(./target/release/trak --version)" = "trak $(cat VERSION)"

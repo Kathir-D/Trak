@@ -1,0 +1,103 @@
+# trak — architecture
+
+Target design. The code currently contains only a scaffold (`src/main.rs`); this describes what to
+build. If reality diverges, update this file in the same commit.
+
+## Principles
+
+1. **One crate, deep modules.** A small public surface per module, hidden complexity behind it.
+   Split into a workspace only if compile times or a real reuse need appear.
+2. **Every side effect sits behind a trait**, so the whole app runs and is tested without Spotify,
+   a network, a terminal, or audio hardware:
+   - `Player` — read state / send commands to Spotify (real: AppleScript; fake: in-memory).
+   - `Library` — Web API calls (real: rspotify; fake: canned data). Version A only.
+   - `Clock`, `Lyrics`, `AudioSource`, `Store` (config/token), `Notifier`.
+3. **Pure state + pure render.** `App` holds all state; `update(App, Event) -> App` is deterministic;
+   `render(&App, Frame)` only draws. Snapshot-test rendering with ratatui's `TestBackend`.
+4. **Never block the UI thread.** Anything slow (osascript, HTTP, image decode, FFT) runs on its
+   own thread/task and reports back as an `Event` over a channel.
+5. **Fail soft.** Optional features (visualizer real audio, Sonar state, headless badge, lyrics,
+   Web API) degrade silently to the simpler behaviour and say why in a status line. Never panic on
+   bad external data; return `Result`, log, and continue.
+
+## Module map (planned `src/`)
+
+```
+main.rs            argv → cli or tui
+cli/               clap definitions, one-shot commands, --plain/--json output
+tui/
+  app.rs           App state, Event, update()
+  render.rs        top-level layout + breakpoints (wide / stacked / compact / idle)
+  now_playing.rs   art or visualizer, title block, progress, controls, volume
+  tabs/            history.rs info.rs lyrics.rs  (A: search.rs playlists.rs queue.rs liked.rs library.rs artist.rs album.rs)
+  settings.rs      the interactive config screen + guided Client ID flow
+  help.rs          ? overlay
+  theme.rs         accent (art/green/terminal), border styles
+  input.rs         key + mouse → Action
+player/
+  mod.rs           trait Player, PlayerState, TrackInfo, RepeatMode
+  applescript.rs   osascript runner ($TRAK_OSASCRIPT), one batched read script, write scripts
+  notify.rs        PlaybackStateChanged distributed-notification listener (objc via cidre or a tiny helper)
+  fake.rs          in-memory Player for tests
+history.rs         session play history (ring buffer of TrackInfo with URI)
+art.rs             fetch + cache artwork URL, decode, dominant colour, ratatui-image protocol picker
+viz/
+  source.rs        AudioSource trait; tap.rs (cidre process tap) and sim.rs (simulated)
+  dsp.rs           cavacore wrapper → bars; waveform ring buffer
+  render.rs        spectrum / mirrored / waveform / circular as pure fns
+lyrics.rs          LRCLIB client + LRC parser + "current line for position"
+config.rs          load/save/defaults/migrate ~/.config/trak/config.toml
+web/  (A)          auth.rs (PKCE, loopback server), api.rs (rspotify wrapper), token.rs (keychain/file)
+integrations/
+  sonar.rs         state.json watcher
+  headless.rs      `headless-spotify status --json` / `launch`
+notify.rs          display notification on song change
+```
+
+## Data flow
+
+```
+              ┌────────────┐  PlaybackStateChanged   ┌──────────────┐
+ Spotify.app ─┤ notify.rs  ├────────────────────────►│              │
+              └────────────┘                          │   event      │
+              ┌────────────┐  1s/3s poll (osascript)  │   channel    │──► update() ──► App ──► render()
+ Spotify.app ─┤ applescript├────────────────────────►│  (mpsc)      │        ▲
+              └────────────┘                          │              │        │ Actions
+ keys/mouse ─────────────────────────────────────────►│              │────────┘ (side effects run on worker
+ tap/sim audio, art, lyrics, web api, sonar file ────►│              │           threads, results return as Events)
+                                                      └──────────────┘
+```
+
+## Key decisions and why
+
+- **Shell out to `/usr/bin/osascript`** (like headless-spotify) instead of in-process
+  NSAppleScript: no Objective-C surface for the common path, trivial to fake, easy to time out.
+  Read everything in **one** batched script that returns a delimited string (≈1 process per poll,
+  not 10). Measure the cost in TODO 1.2; if a poll is > 80 ms, revisit.
+- **Progress bar is interpolated locally** between polls (position + elapsed since last read while
+  `playing`), so it is smooth without polling at 60 Hz.
+- **Session history** is recorded by observing track changes while the TUI runs; it stores the
+  `spotify url`/URI, so `enter` replays with `play track "<uri>"`.
+- **Rendering art**: `ratatui-image` picks Kitty / iTerm2 / sixel / half-blocks. Whether **cmux**
+  passes the Kitty graphics protocol through is unverified (TODO 1.4). Half-blocks is the always-works
+  fallback and must look good on its own.
+- **Universal binary**: build `aarch64-apple-darwin` and `x86_64-apple-darwin`, `lipo` them, then
+  `codesign --force -s -` (ad-hoc, free). An unsigned arm64 slice is killed by the kernel, so the
+  ad-hoc step is required even though we never buy a certificate. Alternative if lipo causes
+  trouble: ship two tarballs and use `on_arm` / `on_intel` in the formula.
+- **Config** is plain TOML with defaults for everything, so an empty or absent file is valid.
+
+## Testing strategy
+
+| Layer | How |
+| --- | --- |
+| AppleScript parsing | Unit tests over captured real outputs (fixtures in `tests/fixtures/`) |
+| `update()` | Table tests: `(state, event) → state` |
+| Rendering | `ratatui::backend::TestBackend` snapshot tests at several sizes (wide, narrow, tiny, resize) |
+| Visualizer renderers | Pure fns, tested with synthetic bars/samples |
+| LRC parser, config, history | Plain unit tests |
+| CLI | `assert_cmd` tests against the `FakePlayer` via a hidden `--fake-player` flag / env var |
+| Web API | Fake `Library` + recorded JSON fixtures; no live network in CI |
+| Real Spotify / real audio / cmux | Manual, listed in TODO phase 10, results recorded in `docs/COMPAT.md` |
+
+CI must be green with **no Spotify installed, no network, no audio device**.
