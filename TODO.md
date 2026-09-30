@@ -29,7 +29,7 @@ Legend: `[ ]` todo · `[x]` done · **A/B** = with / without a Spotify Client ID
 | --- | --- | --- |
 | R1 | Real-audio visualizer: the process-tap permission is attributed to the *terminal app*; a CLI child may not get a usable "System Audio Recording" prompt, or cmux may not be prompt-able | Spike first (1.5). Always ship the simulated fallback (8.3). README documents which terminals work |
 | R2 | ~~Spotify ≥ 1.3.x ignores AppleScript `set sound volume`~~ **REFUTED on 1.3.1.234 (1.1):** sets work 8/8, but the read-back is often target−1 (quantisation). Rule now = read back with a ±1 tolerance (`docs/APPLESCRIPT.md` §5) | 4.4 (reframed as a preference) |
-| R3 | Keychain items created by an ad-hoc-signed binary can re-prompt after every upgrade (the code identity changes) | Test in 7.4; fall back to a `0600` token file in `~/.config/trak/` and document the trade-off |
+| R3 | ~~Keychain items created by an ad-hoc-signed binary can re-prompt after every upgrade~~ **CONFIRMED AND WORSE (1.8):** a keychain item is readable only by the exact binary that created it — a re-signed binary **blocks even when creating** an item, and Apple's own `security` blocks too. In an unattended session the authorization panel cannot be dismissed, so this is a **hang, not a prompt** | **Resolved: use a `0600` file** (`docs/KEYCHAIN.md`). SPEC §2 and §6 updated. 7.4 drops the second backend |
 | R4 | ~~Spotify Web API developer-mode rules changed recently~~ **CONFIRMED AND WORSE THAN EXPECTED (1.7):** `localhost` redirect URIs are **banned** (use `http://127.0.0.1`, no port); Premium now required of the **app owner**; user cap **5**; all batch "get several" endpoints, `/markets` and **`/artists/{id}/top-tracks` removed**; `Track.popularity` removed; search `limit` max **10**; refresh tokens expire in **6 months**; no numeric rate limits are published | All recorded with citations in `docs/WEB-API.md`; SPEC §6 and this phase rewritten to match. Still verify playlist `/items` against a real dev-mode login |
 | R5 | cmux may not pass the Kitty image protocol through | Spike 1.4; half-blocks fallback must look good on its own |
 | R6 | `cidre` API for process taps is unstable / under-documented | Spike 1.5 with its `core-audio-record` example; if unusable, write a ~150-line Objective-C-free binding or a tiny helper, decided in the spike |
@@ -115,10 +115,16 @@ Each spike ends with facts written to a doc, not just working code. Throwaway co
       `X-RateLimit-*` headers exist — 429 handling uses `Retry-After` only. > **Unresolved:** the
       Feb 2026 "still available" list omits `/playlists/{id}/items` while the migration guide tells
       you to use it. Verify in 7.7/7.11 with a real login; do not assume either way.
-- [ ] 1.8 **Keychain vs ad-hoc signing (R3).** Store and read a secret with the `security-framework`
-      crate from an ad-hoc-signed binary; rebuild (new signature) and read again; observe prompts.
-      Done when: `docs/WEB-API.md` (token storage section) states the finding and picks Keychain or
-      the `0600` file for real.
+- [x] 1.8 **Keychain vs ad-hoc signing (R3).** `docs/KEYCHAIN.md`, with the experiment in
+      `spikes/keychain`. > Later agents: **a keychain item is readable only by the exact binary that
+      created it.** A re-signed binary blocks on both read *and* store; Apple's `security` blocks
+      too; a fresh linker-signed build blocks on a foreign item. Since
+      `scripts/package-release.sh` re-signs on every release, the Keychain means **a hang on the
+      first launch after every `brew upgrade`** — a Security.framework call blocked on
+      authorization cannot be cancelled, so even a timeout cannot recover it. > **Decision: a `0600`
+      file at `~/.config/trak/token.json`** (respect `XDG_CONFIG_HOME`, dir `0700`, atomic write,
+      refuse to read if the mode is looser than `0600`). > 7.4 keeps the `Store` trait for testability
+      but builds **one** backend, not two.
 
 ---
 
@@ -288,8 +294,11 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
       `http://127.0.0.1:<port>/callback` if not. Done when: every step has an on-screen explanation
       and errors (bad ID, denied consent, port busy) are handled with retry. **[owner]** walks
       through it once.
-- [ ] 7.4 **Token storage** per the 1.8 decision (Keychain or `0600` file), never logged, never in the
-      config file. Done when: tests for both backends behind a `Store` trait; documented in README.
+- [ ] 7.4 **Token storage**: the `0600` file decided in 1.8 (`~/.config/trak/token.json`, `XDG_CONFIG_HOME`
+      respected, directory `0700`, atomic temp-then-rename write). **Refuse to read a token whose mode
+      is looser than `0600`** rather than proceeding, and assert that in a test. Never logged, never in
+      `config.toml`. Keep the `Store` trait so tests can fake it, but there is only **one** real
+      backend — do not build a Keychain one (it hangs, see 1.8). Documented in the README.
 - [ ] 7.5 **`Library` trait + rspotify wrapper + `FakeLibrary`.** > **Do not use `rspotify`'s
       id-list helpers** (`tracks(ids)`, `artists(ids)`, `albums(ids)`) — the batch endpoints they
       call were removed in dev mode. Loop one id per request and cache hard; the quota is per

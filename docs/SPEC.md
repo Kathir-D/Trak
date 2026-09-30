@@ -49,7 +49,7 @@ See `docs/COMPAT.md` for how the three coexist. trak's look and feel is intentio
 | Notifications | Song-change notification is a setting, **off** by default (`osascript display notification`) |
 | Lyrics | Synced lyrics from LRCLIB, both versions. A side-pane tab and a full-screen mode (`L`) |
 | Client ID setup | Guided flow inside `trak config`, PKCE (no client secret) |
-| Token storage | macOS Keychain first; see risk R3 in `TODO.md` for the fallback |
+| Token storage | A `0600` file under `~/.config/trak/`, **not** the Keychain — measured, see `docs/KEYCHAIN.md` |
 
 ## 3. Layout
 
@@ -166,7 +166,10 @@ invalidates a decision this section previously made.
 - **Playback of results still goes through AppleScript** (`play track "<uri>"`), so
   it works on Free. This is now more important than ever: the Web API's own
   playback endpoints are unavailable in dev mode.
-- Client ID lives in config; token in Keychain (or fallback, R3). Never log tokens.
+- Client ID lives in config; the refresh token lives in a `0600` file, **not** the Keychain: a
+  keychain item is bound to the exact binary that created it, so every `brew upgrade` would
+  leave trak blocked on an undismissable authorization panel (`docs/KEYCHAIN.md`). Never log
+  tokens.
   **A refresh token lasts 6 months**, not indefinitely, so trak must show a
   "reconnect Spotify" state rather than failing silently.
 

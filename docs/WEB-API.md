@@ -296,11 +296,20 @@ Sources: <https://developer.spotify.com/documentation/web-api/tutorials/refreshi
 
 ## 7. Token storage (TODO 1.8 / 7.4)
 
-The ad-hoc-signing / Keychain decision from TODO 1.8 is written up in
-`docs/KEYCHAIN.md`, and the `Store` trait that abstracts the two backends is
-planned in TODO 7.4. The short version: **the Keychain works from an ad-hoc-signed
-binary, and the re-prompt risk in R3 is real but does not affect trak's choice** —
-see that doc for the measurements.
+TODO 1.8 measured this rather than assuming it. **The Keychain is not usable for
+trak.** A keychain item is readable only by the exact binary that created it; a
+re-signed binary blocks on read *and* on store, and because
+`scripts/package-release.sh` re-signs on every release, that is a hang on the
+first launch after every `brew upgrade`. Full experiment in
+`docs/KEYCHAIN.md`.
+
+So the refresh token lives in a `0600` file at `~/.config/trak/token.json`
+(respecting `XDG_CONFIG_HOME`), written atomically, and trak refuses to read it
+if the mode is looser than `0600`. The `Store` trait still exists (TODO 7.4) so
+tests can fake it, but there is one real backend.
+
+This interacts with §6: a refresh token lasts 6 months either way, so the
+reconnect path is required regardless of where the token sits.
 
 ## 8. What trak should do about all this
 
