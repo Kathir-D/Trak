@@ -1,0 +1,13 @@
+[package]
+name = "images-spike"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+ratatui = "0.29"
+ratatui-image = "8.0.1"
+crossterm = "0.28"
+image = "0.25"
+
+[workspace]

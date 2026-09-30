@@ -31,7 +31,7 @@ Legend: `[ ]` todo · `[x]` done · **A/B** = with / without a Spotify Client ID
 | R2 | ~~Spotify ≥ 1.3.x ignores AppleScript `set sound volume`~~ **REFUTED on 1.3.1.234 (1.1):** sets work 8/8, but the read-back is often target−1 (quantisation). Rule now = read back with a ±1 tolerance (`docs/APPLESCRIPT.md` §5) | 4.4 (reframed as a preference) |
 | R3 | ~~Keychain items created by an ad-hoc-signed binary can re-prompt after every upgrade~~ **CONFIRMED AND WORSE (1.8):** a keychain item is readable only by the exact binary that created it — a re-signed binary **blocks even when creating** an item, and Apple's own `security` blocks too. In an unattended session the authorization panel cannot be dismissed, so this is a **hang, not a prompt** | **Resolved: use a `0600` file** (`docs/KEYCHAIN.md`). SPEC §2 and §6 updated. 7.4 drops the second backend |
 | R4 | ~~Spotify Web API developer-mode rules changed recently~~ **CONFIRMED AND WORSE THAN EXPECTED (1.7):** `localhost` redirect URIs are **banned** (use `http://127.0.0.1`, no port); Premium now required of the **app owner**; user cap **5**; all batch "get several" endpoints, `/markets` and **`/artists/{id}/top-tracks` removed**; `Track.popularity` removed; search `limit` max **10**; refresh tokens expire in **6 months**; no numeric rate limits are published | All recorded with citations in `docs/WEB-API.md`; SPEC §6 and this phase rewritten to match. Still verify playlist `/items` against a real dev-mode login |
-| R5 | cmux may not pass the Kitty image protocol through | Spike 1.4; half-blocks fallback must look good on its own |
+| R5 | ~~cmux may not pass the Kitty image protocol through~~ **REFUTED (1.4):** cmux speaks Kitty graphics at full fidelity, and `Picker::from_query_stdio()` detects it unattended | `docs/TERMINALS.md` + `docs/images/spike-1.4-cmux.png`. Half-blocks remains the Terminal.app path and must still look good |
 | R6 | `cidre` API for process taps is unstable / under-documented | Spike 1.5 with its `core-audio-record` example; if unusable, write a ~150-line Objective-C-free binding or a tiny helper, decided in the spike |
 | R7 | Spotify hiding is blocked on ≥ 1.3.1, so headless behaviour cannot be tested today | COMPAT test matrix row stays unverified until it works; do not fake it |
 | R8 | Homebrew audit / policy rejects the formula | `brew audit --strict` in CI and before every release (9.5) |
@@ -86,12 +86,16 @@ Each spike ends with facts written to a doc, not just working code. Throwaway co
       AppleScript read. > **Fires for play/pause/skip only — NOT for seek, volume, shuffle or
       repeat** (each isolated in its own 6 s window). Decision: notification is primary, poll drops
       to 3–5 s as a safety net. Written up in `docs/APPLESCRIPT.md` §9 and `ARCHITECTURE.md`.
-- [ ] 1.4 **Album art in cmux and other terminals.** Render one image with the Kitty graphics
-      protocol, then iTerm2 inline images, then sixel, in cmux (installed at `/Applications/cmux.app`)
-      and in Terminal.app; use a tiny `ratatui-image` example (`Picker::from_query_stdio`).
-      Done when: `docs/TERMINALS.md` has a table terminal × protocol × works? and the auto-detect
-      result. Note that agent sessions have no interactive TTY; this needs a screenshot of a real cmux
-      window (`screencapture`) or an **[owner]** eyeball. Half-blocks is the acceptable fallback.
+- [x] 1.4 **Album art in cmux and other terminals.** `docs/TERMINALS.md`, with real screenshots in
+      `docs/images/spike-1.4-{cmux,terminal}.png` taken with `screencapture`; the program is
+      `spikes/images`. > **R5 refuted: cmux renders the Kitty graphics protocol at full fidelity**
+      (`TERM_PROGRAM=ghostty`, Ghostty 1.3.2-HEAD) and `Picker::from_query_stdio()` picks `Kitty`
+      unattended. **Terminal.app 488 renders only halfblocks** and prints the kitty/iTerm2/sixel
+      escape sequences as visible text. iterm2 and sixel render nothing in *either* terminal.
+      > **Carry into 4.1:** the picker also returns a **cell size** — `(8,17)` in cmux, font
+      `(10,20)` in Terminal.app — and the art layout must use it. > **Trap:** `new_protocol()`
+      *succeeds* for all four protocols in both terminals, so `is_ok()` proves nothing about
+      rendering; 4.1's "done when" cannot be met by a unit test alone.
 - [ ] 1.5 **Process-tap visualizer spike (R1, R6).** Using `cidre`'s `core-audio-record` example as
       the base, tap **Spotify's process only** (by bundle ID → pid → tap description) and print RMS
       levels while a track plays. Test from the terminal app the owner uses. Record: does macOS show a

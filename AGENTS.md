@@ -167,6 +167,7 @@ Use only when a task says so, and never in automated tests. Record real outputs 
 AGENTS.md  CLAUDE.md  README.md  TODO.md  LICENSE  THIRD-PARTY-NOTICES.md  VERSION
 Cargo.toml  rustfmt.toml  src/main.rs
 docs/  SPEC.md  COMPAT.md  ARCHITECTURE.md  AGENT-PROMPTS.md
+       TERMINALS.md + KEYCHAIN.md + WEB-API.md + AUDIO-TAP.md exist (1.3–1.7)
        (created by tasks: APPLESCRIPT.md KEYCHAIN.md TERMINALS.md AUDIO-TAP.md README-NOTES.md RELEASING.md)
 .github/workflows/ci.yml
 tests/fixtures/   (created by task 1.1)

@@ -98,9 +98,12 @@ notify.rs          display notification on song change
   since last read while `playing`), so it is smooth without polling at 60 Hz.
 - **Session history** is recorded by observing track changes while the TUI runs; it stores the
   `spotify url`/URI, so `enter` replays with `play track "<uri>"`.
-- **Rendering art**: `ratatui-image` picks Kitty / iTerm2 / sixel / half-blocks. Whether **cmux**
-  passes the Kitty graphics protocol through is unverified (TODO 1.4). Half-blocks is the always-works
-  fallback and must look good on its own.
+- **Rendering art**: `ratatui-image` picks Kitty / iTerm2 / sixel / half-blocks via
+  `Picker::from_query_stdio()`. **Measured (TODO 1.4):** cmux speaks Kitty at full fidelity and is
+  detected unattended; Terminal.app supports **only** half-blocks; iterm2 and sixel render in neither.
+  The picker also returns a **cell size**, which the layout must use. Half-blocks is the always-works
+  fallback and must look good on its own. Note that `new_protocol()` succeeds for unsupported
+  protocols, so only a screenshot or a human eye can confirm an image actually renders.
 - **Universal binary**: build `aarch64-apple-darwin` and `x86_64-apple-darwin`, `lipo` them, then
   `codesign --force -s -` (ad-hoc, free). An unsigned arm64 slice is killed by the kernel, so the
   ad-hoc step is required even though we never buy a certificate. Alternative if lipo causes
