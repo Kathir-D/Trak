@@ -214,6 +214,13 @@ pub enum WorkerResult {
         uri: Option<String>,
         result: Result<crate::lyrics::Lyrics, crate::lyrics::LyricsError>,
     },
+    /// A Web API call finished (TODO 7.6-7.11). Not a Spotify-player job, and on
+    /// the same worker for the same reason: a search is a network round trip and
+    /// the render loop must never wait for one.
+    ///
+    /// Every shape arrives as an already-built [`crate::tui::app::Event`], so the
+    /// loop's job is one line and adding a tab does not add an arm here.
+    Web(crate::tui::app::Event),
 }
 
 /// Runs player writes on a worker thread so the render loop never blocks.

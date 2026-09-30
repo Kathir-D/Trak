@@ -454,18 +454,23 @@ impl VisualizerSource {
 /// has to learn their names.
 pub fn tab_name(tab: Tab) -> &'static str {
     match tab {
+        Tab::Search => "search",
+        Tab::Playlists => "playlists",
+        Tab::Queue => "queue",
+        Tab::Liked => "liked",
+        Tab::Library => "library",
+        Tab::Lyrics => "lyrics",
         Tab::History => "history",
         Tab::Info => "info",
-        Tab::Lyrics => "lyrics",
     }
 }
 
 /// A tab from the name written under `default_tab`, or `None` for a word that is
 /// not one.
 ///
-/// A Version A name -- `search`, `playlists`, `queue`, `liked`, `library` -- is
-/// not a tab this build has, so it takes the default rather than being guessed
-/// at. Version A adds the variants and the two arms here.
+/// The Version A names are the five `Tab::VERSION_A` variants, and they are
+/// accepted: a config written on a build that had them must still open on one
+/// that does not, or the setting would silently reset.
 pub fn tab_from_config(name: &str) -> Option<Tab> {
     let wanted = name.trim();
     Tab::ALL.into_iter().find(|t| tab_name(*t) == wanted)
@@ -2307,7 +2312,7 @@ client_id = ""             # empty = Version B
             "accent = [\"green\"]\n",
             "art_protocol = { a = 1 }\n",
             "border = \"wobbly\"\n",
-            "default_tab = \"search\"\n",
+            "default_tab = \"nowhere\"\n",
             "art = false\n",
             "[input]\n",
             "volume_step = \"ten\"\n",
@@ -2825,10 +2830,22 @@ client_id = ""             # empty = Version B
         assert_eq!(ArtProtocol::parse("kitty-gfx"), None);
         assert_eq!(VisualizerSource::parse("real"), None);
         assert_eq!(
-            tab_from_config("search"),
+            tab_from_config("nowhere"),
             None,
-            "a Version A tab, which this build does not have"
+            "a word that is not a tab at all"
         );
+        // The Version A names *are* tabs now (TODO 7.13), and a config written on
+        // a build that had them must still open on one that does not -- so the
+        // unknown-word rule is the only rule, with no "unknown to this build"
+        // exception that would silently reset somebody's default tab.
+        for tab in crate::tui::app::Tab::VERSION_A {
+            assert_eq!(
+                tab_from_config(tab_name(tab)),
+                Some(tab),
+                "{}",
+                tab_name(tab)
+            );
+        }
         // And cycling wraps, for the settings screen's `left`/`right`.
         assert_eq!(ArtProtocol::Auto.next(), ArtProtocol::Kitty);
         assert_eq!(ArtProtocol::HalfBlocks.next(), ArtProtocol::Auto);

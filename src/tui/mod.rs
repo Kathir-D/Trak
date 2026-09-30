@@ -8,5 +8,6 @@ pub mod loop_;
 pub mod render;
 pub mod settings;
 pub mod theme;
+pub mod web_tabs;
 
 pub use loop_::{config_screen, run};

@@ -38,24 +38,7 @@ use crate::tui::theme::{Theme, format_time, progress_bar};
 /// The Version A rows (`/`, `f`, `A`, `o`) are filtered out by the version
 /// column, so they are not excused here: a key only needs an excuse if the
 /// SPEC promises it to this build.
-pub(crate) const NOT_YET: &[(&str, &str)] = &[
-    (
-        "4",
-        "Version B has three tabs; 4-6 arrive with the Version A tabs",
-    ),
-    (
-        "5",
-        "Version B has three tabs; 4-6 arrive with the Version A tabs",
-    ),
-    (
-        "6",
-        "Version B has three tabs; 4-6 arrive with the Version A tabs",
-    ),
-    ("a", "the art / visualizer toggle is TODO 4.3"),
-    ("v", "the visualizer style cycle is TODO 4.3"),
-    ("L", "full-screen lyrics is TODO 4.4"),
-    (",", "the settings screen is TODO 5.x"),
-];
+pub(crate) const NOT_YET: &[(&str, &str)] = &[("L", "the full-screen lyrics page is TODO 6.4")];
 
 /// Which layout the terminal is wide enough for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1104,7 +1087,8 @@ fn draw_tabs(f: &mut Frame, area: Rect, app: &App, theme: &Theme, regions: &mut 
     // The segments come first: the title is built from them and the clickable
     // rects come from them, so a tab cannot be drawn in one place and clicked
     // somewhere else.
-    let strip = tab_strip(app, selected_style);
+    // Two border cells, plus the one space each side of the title inside it.
+    let strip = tab_strip(app, selected_style, (area.width as usize).saturating_sub(4));
     let block = pane_block(strip.line(), theme, false);
     f.render_widget(block, area);
     let body = inner(area);
@@ -1138,6 +1122,13 @@ fn draw_tabs(f: &mut Frame, area: Rect, app: &App, theme: &Theme, regions: &mut 
         }
         Tab::Info => info_lines(app, theme),
         Tab::Lyrics => lyrics_lines(app, theme),
+        // TODO 7.6-7.11. A Web tab says why it is empty, which is more use than a
+        // blank pane: the pane existing is what tells a person the feature is
+        // there to be unlocked.
+        _ => {
+            regions.history = Some(body);
+            crate::tui::web_tabs::lines(app, theme)
+        }
     };
     f.render_widget(Paragraph::new(lines), body);
 }
@@ -1269,24 +1260,98 @@ impl TabStrip {
     }
 }
 
-fn tab_strip(app: &App, selected: Style) -> TabStrip {
+/// The tab strip, built to fit the width it actually has.
+///
+/// Version A took the strip from three tabs to eight, which fits in no pane trak
+/// is used at. So the strip is built *after* the width is known and shows as many
+/// tabs as fit, always including the selected one -- a strip that has scrolled
+/// the tab you are on out of sight is worse than a strip that cannot show
+/// everything, because nothing on screen then says which tab you are on.
+///
+/// Elision is marked with `‹` and `›` rather than being silent, so a missing tab
+/// reads as "there are more" and not as "that is all of them".
+fn tab_strip(app: &App, selected: Style, avail: usize) -> TabStrip {
+    // Both label forms, because the selected one is narrower than the unselected
+    // one for a numbered tab: `[6]Lyrics` against ` 6 Lyrics `. Measuring the
+    // strings is what stops the selected tab being the one that does not fit.
+    let plain = |t: &Tab| match t.digit() {
+        Some(n) => format!(" {n} {} ", t.label()),
+        // History and Info are the `Tab` pair and have no number; a number they
+        // do not own would make the digits disagree with the order.
+        None => format!(" {} ", t.label()),
+    };
+    let marked = |t: &Tab| match t.digit() {
+        Some(n) => format!("[{n}]{}", t.label()),
+        None => format!("[{}]", t.label()),
+    };
+    // The wider of the two, so the reservation holds whichever form is drawn.
+    let width_of = |t: &Tab| plain(t).chars().count().max(marked(t).chars().count());
+    let sel = Tab::ALL.iter().position(|t| *t == app.tab).unwrap_or(0);
+
+    // What a window of tabs costs, *including* the elision markers. The markers
+    // are the part a first attempt forgets, and at four cells each they are
+    // exactly enough to push the last tab past the border, where ratatui
+    // truncates it mid-word.
+    let cost = |lo: usize, hi: usize| {
+        let tabs: usize = (lo..=hi).map(|i| width_of(&Tab::ALL[i])).sum();
+        let gaps = hi - lo;
+        let before = usize::from(lo > 0) * 4;
+        let after = usize::from(hi + 1 < Tab::ALL.len()) * 4;
+        tabs + gaps + before + after
+    };
+
+    // Grow outwards from the selected tab. The left side is filled first, so the
+    // tabs before the selected one are the ones that get dropped.
+    let mut lo = sel;
+    let mut hi = sel;
+    loop {
+        let after = hi + 1;
+        if lo > 0 && cost(lo - 1, hi) <= avail {
+            lo -= 1;
+        } else if after < Tab::ALL.len() && cost(lo, after) <= avail {
+            hi = after;
+        } else {
+            break;
+        }
+    }
+    let hidden_before = lo;
+    let hidden_after = Tab::ALL.len() - 1 - hi;
+
     let mut segments = Vec::new();
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut width = 0usize;
-    for (i, t) in Tab::ALL.iter().enumerate() {
-        let n = i + 1;
-        let (label, style) = if *t == app.tab {
-            (format!("[{n}]{}", t.label()), selected)
-        } else {
-            (format!(" {n} {} ", t.label()), Style::default())
-        };
-        if width > 0 {
+    // The markers are drawn but deliberately *not* registered as tabs: a click on
+    // "there is more" should not select something, and a hit region for a glyph
+    // that is not a label is a click that silently does the wrong thing.
+    let mut gap = false;
+    if hidden_before > 0 {
+        spans.push(Span::raw(" ‹ "));
+        width += 3;
+    }
+    for t in &Tab::ALL[lo..=hi] {
+        let is_sel = *t == app.tab;
+        let text = if is_sel { marked(t) } else { plain(t) };
+        if gap {
             spans.push(Span::raw(" "));
             width += 1;
         }
-        segments.push((width as u16, label.clone()));
-        width += label.chars().count();
-        spans.push(Span::styled(label, style));
+        segments.push((width as u16, text.clone()));
+        width += text.chars().count();
+        spans.push(Span::styled(
+            text,
+            if is_sel { selected } else { Style::default() },
+        ));
+        gap = true;
+    }
+    if hidden_after > 0 {
+        if gap {
+            spans.push(Span::raw(" "));
+            width += 1;
+        }
+        // The last thing drawn, so its width is never read back: the strip's
+        // length is what `cost` reserved, not what this loop accumulates.
+        spans.push(Span::raw(" › "));
+        let _ = width;
     }
     TabStrip { segments, spans }
 }
@@ -1518,10 +1583,47 @@ const HELP_KEY_WIDTH: usize = 16;
 
 /// Where the help overlay sits. Shared with the parity test so it reads the same
 /// cells the renderer wrote instead of guessing.
+/// Every key that does something today, and what it does.
+///
+/// A `const` rather than a `vec!` in the function because the popup is **sized
+/// from this list**. It used to be a fixed fraction of the screen, which meant
+/// every key added here silently fell off the bottom -- and the last row is the
+/// one people scroll to.
+///
+/// SPEC §4 is the source of the keys;
+/// `the_help_overlay_matches_the_spec_table` fails the build if the two drift.
+const HELP_ROWS: &[(&str, &str)] = &[
+    ("space", "play / pause"),
+    ("n / p", "next / previous track"),
+    ("h / l  ← →", "seek back / forward"),
+    ("+ / -", "volume up / down"),
+    ("m", "mute (saves the volume you had)"),
+    ("s", "toggle shuffle"),
+    ("r", "repeat: off → all → one     R  replay"),
+    ("c", "copy the share link"),
+    ("j / k  ↑ ↓", "move in a list"),
+    ("enter", "play the selected item"),
+    ("a", "album art, or the visualizer"),
+    ("v", "next visualizer style"),
+    ("tab", "next tab    shift-tab  back"),
+    ("1 .. 6", "jump to a tab"),
+    ("/", "search (Version A)"),
+    ("o", "open the artist or album"),
+    ("A", "add the selection to the queue"),
+    ("f", "like or unlike the playing track"),
+    (",", "settings"),
+    ("? / esc", "close this"),
+    ("q / ctrl-c", "quit"),
+];
+
 fn help_popup(area: Rect) -> Rect {
     // A centred overlay. Clear first so it reads as a panel over the app.
     let w = (area.width * 3 / 5).clamp(30, 60);
-    let h = (area.height * 3 / 5).clamp(9, 24);
+    // As many rows as the list has, not a fraction of the screen. A fixed
+    // fraction meant every key added to `HELP_ROWS` silently fell off the
+    // bottom, and the last rows are the ones people scroll to. It still clamps,
+    // because a terminal shorter than the list has to show something.
+    let h = (HELP_ROWS.len().saturating_add(2).min(area.height as usize) as u16).clamp(9, 24);
     Rect {
         x: area.x + (area.width.saturating_sub(w)) / 2,
         y: area.y + (area.height.saturating_sub(h)) / 2,
@@ -1537,22 +1639,7 @@ fn draw_help(f: &mut Frame, area: Rect) {
     // Only keys that do something today. Listing one that is not bound yet
     // would be a small lie, and `the_help_overlay_matches_the_spec_table` fails
     // the build if a key here is not either bound or listed in SPEC §4.
-    let rows = vec![
-        line("space", "play / pause"),
-        line("n / p", "next / previous track"),
-        line("h / l  ← →", "seek back / forward"),
-        line("+ / -", "volume up / down"),
-        line("m", "mute (saves the volume you had)"),
-        line("s", "toggle shuffle"),
-        line("r", "repeat: off → all → one     R  replay"),
-        line("c", "copy the share link"),
-        line("j / k  ↑ ↓", "move in a list"),
-        line("enter", "play the selected item"),
-        line("tab", "next tab    shift-tab  back"),
-        line("1 2 3", "jump to a tab"),
-        line("? / esc", "close this"),
-        line("q / ctrl-c", "quit"),
-    ];
+    let rows: Vec<Line<'static>> = HELP_ROWS.iter().map(|(k, v)| line(k, v)).collect();
 
     f.render_widget(
         Paragraph::new(rows)
@@ -1741,12 +1828,22 @@ mod tests {
             term.draw(|f| draw(f, app, &Theme::default())).unwrap();
             out.push(text_at(&term));
         }
-        // The title block, the tabs and the footer are all still there, which is
-        // the part of the frame that is not the cover.
-        for needle in ["History", "Info", "Lyrics"] {
+        // What has to survive is the *Now Playing* pane and the footer, which is
+        // what this test is about. The tab strip is not asserted here: at this
+        // width it legitimately elides, and asserting on it would be asserting
+        // on the strip, which has its own tests.
+        // Read the needles off the app rather than hard-coding the fixture's
+        // strings, so changing the fixture cannot quietly weaken this test into
+        // asserting on text that is no longer there.
+        let track = art.track().expect("a track is playing");
+        for needle in [track.title.as_str(), track.artist.as_str()] {
             assert!(out[0].contains(needle), "art lost {needle}");
             assert!(out[1].contains(needle), "visualizer lost {needle}");
         }
+        assert!(out[0].contains("vol"), "and the volume meter");
+        assert!(out[1].contains("vol"), "and the volume meter");
+        // The one thing that must differ is the pane the cover was in.
+        assert_ne!(out[0], out[1], "nothing was swapped");
     }
 
     /// TODO 5.3: every setting that the renderer reads has to visibly change the
@@ -2312,6 +2409,18 @@ mod tests {
         (term.backend().buffer().clone(), regions)
     }
 
+    /// The whole frame as text, rows joined by newlines.
+    fn full_text(buf: &ratatui::buffer::Buffer) -> String {
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     /// The cells of one row, by column. Indexing the buffer rather than slicing
     /// a joined string: a glyph like ⏮ is three bytes, and slicing by column
     /// lands mid-character.
@@ -2369,12 +2478,61 @@ mod tests {
         assert_eq!(regions.hit(bar.x + bar.width, bar.y), None);
     }
 
+    /// A strip too narrow for every tab shows the selected one and marks the
+    /// rest as elided, rather than overflowing the pane, truncating the selected
+    /// label, or hiding the tab the user is on.
+    #[test]
+    fn a_narrow_strip_keeps_the_selected_tab_and_marks_the_elision() {
+        for (w, h) in [(60u16, 20u16), (80, 24), (100, 30), (140, 40)] {
+            for tab in Tab::ALL {
+                let mut app = app_at(w, h);
+                app.tab = tab;
+                let (buf, regions) = render(w, h, &app);
+                let text = full_text(&buf);
+                assert!(
+                    text.contains(tab.label()),
+                    "at {w}x{h} the selected tab {} was elided or truncated: {text}",
+                    tab.label()
+                );
+                for (r, _) in &regions.tabs {
+                    assert!(
+                        r.x + r.width <= w && r.y < h,
+                        "a tab rect is off the pane: {r:?}"
+                    );
+                }
+                let mut sorted = regions.tabs.clone();
+                sorted.sort_by_key(|(r, _)| r.x);
+                for pair in sorted.windows(2) {
+                    assert!(
+                        pair[0].0.x + pair[0].0.width <= pair[1].0.x,
+                        "tab rects overlap at {w}x{h}: {:?} {:?}",
+                        pair[0].0,
+                        pair[1].0
+                    );
+                }
+            }
+        }
+        // And at a width where they cannot all fit, something says so rather than
+        // the strip silently lying about being complete.
+        let mut app = app_at(100, 30);
+        app.tab = Tab::Queue;
+        let (buf, _) = render(100, 30, &app);
+        let text = full_text(&buf);
+        assert!(
+            text.contains('‹') || text.contains('›'),
+            "eight tabs do not fit in 100 columns and nothing said so: {text}"
+        );
+    }
+
     /// Every tab label the strip draws has to be clickable, and clicking one
     /// selects it. The rects come from the same segments as the title.
     #[test]
     fn every_tab_is_clickable_where_it_is_drawn() {
-        let app = app_at(100, 30);
-        let (buf, regions) = render(100, 30, &app);
+        // Wide enough that all eight fit, because this asserts about every tab
+        // and a strip that elides is a different case (the test above).
+        let (w, h) = (200u16, 30u16);
+        let app = app_at(w, h);
+        let (buf, regions) = render(w, h, &app);
         assert_eq!(regions.tabs.len(), Tab::ALL.len());
         for (i, tab) in Tab::ALL.iter().enumerate() {
             let (r, idx) = regions.tabs[i];
@@ -2396,7 +2554,9 @@ mod tests {
             }),
         )
         .app;
-        assert_eq!(next.tab, Tab::Info);
+        // The click index is the tab's position, not a hard-coded name: the strip
+        // draws in an order and the click has to agree with it.
+        assert_eq!(next.tab, Tab::ALL[1]);
     }
 
     /// The three transport controls, and that they are on the row the renderer

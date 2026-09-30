@@ -17,6 +17,7 @@ use crate::player::actions::{CommandOutcome, PlayerCommand};
 use crate::player::{PlaybackState, PlayerState, RepeatMode, TrackInfo};
 use crate::tui::theme::{Accent, Border};
 use crate::visualizer::AudioSource;
+use crate::web::api::{Album, Artist, Page, Playlist, Queue, SearchResults, Track, TrackItem};
 
 /// A track played this session. Session-only, cleared on exit (SPEC §2).
 #[derive(Debug, Clone, PartialEq)]
@@ -104,6 +105,52 @@ impl ArtState {
     }
 }
 
+/// Which list a [`Event::Page`] is about.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PageWhat {
+    Playlists,
+    Liked,
+    LibraryAlbums,
+    LibraryArtists,
+    LibraryRecent,
+    PlaylistItems(String),
+    ArtistAlbums(String),
+    AlbumTracks(String),
+}
+
+impl PageWhat {
+    /// The tab this page belongs to, so an event knows where to put itself.
+    pub fn tab(self) -> Tab {
+        match self {
+            PageWhat::Playlists => Tab::Playlists,
+            PageWhat::Liked => Tab::Liked,
+            PageWhat::LibraryAlbums | PageWhat::LibraryArtists | PageWhat::LibraryRecent => {
+                Tab::Library
+            }
+            PageWhat::PlaylistItems(_) | PageWhat::ArtistAlbums(_) | PageWhat::AlbumTracks(_) => {
+                // A page that was opened from a list stays on that list, so `1`
+                // takes the user back to a tab rather than nowhere.
+                Tab::Playlists
+            }
+        }
+    }
+}
+
+/// A loaded page, still tagged with what asked for it: a list tab that has been
+/// left and come back to must not have its cursor moved by a page the user is
+/// no longer looking at.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PageLoaded {
+    Playlists(Page<Playlist>),
+    Liked(Page<TrackItem>),
+    LibraryAlbums(Page<Album>),
+    LibraryArtists(Page<Artist>),
+    LibraryRecent(Page<Track>),
+    PlaylistItems { id: String, page: Page<TrackItem> },
+    ArtistAlbums { id: String, page: Page<Album> },
+    AlbumTracks { id: String, page: Page<Track> },
+}
+
 /// Everything the loop can tell the app.
 #[derive(Debug, Clone)]
 pub enum Event {
@@ -123,6 +170,26 @@ pub enum Event {
     /// screen (TODO 8.4/8.5). Separate from [`Event::Tick`] because the clock
     /// ticks once a second and a 30 fps bar needs thirty.
     VizTick,
+    /// A search finished. `for_query` is what was asked, so a response for a
+    /// question the user has already typed past is dropped rather than shown
+    /// (TODO 7.6).
+    Searched {
+        for_query: String,
+        result: Result<SearchResults, crate::web::api::ApiError>,
+    },
+    /// One of the list tabs loaded a page. Which one is a tag rather than five
+    /// near-identical variants, because the handling is identical and five
+    /// variants is five places to forget one.
+    Page {
+        what: PageWhat,
+        result: Result<PageLoaded, crate::web::api::ApiError>,
+    },
+    /// The queue loaded (7.8).
+    Queue(Result<Queue, crate::web::api::ApiError>),
+    /// A write to the library landed or did not (7.7's `f`, 7.8's `A`).
+    WebWrote(Result<(), crate::web::api::ApiError>),
+    /// The connection state changed, from the token store or from a login.
+    Connection(Connection),
     /// A lyrics lookup finished.
     Lyrics {
         uri: Option<String>,
@@ -194,21 +261,79 @@ pub enum Hit {
     Control(Control),
 }
 
+/// Which pane the right side is showing.
+///
+/// Version A's five tabs exist whether or not a Client ID is configured: an empty
+/// tab that says "run `trak config`" is more use than a tab that is not there,
+/// because a person who does not know the feature exists cannot go looking for it
+/// (TODO 7.13).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
+    Search,
+    Playlists,
+    Queue,
+    Liked,
+    Library,
+    Lyrics,
     History,
     Info,
-    Lyrics,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 3] = [Tab::History, Tab::Info, Tab::Lyrics];
+    /// In the order the numbers go, so `[4]` is the fourth thing drawn and the
+    /// key that selects it are the same fact stated once (TODO 7.13).
+    pub const ALL: [Tab; 8] = [
+        Tab::Search,
+        Tab::Playlists,
+        Tab::Queue,
+        Tab::Liked,
+        Tab::Library,
+        Tab::Lyrics,
+        Tab::History,
+        Tab::Info,
+    ];
+
+    /// The tabs a Version B build has, which is what a Client ID unlocks the rest
+    /// of. Kept separate from `ALL` so the B-mode hint can name them.
+    pub const VERSION_A: [Tab; 5] = [
+        Tab::Search,
+        Tab::Playlists,
+        Tab::Queue,
+        Tab::Liked,
+        Tab::Library,
+    ];
+
+    /// The digit that selects this tab, or `None` when it has none. The first six
+    /// are numbered because they are the tabs a person navigates between; History
+    /// and Info are reachable by `Tab` and are deliberately not numbered.
+    pub fn digit(self) -> Option<char> {
+        let i = Tab::ALL.iter().position(|t| *t == self)?;
+        (i < 6).then(|| char::from(b'1' + i as u8))
+    }
+
+    pub fn from_digit(c: char) -> Option<Self> {
+        let n = c.to_digit(10)? as usize;
+        // The digits are 1-based -- a person counting tabs starts at one -- and
+        // `ALL` is 0-based, so this is the one place that conversion happens.
+        (1..=6).contains(&n).then(|| Tab::ALL[n - 1])
+    }
+
+    /// Whether this tab needs the Web API. A Client ID unlocks these and nothing
+    /// else: History, Info and Lyrics come from AppleScript and LRCLIB.
+    pub fn needs_web(self) -> bool {
+        Tab::VERSION_A.contains(&self)
+    }
 
     pub fn label(self) -> &'static str {
         match self {
+            Tab::Search => "Search",
+            Tab::Playlists => "Playlists",
+            Tab::Queue => "Queue",
+            Tab::Liked => "Liked",
+            Tab::Library => "Library",
+            Tab::Lyrics => "Lyrics",
             Tab::History => "History",
             Tab::Info => "Info",
-            Tab::Lyrics => "Lyrics",
         }
     }
 
@@ -224,6 +349,324 @@ impl Tab {
 }
 
 /// Which volume trak changes (TODO 4.4, R2).
+/// Everything the Web API tabs hold (TODO 7.6-7.11).
+///
+/// The pages are held as rows rather than as paging cursors, because a TUI list
+/// that drops the first page when the user scrolls past the end is worse than one
+/// that asks for more. `next` is kept so the list can go and get the rest when
+/// the user reaches the bottom, and `None` is the end rather than "not asked".
+#[derive(Debug, Clone)]
+pub struct WebState {
+    /// The connection, as the token store reports it. `NotConnected` is a state,
+    /// not an error: it is what a person without a Client ID sees, and it is the
+    /// thing the tabs explain rather than a red toast.
+    pub connection: Connection,
+    /// True once the user has been told about the Client ID, so the hint is not
+    /// repeated on every launch of a build that will never have one.
+    pub hint_shown: bool,
+
+    // -- Search (7.6)
+    /// Whether `/` has focused the input. While it is focused, every printable
+    /// key is a character rather than a command.
+    pub search_focus: bool,
+    pub query: String,
+    /// The query whose results are on screen. A response for anything else is
+    /// dropped rather than shown, because a slow request for "ma" landing after
+    /// a fast one for "massive attack" would replace the answer with the wrong
+    /// question.
+    pub search_shown: String,
+    pub results: SearchResults,
+    /// Which of the four result groups the cursor is in, moved with `Tab`.
+    pub group: usize,
+    pub group_row: [usize; 4],
+    pub searching: bool,
+    /// Seconds until the next debounced search is allowed to fire. The loop owns
+    /// the clock; the state owns the decision.
+    pub search_debounce: f64,
+
+    // -- The list tabs (7.7-7.9)
+    pub playlists: Page<Playlist>,
+    pub playlist_cursor: usize,
+    pub liked: Page<TrackItem>,
+    /// One cursor per list, not one for the tab. A single shared cursor across
+    /// three lists is a cursor that points at a row of whichever list happens to
+    /// be longer, which is not a selection.
+    pub liked_cursor: usize,
+    pub library_cursor: usize,
+    pub queue_cursor: usize,
+    pub library: LibrarySections,
+    pub queue: Queue,
+    pub liked_here: Option<bool>,
+
+    // -- The pages you open something into (7.10)
+    /// A navigation stack, so `esc` from an album inside an artist returns to the
+    /// artist rather than to the tab. An artist page that cannot be left the way
+    /// it was entered is a trap.
+    pub pages: Vec<Page_>,
+    /// What the list tab is showing, when a page is open it hides the list.
+    pub open: Option<Open>,
+    /// The rows of the open page, kept in whichever shape they arrived in so the
+    /// renderer does not have to know which kind of page this is. The `open` tag
+    /// is the answer to "which", so there is only ever one list on screen.
+    pub open_tracks: Vec<TrackItem>,
+    pub open_albums: Vec<Album>,
+    pub open_track_page: Vec<Track>,
+    pub open_cursor: usize,
+}
+
+impl WebState {
+    /// Show a playlist's tracklist (7.7).
+    pub fn open_playlist(&mut self, id: String) {
+        self.pages.push(Page_::Playlist(id.clone()));
+        self.open = Some(Open::Playlist(id));
+        self.open_tracks.clear();
+        self.open_albums.clear();
+        self.open_track_page.clear();
+        self.open_cursor = 0;
+    }
+
+    /// Show an artist's albums (7.10). Albums only, and the reason is in
+    /// `docs/WEB-API.md`: top-tracks is gone.
+    pub fn open_artist(&mut self, id: String) {
+        self.pages.push(Page_::Artist(id.clone()));
+        self.open = Some(Open::Artist(id));
+        self.open_tracks.clear();
+        self.open_albums.clear();
+        self.open_track_page.clear();
+        self.open_cursor = 0;
+    }
+
+    /// Show an album's tracklist (7.10).
+    pub fn open_album(&mut self, id: String) {
+        self.pages.push(Page_::Album(id.clone()));
+        self.open = Some(Open::Album(id));
+        self.open_tracks.clear();
+        self.open_albums.clear();
+        self.open_track_page.clear();
+        self.open_cursor = 0;
+    }
+
+    pub fn playlist_items(&mut self, id: String, items: Vec<TrackItem>) {
+        let _ = id;
+        self.open_tracks = items;
+        self.open_cursor = 0;
+    }
+
+    pub fn artist_albums(&mut self, id: String, items: Vec<Album>) {
+        let _ = id;
+        self.open_albums = items;
+        self.open_cursor = 0;
+    }
+
+    pub fn album_tracks(&mut self, id: String, items: Vec<Track>) {
+        let _ = id;
+        self.open_track_page = items;
+        self.open_cursor = 0;
+    }
+
+    /// Leave one level. `false` when there was nothing to leave, which is the
+    /// caller's cue to close the overlay or leave the tab.
+    pub fn close_page(&mut self) -> bool {
+        self.pages.pop();
+        self.open = self.pages.last().map(|page| match page {
+            Page_::Playlist(id) => Open::Playlist(id.clone()),
+            Page_::Artist(id) => Open::Artist(id.clone()),
+            Page_::Album(id) => Open::Album(id.clone()),
+        });
+        self.open_cursor = 0;
+        !self.pages.is_empty()
+    }
+
+    /// The rows of whatever is open, as the display strings for it. One list so
+    /// the renderer has one thing to draw and the key handling has one cursor.
+    pub fn open_rows(&self) -> Vec<String> {
+        match &self.open {
+            Some(Open::Playlist(_)) => self
+                .open_tracks
+                .iter()
+                .filter_map(|item| item.track.as_ref())
+                .map(|track| track.to_string())
+                .collect(),
+            Some(Open::Artist(_)) => self.open_albums.iter().map(|a| a.to_string()).collect(),
+            Some(Open::Album(_)) => self.open_track_page.iter().map(|t| t.to_string()).collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// The URI of the row the cursor is on, for `enter`. `None` for a row that is
+    /// not a track -- an album row is opened with `enter`, not played.
+    pub fn open_row_uri(&self) -> Option<String> {
+        match self.open.as_ref()? {
+            Open::Playlist(_) => self
+                .open_tracks
+                .get(self.open_cursor)
+                .and_then(|i| i.track.as_ref())
+                .map(|t| t.uri.clone()),
+            Open::Album(_) => self
+                .open_track_page
+                .get(self.open_cursor)
+                .map(|t| t.uri.clone()),
+            // An artist page lists albums, and an album is not playable by URI.
+            Open::Artist(_) => None,
+        }
+    }
+}
+
+impl Default for WebState {
+    fn default() -> Self {
+        Self {
+            connection: Connection::default(),
+            hint_shown: false,
+            search_focus: false,
+            query: String::new(),
+            search_shown: String::new(),
+            results: SearchResults::default(),
+            group: 0,
+            group_row: [0; 4],
+            searching: false,
+            search_debounce: 0.0,
+            playlists: Page::empty(),
+            playlist_cursor: 0,
+            liked: Page::empty(),
+            liked_cursor: 0,
+            library_cursor: 0,
+            queue_cursor: 0,
+            library: LibrarySections::default(),
+            queue: Queue::default(),
+            liked_here: None,
+            pages: Vec::new(),
+            open: None,
+            open_tracks: Vec::new(),
+            open_albums: Vec::new(),
+            open_track_page: Vec::new(),
+            open_cursor: 0,
+        }
+    }
+}
+
+impl Default for LibrarySections {
+    fn default() -> Self {
+        Self {
+            section: LibrarySection::Albums,
+            albums: Page::empty(),
+            artists: Page::empty(),
+            recent: Page::empty(),
+            loaded: [false; 3],
+        }
+    }
+}
+
+/// Which list the Library tab is showing (7.9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LibrarySection {
+    Albums,
+    Artists,
+    Recent,
+}
+
+impl LibrarySection {
+    pub const ALL: [LibrarySection; 3] = [
+        LibrarySection::Albums,
+        LibrarySection::Artists,
+        LibrarySection::Recent,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Albums => "Saved albums",
+            Self::Artists => "Followed artists",
+            Self::Recent => "Recently played",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        let i = Self::ALL.iter().position(|s| *s == self).unwrap_or(0);
+        Self::ALL[(i + 1) % Self::ALL.len()]
+    }
+}
+
+/// The three lists of the Library tab, loaded lazily (7.9).
+#[derive(Debug, Clone)]
+pub struct LibrarySections {
+    pub section: LibrarySection,
+    pub albums: Page<Album>,
+    pub artists: Page<Artist>,
+    pub recent: Page<Track>,
+    /// Which of the three have been asked for. Loading all three on entry would
+    /// be three requests for a tab most visits leave immediately.
+    pub loaded: [bool; 3],
+}
+
+/// What a list tab has opened, or nothing.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Open {
+    /// A playlist's tracklist (7.7).
+    Playlist(String),
+    /// An artist's albums (7.10). Albums only: `top-tracks` was removed in dev
+    /// mode with no replacement, and the docs say so.
+    Artist(String),
+    /// An album's tracklist (7.10).
+    Album(String),
+}
+
+/// One entry on the navigation stack.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Page_ {
+    Playlist(String),
+    Artist(String),
+    Album(String),
+}
+
+impl Page_ {
+    pub fn title(&self) -> &'static str {
+        match self {
+            Page_::Playlist(_) => "Playlist",
+            Page_::Artist(_) => "Artist",
+            Page_::Album(_) => "Album",
+        }
+    }
+}
+
+/// How long a keystroke waits before a search goes out (TODO 7.6).
+///
+/// 250 ms is long enough that typing "massive attack" is one request rather than
+/// thirteen, and short enough that the list feels attached to the keyboard.
+pub const SEARCH_DEBOUNCE_SECS: f64 = 0.25;
+
+/// Whether trak has a usable Spotify connection (7.2, 7.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Connection {
+    /// No Client ID in the config, so no login has been possible.
+    #[default]
+    NoClientId,
+    /// A Client ID but no token file: the user has to run the guided setup.
+    LoggedOut,
+    Connected,
+    /// The refresh token is spent or nearly so. A state to say out loud, not an
+    /// error to sit in.
+    NeedsRelogin,
+}
+
+impl Connection {
+    pub fn connected(self) -> bool {
+        self == Connection::Connected
+    }
+
+    /// The one line that says what to do about it. `None` when there is nothing
+    /// to say, which is the case that matters most: a connected client should
+    /// not be talking about connecting.
+    pub fn notice(self) -> Option<&'static str> {
+        match self {
+            Connection::Connected => None,
+            Connection::NoClientId => {
+                Some("add a Spotify Client ID in `trak config` for search and playlists")
+            }
+            Connection::LoggedOut => Some("connect Spotify in `trak config`"),
+            Connection::NeedsRelogin => Some("reconnect Spotify in `trak config`"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VolumeControl {
     /// Spotify's own volume, which is what a music player should change.
@@ -521,6 +964,8 @@ pub struct App {
     pub art: ArtState,
     /// The lyrics tab (TODO 6.1).
     pub lyrics: LyricsState,
+    /// The Web API tabs (TODO 7.6-7.11).
+    pub web: WebState,
     /// What Sonar is doing right now (TODO 4.6).
     pub sonar: crate::sonar::SonarState,
     /// What headless-spotify is doing right now (TODO 4.7).
@@ -580,6 +1025,7 @@ impl App {
             // What headless-spotify is doing right now (TODO 4.7).
             headless: crate::headless::Headless::unknown(),
             lyrics: LyricsState::default(),
+            web: WebState::default(),
             should_quit: false,
             clock: String::new(),
             marquee_offset: 0,
@@ -738,6 +1184,52 @@ pub fn update(mut app: App, event: Event) -> Updated {
             // A command in flight is still running. Do not stack a poll behind it
             // or the queue grows without bound.
             app.poll_due = app.busy.is_none();
+        }
+
+        Event::Searched { for_query, result } => {
+            // An answer to a question the user has already typed past is worse
+            // than no answer: it puts results on screen that do not match the
+            // box they came from.
+            if for_query != app.web.query {
+                return Updated { app, commands };
+            }
+            app.web.searching = false;
+            app.web.search_shown = for_query;
+            app.web.group_row = [0; 4];
+            match result {
+                Ok(r) => {
+                    app.web.results = r;
+                }
+                Err(e) => app.toast(e.notice()),
+            }
+        }
+
+        Event::Page { what, result } => match result {
+            Ok(loaded) => apply_page(&mut app, what, loaded),
+            Err(e) => app.toast(e.notice()),
+        },
+
+        Event::Queue(result) => match result {
+            Ok(q) => app.web.queue = q,
+            Err(e) => app.toast(e.notice()),
+        },
+
+        Event::WebWrote(result) => {
+            if let Err(e) = result {
+                app.toast(e.notice());
+            } else {
+                // The write landed, so the check is stale: re-read it rather than
+                // leaving the row saying the old thing.
+                app.web.liked_here = None;
+            }
+        }
+
+        Event::Connection(c) => {
+            app.web.connection = c;
+            if let Some(n) = c.notice() {
+                app.web.hint_shown = true;
+                app.toast(n);
+            }
         }
 
         Event::VizTick => {
@@ -939,9 +1431,10 @@ fn handle_key(app: &mut App, c: char, commands: &mut Vec<PlayerCommand>) {
         // Shift-Tab arrives as an unbound sentinel from the event loop.
         'Z' => app.tab = app.tab.prev(),
         // Shift-Tab is a modifier key, not a char, and is handled in the loop.
-        '1' => app.tab = Tab::History,
-        '2' => app.tab = Tab::Info,
-        '3' => app.tab = Tab::Lyrics,
+        // One table, not one arm per digit: the number a tab is drawn with and
+        // the key that selects it are the same fact, and two tables is one of
+        // them being wrong.
+        c if Tab::from_digit(c).is_some() => app.tab = Tab::from_digit(c).unwrap_or(app.tab),
         'j' => {
             let next = app.history_cursor + 1;
             app.select(next);
@@ -1099,6 +1592,51 @@ fn push(app: &mut App, commands: &mut Vec<PlayerCommand>, cmd: PlayerCommand) {
     }
     app.busy = Some(cmd.clone());
     commands.push(cmd);
+}
+
+/// Put a loaded page where it belongs.
+///
+/// A page for a tab the user is not on still lands, because switching tabs must
+/// not have to go and fetch again -- but a page for a *page* that has since been
+/// left is dropped, because opening an album and going back to the list must not
+/// leave the list showing the album.
+fn apply_page(app: &mut App, _what: PageWhat, loaded: PageLoaded) {
+    // A page for a *page* that has since been left is dropped: opening an album
+    // and going back to the list must not leave the list showing the album.
+    // The list tabs are not checked, because switching tabs and coming back must
+    // not have to fetch again.
+    let open_now = app.web.open.clone();
+    match loaded {
+        PageLoaded::Playlists(p) => app.web.playlists = p,
+        PageLoaded::Liked(p) => app.web.liked = p,
+        PageLoaded::LibraryAlbums(p) => {
+            app.web.library.albums = p;
+            app.web.library.loaded[0] = true;
+        }
+        PageLoaded::LibraryArtists(p) => {
+            app.web.library.artists = p;
+            app.web.library.loaded[1] = true;
+        }
+        PageLoaded::LibraryRecent(p) => {
+            app.web.library.recent = p;
+            app.web.library.loaded[2] = true;
+        }
+        PageLoaded::PlaylistItems { id, page } => {
+            if open_now == Some(Open::Playlist(id.clone())) {
+                app.web.playlist_items(id, page.items);
+            }
+        }
+        PageLoaded::ArtistAlbums { id, page } => {
+            if open_now == Some(Open::Artist(id.clone())) {
+                app.web.artist_albums(id, page.items);
+            }
+        }
+        PageLoaded::AlbumTracks { id, page } => {
+            if open_now == Some(Open::Album(id.clone())) {
+                app.web.album_tracks(id, page.items);
+            }
+        }
+    }
 }
 
 fn apply_state(app: &mut App, s: PlayerState) {
@@ -1397,19 +1935,47 @@ mod tests {
     }
 
     /// Tab goes forward and Shift-Tab back, which the event loop maps to 'Z'
-    /// because nothing else is bound to it.
+    /// because nothing else is bound to it. The walk covers all eight tabs and
+    /// comes back to where it started, so a tab added to the middle cannot be
+    /// skipped by a `next` that stops early.
     #[test]
     fn tabs_cycle_and_numbers_jump() {
-        let (app, _) = press(with_track(), '\t');
-        assert_eq!(app.tab, Tab::Info);
-        let (app, _) = press(app, '\t');
-        assert_eq!(app.tab, Tab::Lyrics);
-        let (app, _) = press(app, 'Z');
-        assert_eq!(app.tab, Tab::Info, "shift-tab goes back");
-        let (app, _) = press(app, '3');
-        assert_eq!(app.tab, Tab::Lyrics);
-        let (app, _) = press(app, '1');
-        assert_eq!(app.tab, Tab::History);
+        let mut app = with_track();
+        let start = app.tab;
+        for i in 1..=Tab::ALL.len() {
+            app = press(app, '\t').0;
+            assert_eq!(
+                app.tab,
+                Tab::ALL[(start as usize + i) % Tab::ALL.len()],
+                "after {i} tabs"
+            );
+        }
+        assert_eq!(app.tab, start, "and the cycle comes back round");
+
+        // Shift-Tab is the way back.
+        let app = press(app, 'Z').0;
+        let back = Tab::ALL
+            .iter()
+            .position(|t| *t == start)
+            .map(|i| Tab::ALL[(i + Tab::ALL.len() - 1) % Tab::ALL.len()]);
+        assert_eq!(Some(app.tab), back, "shift-tab goes back");
+
+        // And a digit jumps, which is the same fact stated once rather than a
+        // second table that can disagree with the first.
+        for tab in Tab::ALL {
+            let Some(digit) = tab.digit() else { continue };
+            let (app, _) = press(with_track(), digit);
+            assert_eq!(app.tab, tab, "{digit} should select {}", tab.label());
+        }
+        // History and Info have no digit: they are the `Tab` pair, and giving
+        // them one would make the strip's numbers disagree with the order.
+        assert_eq!(Tab::History.digit(), None);
+        assert_eq!(Tab::Info.digit(), None);
+        assert_eq!(
+            press(with_track(), '7').0.tab,
+            Tab::History,
+            "7 is not a tab"
+        );
     }
 
     #[test]
@@ -1782,13 +2348,16 @@ mod tests {
 
     #[test]
     fn a_tab_click_switches_tab_and_a_bad_index_does_nothing() {
-        let (app, cmds) = step(with_track(), click(Hit::Tab(1)));
-        assert_eq!(app.tab, Tab::Info);
+        // The click index and the digit are the same fact, so they are compared
+        // against the same table: a strip that draws in one order and hits in
+        // another is the bug this catches.
+        let (app, cmds) = step(with_track(), click(Hit::Tab(2)));
+        assert_eq!(app.tab, Tab::Queue);
         assert!(cmds.is_empty(), "switching tab is not a Spotify write");
         let (app, _) = step(app, click(Hit::Tab(99)));
         assert_eq!(
             app.tab,
-            Tab::Info,
+            Tab::Queue,
             "an index that does not exist is ignored"
         );
     }

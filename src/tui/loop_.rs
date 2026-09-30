@@ -369,6 +369,9 @@ fn event_loop<B: ratatui::backend::Backend>(
         while let Some(result) = worker.poll() {
             app = match result {
                 WorkerResult::State(s) => update(app, Event::PlayerState(s)).app,
+                // A Web API answer is already an app event, so there is one arm
+                // rather than one per tab.
+                WorkerResult::Web(event) => update(app, event).app,
                 WorkerResult::ReadFailed(crate::player::PlayerError::NotRunning) => {
                     update(app, Event::NotRunning).app
                 }

@@ -207,6 +207,64 @@ impl Track {
 /// What a list row says. The *renderer* decides where it goes; this is the text
 /// every search, playlist, library and history row wants, and it lives next to
 /// the data so the tabs cannot each invent their own idea of a track's name.
+/// The one-line form of an album, as a row.
+///
+/// `artists` first and the year after, because that is what identifies an album
+/// to the person looking at it; a row with only a name is not enough to choose
+/// between four of them.
+impl fmt::Display for Album {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let artists: Vec<&str> = self.artists.iter().map(|a| a.name.as_str()).collect();
+        match (artists.is_empty(), self.release_date.as_deref()) {
+            (false, Some(date)) => {
+                write!(f, "{} — {} ({})", self.name, artists.join(", "), year(date))
+            }
+            (false, None) => write!(f, "{} — {}", self.name, artists.join(", ")),
+            (true, Some(date)) => write!(f, "{} ({})", self.name, year(date)),
+            (true, None) => write!(f, "{}", self.name),
+        }
+    }
+}
+
+/// The four digits of an ISO date, or nothing for one trak cannot read. The year
+/// is what a person scans a list for, and `2026-03-01` is twice the width for it.
+fn year(date: &str) -> &str {
+    let digits = date.chars().take_while(char::is_ascii_digit).count();
+    if digits >= 4 { &date[..4] } else { "" }
+}
+
+/// The one-line form of an artist. No albumography and no follower count: both
+/// were removed from dev mode, and a row padded with a zero would be a lie.
+impl fmt::Display for Artist {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.name)
+    }
+}
+
+/// The one-line form of a playlist, with its size when Spotify sent one.
+impl fmt::Display for Playlist {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.contents.as_ref().and_then(|c| c.total) {
+            Some(total) => write!(f, "{} · {} tracks", self.name, total),
+            None => write!(f, "{}", self.name),
+        }
+    }
+}
+
+/// The one-line form of a library row: a track, or the episode row the Liked tab
+/// and a playlist tracklist can both contain.
+impl fmt::Display for TrackItem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.track {
+            Some(track) => write!(f, "{track}"),
+            // A row with no track is a local file Spotify did not resolve, or an
+            // entry the API has no body for. It is still a row and is still
+            // selectable, so it needs something to read as.
+            None => write!(f, "— unavailable —"),
+        }
+    }
+}
+
 impl fmt::Display for Track {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let artists: Vec<&str> = self.artists.iter().map(|a| a.name.as_str()).collect();
@@ -318,7 +376,7 @@ impl Page<TrackItem> {
 ///
 /// Live state, never cached. The two field names come from Spotify's own
 /// response; the rest of the TUI's queue tab is drawn from here.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
 pub struct Queue {
     #[serde(default, rename = "currently_playing")]
     pub now_playing: Option<Track>,
