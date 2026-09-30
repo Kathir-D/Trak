@@ -14,6 +14,15 @@
 # A FAIL is a real disagreement with docs/ -- read the section it names before
 # changing either the code or the doc.
 #
+# The 1.8 (Keychain) section is OPT-IN, because testing it deliberately provokes
+# a real macOS keychain authorization dialog that asks for your login password.
+# In an unattended session nobody can answer it, so the dialogs just pile up on
+# your screen. Run it only when you are at the machine:
+#
+#   ./spikes/verify.sh --keychain
+#
+# It cleans up every item it creates, including on Ctrl-C.
+#
 # Sections that need a human to look at a screen are listed at the end and are
 # NOT run by this script.
 
@@ -47,7 +56,11 @@ check() { # check <description> <expected-substring> <actual>
 }
 
 quick=0
-[[ $1 == --quick ]] && quick=1
+keychain=0
+for arg in "$@"; do
+  [[ $arg == --quick ]]    && quick=1
+  [[ $arg == --keychain ]] && keychain=1
+done
 
 sp() { osa "tell application \"Spotify\" to return $1"; }
 
@@ -190,15 +203,29 @@ else
     wait $listener 2>/dev/null
     osa 'tell application "Spotify" to play' >/dev/null
 
+    toggled=$(( after_toggle - before ))
+    skipped=$(( after_next - after_toggle ))
     fired=$(( after_next - before ))
     seekfired=$(( after_seek - after_next ))
+    what=$(sp 'id of current track')
 
-    if (( fired >= 2 )); then
-      ok "a plain Rust CLI received $fired notifications for playpause+skip — no bundle id needed"
+    # Only the playpause toggle is a guaranteed state change, so that is the
+    # reliable pass condition. An advert is not: skipping one often lands on
+    # another advert, and no track or play state actually changes, so the
+    # notification legitimately does not fire. Requiring 2 made this flaky.
+    if (( toggled >= 1 )); then
+      ok "a plain Rust CLI received the notification for a playpause toggle — no bundle id needed"
     else
-      no "only $fired notification(s) fired; docs/APPLESCRIPT.md section 9 claims play/pause/skip all fire"
-      say "if Spotify was paused or between tracks during the run, just re-run this script"
+      no "a playpause toggle fired nothing; docs/APPLESCRIPT.md section 9 says play/pause fire"
     fi
+    if [[ $what == spotify:ad:* ]]; then
+      sk "skip fired $skipped notification(s) — an advert is playing, where that is expected"
+    elif (( skipped >= 1 )); then
+      ok "next track fired $skipped notification(s), as the doc claims"
+    else
+      no "next track fired nothing; the doc says skips fire too (currently $what)"
+    fi
+    say "total for playpause+skip: $fired"
 
     if (( seekfired == 0 )); then
       ok "a seek fired 0 notifications — the asymmetry the doc records is confirmed"
@@ -308,16 +335,24 @@ fi
 
 # -------------------------------------------------------------- 1.8 keychain
 head_ "1.8  Keychain (docs/KEYCHAIN.md)"
-if (cd spikes/keychain && cargo build --release 2>/dev/null); then
+if (( ! keychain )); then
+  sk "opt-in only: this provokes a real keychain password dialog on your screen."
+  sk "run ./spikes/verify.sh --keychain when you are at the machine."
+elif (cd spikes/keychain && cargo build --release 2>/dev/null); then
   KC=spikes/keychain/target/release/keychain-spike
-  security delete-generic-password -s trak-verify -a t >/dev/null 2>&1
+  SVC="trak-verify-$$"        # per-run, so no stale item or cached decision lingers
+  # Clean up on any exit, including Ctrl-C, so nothing is left in the keychain.
+  trap 'security delete-generic-password -s "$SVC" -a t >/dev/null 2>&1
+        rm -f /tmp/trak-verify-kc /tmp/trak-verify-kc.out' EXIT INT TERM
+  say "using service name $SVC; press Ctrl-C at any time to clean up"
+  security delete-generic-password -s "$SVC" -a t >/dev/null 2>&1
   say "storing with the current binary..."
   if $KC store trak-verify t secret-value >/dev/null 2>&1; then
     ok "the binary can store an item (this is why the problem is invisible in development)"
   else
     no "storing failed unexpectedly"
   fi
-  if $KC read trak-verify t 2>/dev/null | grep -q "secret-value"; then
+  if $KC read "$SVC" t 2>/dev/null | grep -q "secret-value"; then
     ok "the same binary reads it back with no prompt"
   else
     no "the same binary could not read it back"
@@ -333,7 +368,7 @@ if (cd spikes/keychain && cargo build --release 2>/dev/null); then
   #     (item, code identity) pair is already cached from an earlier run.
   # A new identity prompts; the same one again errors. The first encounter is
   # the one that matters, because every trak release is a brand-new identity.
-  /tmp/trak-verify-kc read trak-verify t >/tmp/trak-verify-kc.out 2>&1 &
+  /tmp/trak-verify-kc read "$SVC" t >/tmp/trak-verify-kc.out 2>&1 &
   pid=$!
   blocked=0
   for i in {1..20}; do
@@ -363,7 +398,7 @@ if (cd spikes/keychain && cargo build --release 2>/dev/null); then
   else
     no "storing failed unexpectedly"
   fi
-  if $KC read trak-verify t 2>/dev/null | grep -q "secret-value"; then
+  if $KC read "$SVC" t 2>/dev/null | grep -q "secret-value"; then
     ok "the same binary reads it back with no prompt"
   else
     no "the same binary could not read it back"

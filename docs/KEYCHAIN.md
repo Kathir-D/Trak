@@ -153,9 +153,19 @@ The directory on this machine is already correct:
 
 ## Re-checking this yourself
 
+**The 1.8 check is opt-in, on purpose.** Reproducing this provokes a *real*
+macOS keychain authorization dialog that asks for your login password. Run it
+only when you are sitting at the machine:
+
 ```sh
-./spikes/verify.sh          # the 1.8 section reproduces this end to end
+./spikes/verify.sh              # everything except the keychain
+./spikes/verify.sh --keychain   # includes it; will show dialogs
 ```
+
+It uses a per-run service name (`trak-verify-$$`) and a `trap` on `EXIT INT TERM`,
+so it deletes every item it created even if you Ctrl-C it partway through. This
+exists because an earlier version used a fixed name and left items and stacked-up
+dialogs behind.
 
 ## Reproducing
 
