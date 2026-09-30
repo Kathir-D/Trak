@@ -53,6 +53,19 @@ pub fn draw(f: &mut Frame, app: &App, theme: &Theme) {
     let area = f.area();
     let (w, h) = (area.width, area.height);
 
+    // The idle card replaces the whole dashboard when Spotify is not running
+    // (SPEC §3). It is the only place trak ever offers to start Spotify.
+    if app.is_idle() && h >= 8 && w >= 30 {
+        draw_idle_card(f, area, theme);
+        if app.show_help {
+            draw_help(f, area);
+        }
+        if let Some(t) = &app.toast {
+            draw_toast(f, area, &t.text);
+        }
+        return;
+    }
+
     match layout_for(w, h) {
         Layout_::TooSmall => draw_too_small(f, area, app),
         Layout_::Compact => draw_compact(f, area, app, theme),
@@ -148,6 +161,54 @@ fn draw_stacked(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         draw_tabs(f, rows[2], app, theme);
     }
     draw_footer(f, rows[3], app, theme);
+}
+
+/// The idle card: Spotify is not running, and enter will launch it.
+///
+/// Deliberately does not say what trak is about to do beyond that, and never
+/// launches on its own (COMPAT rule 2).
+fn draw_idle_card(f: &mut Frame, area: Rect, theme: &Theme) {
+    let card_w = (area.width * 2 / 3).clamp(34, 64);
+    let card_h = 9.min(area.height);
+    let card = Rect {
+        x: area.x + area.width.saturating_sub(card_w) / 2,
+        y: area.y + area.height.saturating_sub(card_h) / 2,
+        width: card_w,
+        height: card_h,
+    };
+    f.render_widget(Clear, card);
+    f.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled(
+                "Spotify isn't running",
+                Style::default().add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "press enter to launch it in the background",
+                Style::default().fg(Color::Cyan),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "trak never starts Spotify on its own.",
+                Theme::dim(),
+            )),
+            Line::from(Span::styled("q  quit            ?  keys", Theme::dim())),
+        ])
+        .alignment(Alignment::Center)
+        .block(
+            Block::bordered()
+                .title(" trak ")
+                .border_type(
+                    theme
+                        .border
+                        .to_ratatui()
+                        .unwrap_or(ratatui::widgets::BorderType::Rounded),
+                )
+                .border_style(theme.accent_style()),
+        ),
+        card,
+    );
 }
 
 fn draw_compact(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
@@ -624,6 +685,52 @@ mod tests {
                 assert!(rendered.is_ok(), "draw failed at {w}x{h}");
             }
         }
+    }
+
+    /// TODO 3.5: quitting Spotify must show the idle card, and it must be the
+    /// only place trak offers to launch it.
+    #[test]
+    fn the_idle_card_appears_and_offers_a_launch() {
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        let theme = Theme::default();
+        term.draw(|f| draw(f, &App::new(), &theme)).unwrap();
+
+        let buf = term.backend().buffer().clone();
+        let text = (0..30)
+            .map(|y| {
+                (0..100)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text.contains("isn't running"), "{text}");
+        assert!(text.contains("press enter to launch"), "{text}");
+        assert!(text.contains("never starts Spotify on its own"), "{text}");
+        // the dashboard is replaced, not drawn underneath
+        assert!(!text.contains("Now Playing"), "{text}");
+    }
+
+    #[test]
+    fn the_idle_card_disappears_once_a_track_arrives() {
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        let app = app_at(100, 30);
+        let theme = Theme::default();
+        term.draw(|f| draw(f, &app, &theme)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let text = (0..30)
+            .map(|y| {
+                (0..100)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!text.contains("press enter to launch"), "{text}");
+        assert!(text.contains("Now Playing"), "{text}");
     }
 
     #[test]

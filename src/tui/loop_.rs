@@ -140,6 +140,15 @@ pub fn run() -> i32 {
 
 fn event_loop<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> i32 {
     let worker = Worker::new(AppleScriptPlayer::new());
+    // The notification is the fast path; the poll stays as the safety net for
+    // seek / volume / shuffle / repeat, which it is silent about
+    // (docs/APPLESCRIPT.md section 9). If it cannot be registered, trak carries
+    // on with the poll alone rather than failing.
+    //
+    // Must be called on the main thread, because that is where
+    // NSDistributedNotificationCenter delivers -- a background run loop receives
+    // nothing at all, which cost a confusing debugging round to find out.
+    let notify = crate::player::notify::subscribe();
     let mut app = App::new();
     let theme = Theme::new(Accent::Art, Border::Rounded);
 
@@ -172,8 +181,35 @@ fn event_loop<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> i32 {
             };
         }
 
-        // 2. Terminal input.
-        match poll(INPUT_WAIT) {
+        // 2. A notification, if one arrived. This is what makes a skip from
+        //    Sonar or a media key show up in about 170ms instead of on the next
+        //    poll. It carries no artwork, so the merge keeps the existing cover
+        //    and the volume it already knew.
+        if let Some(sub) = &notify
+            && let Some(event) = sub.poll()
+        {
+            if let Some(state) = app.state.as_ref() {
+                let track_changed = event.is_different_track(state);
+                let merged = crate::player::notify::merge(state, &event);
+                app = update(app, Event::PlayerState(Box::new(merged))).app;
+
+                // A track change is the one thing the notification cannot be
+                // trusted about on its own: it has no artwork, play count or
+                // popularity, so one read has to follow. It is cheap, because
+                // that is once per song rather than once per poll.
+                if track_changed {
+                    worker.submit(|p| match p.state() {
+                        Ok(st) => crate::player::actions::WorkerResult::State(Box::new(st)),
+                        Err(e) => crate::player::actions::WorkerResult::ReadFailed(e),
+                    });
+                }
+            }
+        }
+
+        // 3. Terminal input. The wait is a run-loop pump, not a sleep:
+        //    NSDistributedNotificationCenter only delivers on the main run loop,
+        //    so a plain sleep here would leave the observer registered and silent.
+        match poll(Duration::ZERO) {
             Ok(true) => match read() {
                 Ok(TermEvent::Key(k)) => {
                     if k.modifiers.contains(KeyModifiers::CONTROL) && k.code == KeyCode::Char('c') {
@@ -201,8 +237,11 @@ fn event_loop<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> i32 {
                 break;
             }
         }
+        // Waiting happens here rather than inside `poll`, so the run loop gets
+        // the time instead of the terminal read. Together they pace the frame.
+        crate::player::notify::pump_run_loop(INPUT_WAIT.as_secs_f64());
 
-        // 3. The local tick: toast expiry and the poll-due flag.
+        // 4. The local tick: toast expiry and the poll-due flag.
         app = update(app, Event::Tick).app;
 
         if last_clock_tick.elapsed() >= Duration::from_secs(1) {
@@ -210,7 +249,7 @@ fn event_loop<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> i32 {
             app.clock = clock_string();
         }
 
-        // 4. A poll when one is due. `poll_due` is false while a command is in
+        // 5. A poll when one is due. `poll_due` is false while a command is in
         //    flight, so a poll never queues behind a write.
         let interval = if app.is_playing() {
             POLL_PLAYING
@@ -225,6 +264,7 @@ fn event_loop<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> i32 {
             });
         }
 
+        // 6. Draw.
         if terminal.draw(|f| draw(f, &app, &theme)).is_err() {
             break;
         }
@@ -277,6 +317,14 @@ fn run_one(
             p.command(&format!("set repeating to {on}"))
         }
         PlayerCommand::PlayUri(_) => Ok(()),
+        // Copying is not a Spotify write at all, so it never touches a player.
+        PlayerCommand::CopyLink(link) => {
+            // A pasteboard that refuses is not a Spotify failure, and the link is
+            // already in the toast, so there is nothing to report. Deliberately
+            // not an error: a failed copy must never look like a failed command.
+            let _ = crate::player::copy_to_clipboard(&link);
+            Ok(())
+        }
         PlayerCommand::Launch => launch_spotify(),
     }
 }

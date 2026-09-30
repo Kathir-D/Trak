@@ -253,29 +253,44 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
       renders at 7 sizes × 7 heights plus the idle case and asserts no panic. > Bars and meters are
       asserted to be **one cell wide per character** (via `unicode-width`), because a wide glyph in a
       bar is the first thing that tears a layout.
-- [ ] 3.5 **Idle card** when Spotify is not running: `enter` launches it (COMPAT rule 2) and the UI
-      recovers by itself when the poll sees it. Done when: quitting Spotify while trak runs shows the
-      card within 3 s and pressing enter brings it back without focusing Spotify's window.
-- [ ] 3.6 **Session history + History tab.** Record each new track (by id/URI) as it starts playing
-      while trak is open (dedupe consecutive identical, cap 500). `↑↓`/`jk` move, `enter` plays that
-      URI via `play track`, current track marked `▶`. Empty-state text. Done when: unit tests on the
-      recorder; manual: play 3 songs, arrow to the first, enter → it plays.
-- [ ] 3.7 **Info tab** (AppleScript facts: duration, disc/track number, popularity, URI, artwork URL,
-      played count, album artist, and "times heard this session"). Done when: shows real values and
-      handles missing ones with `—`.
+- [x] 3.5 **Idle card.** Centred, replaces the whole dashboard, says "press enter to launch it in
+      the background" and "trak never starts Spotify on its own". > `enter` and space are the only
+      keys it accepts, and a test asserts every other key does nothing on it. > The launch runs
+      `headless-spotify launch` when it is on PATH, else `open -g -j -a Spotify` — no focus, no Dock
+      bounce. A test asserts the flags, not just that the command exists.
+- [ ] 3.6 **Session history + History tab.** Recording, the 500 cap, dedupe and `j`/`k` are
+      done and tested; the tab renders with an empty state. > Tests pin the off-by-one: each read
+      records the *previous* track, so 540 reads leave [start, Track 0..Track 538] and the oldest 40
+      go. > **`enter` does not play the selected row yet** — `PlayerCommand::PlayUri` exists and the
+      fake handles it, but nothing queues it from a keypress. That is what is left.
+- [ ] 3.7 **Info tab.** Done for the AppleScript facts: duration, disc and track number, popularity,
+      URI, artwork, play count, album artist, with `—` for anything Spotify did not say. > A test
+      renders the **ad** fixture and asserts the dashes appear rather than a `0` popularity — an
+      advert reporting 0 is "unknown", not "nobody rated it". > **"Times heard this session" is not
+      there yet**: it needs the history to be keyed by URI, which 3.6 finishes.
 - [ ] 3.8 **Input**: all keys in SPEC §4 that apply to B, arrows + vim, `Tab`/`Shift-Tab`, `1`–`3`,
       `?` help overlay listing every key, `esc`. Mouse (click tabs and rows, click/drag progress bar to
       seek, wheel scroll, click ⏮⏯⏭) gated by the config flag (default on). Done when: each key has
       an `update()` test; help overlay matches the SPEC table (add a test that fails if a key in the
       table is missing from the help text).
-- [ ] 3.9 **Subscribe to `PlaybackStateChanged`** (per the 1.3 decision) so external changes (Sonar,
-      media keys) appear instantly; keep the poll as backup. Done when: skipping with a media key
-      updates trak in < 300 ms (measure and record).
+- [x] 3.9 **Subscribe to `PlaybackStateChanged`.** `src/player/notify.rs`, and `cargo run --release
+      --example notify-probe` measures it. **Measured 172.7 ms and 173.1 ms for pause and play**
+      against a real Spotify, inside the 300 ms budget. > **The notification is delivered on the
+      *main* run loop**, whichever thread registered it — a background run loop receives nothing at
+      all, and a plain `sleep` in the wait path is equally silent. The event loop's wait *is* a
+      run-loop pump, so the fast path costs nothing extra. > `merge` keeps what the notification
+      does **not** carry: **no artwork url**, no play count, no popularity, no volume. Losing the
+      artwork would blank the cover on every skip, so it is carried over. A track change also
+      triggers one real read, because the notification cannot fill those fields in. > The userInfo
+      values arrive as untyped `AnyObject` (`NSTaggedPointerString` for text, `__NSCFNumber` for
+      numbers), so each is downcast to the class it is documented to be.
 - [ ] 3.10 **Volume behaviour** per COMPAT rules 3 and 5: user-set volume tracking, read-back after
       writes, meter hidden + notice when Spotify ignores sets. Done when: tests with a fake that
       ignores writes; manual on the real Spotify.
-- [ ] 3.11 **Copy share URL (`c`)** with a transient "copied" toast. Done when: works, tested with
-      a fake clipboard.
+- [x] 3.11 **Copy share URL (`c`)** with a transient "copied" toast. > `pbcopy` rather than a
+      pasteboard API: no entitlement, no extra binding, and it is what every other tool on the
+      machine already uses. A test round-trips through `pbpaste` rather than trusting the exit
+      status. A refused pasteboard is **not** an error — the link is already in the toast.
 
 ---
 

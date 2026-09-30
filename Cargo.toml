@@ -16,9 +16,27 @@ clap = { version = "4", features = ["derive"] }
 thiserror = "2"
 ratatui = "0.29"
 crossterm = "0.28"
+# The PlaybackStateChanged observer (docs/APPLESCRIPT.md section 9). A plain
+# un-bundled CLI receives the notification, so no app bundle is needed; see
+# spikes/notify, which is the proof.
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = [
+    "NSNotification",
+    "NSString",
+    "NSValue",
+    "NSDictionary",
+    "NSArray",
+    "NSObject",
+] }
 # Spotify is read and written through AppleScript only, so osascript is the
 # transport. objc2-foundation carries the PlaybackStateChanged observer
 # (docs/APPLESCRIPT.md section 9): a plain CLI can receive it, no bundle needed.
+
+# A probe that measures the notification's arrival latency against a real
+# Spotify, because that number is TODO 3.9's done-when and cannot be asserted
+# in a unit test.
+[[example]]
+name = "notify-probe"
 
 [dev-dependencies]
 assert_cmd = "2"

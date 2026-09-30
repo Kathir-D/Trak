@@ -1,23 +1,18 @@
 //! trak — an interactive terminal UI for the Spotify desktop app on macOS.
 //!
-//! `trak` on its own opens the TUI. Every other subcommand is a one-shot
-//! command, kept compatible with shpotify (SPEC §9).
-
-mod cli;
-mod player;
-#[cfg(test)]
-mod testutil;
-mod tui;
+//! A thin shell: parse argv, then hand off to the library. Everything that could
+//! be tested lives there, so this file stays small enough to read at a glance.
 
 use std::io::IsTerminal as _;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
-use crate::cli::{EXIT_FAIL, EXIT_OK, EXIT_USAGE, Style};
-use crate::player::AppleScriptPlayer;
-use crate::player::Player;
+use trak::cli::{EXIT_FAIL, EXIT_OK, EXIT_USAGE, Style};
+use trak::player::AppleScriptPlayer;
+use trak::player::Player;
 
+/// Every shpotify-compatible command (SPEC §9).
 #[derive(Parser)]
 #[command(
     name = "trak",
@@ -134,31 +129,26 @@ fn main() -> ExitCode {
 }
 
 /// Both player backends behind one call site, so every command is written once.
-///
-/// `AppleScriptPlayer` is osascript; `FakePlayer` is the same trait in memory.
-/// The fake exists so the CLI can be tested with no Spotify and in CI
-/// (ARCHITECTURE, "Testing strategy"), which is what the hidden `--fake` flag
-/// selects.
 fn run(args: Cli) -> ExitCode {
     let mut player: AnyPlayer = if args.fake {
-        AnyPlayer::Fake(Box::new(crate::player::FakePlayer::playing()))
+        AnyPlayer::Fake(Box::new(trak::player::FakePlayer::playing()))
     } else {
         AnyPlayer::Real(Box::<AppleScriptPlayer>::default())
     };
 
     let code = match args.command {
         // Bare `trak` opens the TUI (SPEC §2).
-        None => tui::run(),
+        None => trak::tui::run(),
         Some(Command::Status { field }) => status(&player, args.json, style(args.plain), field),
         Some(Command::Play { uri: Some(uri) }) => play(&player, &uri),
-        Some(Command::Play { uri: None }) => cli::run_action(&mut player, "play"),
-        Some(Command::Pause) => cli::run_action(&mut player, "toggle"),
+        Some(Command::Play { uri: None }) => trak::cli::run_action(&mut player, "play"),
+        Some(Command::Pause) => trak::cli::run_action(&mut player, "toggle"),
         Some(Command::Stop) => stop(&mut player),
         Some(Command::Quit) => quit(&mut player),
-        Some(Command::Next) => cli::run_action(&mut player, "next"),
-        Some(Command::Prev) => cli::run_action(&mut player, "prev"),
+        Some(Command::Next) => trak::cli::run_action(&mut player, "next"),
+        Some(Command::Prev) => trak::cli::run_action(&mut player, "prev"),
         Some(Command::Replay) => replay(&mut player),
-        Some(Command::Pos { secs }) => cli::run_seek(&mut player, secs),
+        Some(Command::Pos { secs }) => trak::cli::run_seek(&mut player, secs),
         Some(Command::Vol { arg }) => vol(&mut player, arg, args.json),
         Some(Command::Toggle { what }) => mode(&mut player, what),
         Some(Command::Share { what }) => share(&player, what),
@@ -167,108 +157,8 @@ fn run(args: Cli) -> ExitCode {
     ExitCode::from(code as u8)
 }
 
-/// Either player, erased to the trait.
-///
-/// An enum rather than `Box<dyn Player>` because a boxed trait object would have
-/// to promise `Send`, which the CLI has no need for and the TUI worker does.
-enum AnyPlayer {
-    // Boxed because the fake is a RefCell-heavy struct and the real one holds
-    // nothing; without this the enum is as large as its biggest variant for no
-    // reason, since exactly one is ever live.
-    Real(Box<AppleScriptPlayer>),
-    Fake(Box<crate::player::FakePlayer>),
-}
-
-impl AnyPlayer {
-    fn real(&self) -> Option<&AppleScriptPlayer> {
-        match self {
-            Self::Real(p) => Some(p),
-            Self::Fake(_) => None,
-        }
-    }
-
-    fn repeat_mode(&self) -> crate::player::RepeatMode {
-        match self {
-            Self::Real(p) => p.repeat_mode(),
-            Self::Fake(_) => crate::player::RepeatMode::Off,
-        }
-    }
-
-    fn set_repeat_mode(&mut self, m: crate::player::RepeatMode) {
-        if let Self::Real(p) = self {
-            p.set_repeat_mode(m);
-        }
-    }
-}
-
-/// Delegates to whichever backend is active, so no call site has to care.
-///
-/// Written with method syntax so the boxed variants deref automatically.
-impl crate::player::Player for AnyPlayer {
-    fn state(&self) -> Result<crate::player::PlayerState, crate::player::PlayerError> {
-        match self {
-            Self::Real(p) => p.state(),
-            Self::Fake(p) => p.state(),
-        }
-    }
-    fn play(&self) -> Result<(), crate::player::PlayerError> {
-        match self {
-            Self::Real(p) => p.play(),
-            Self::Fake(p) => p.play(),
-        }
-    }
-    fn pause(&self) -> Result<(), crate::player::PlayerError> {
-        match self {
-            Self::Real(p) => p.pause(),
-            Self::Fake(p) => p.pause(),
-        }
-    }
-    fn toggle(&self) -> Result<(), crate::player::PlayerError> {
-        match self {
-            Self::Real(p) => p.toggle(),
-            Self::Fake(p) => p.toggle(),
-        }
-    }
-    fn next(&self) -> Result<(), crate::player::PlayerError> {
-        match self {
-            Self::Real(p) => p.next(),
-            Self::Fake(p) => p.next(),
-        }
-    }
-    fn previous(&self) -> Result<(), crate::player::PlayerError> {
-        match self {
-            Self::Real(p) => p.previous(),
-            Self::Fake(p) => p.previous(),
-        }
-    }
-    fn seek(&mut self, secs: f64) -> Result<(), crate::player::PlayerError> {
-        match self {
-            Self::Real(p) => p.seek(secs),
-            Self::Fake(p) => p.seek(secs),
-        }
-    }
-    fn set_volume(&mut self, v: u8) -> Result<(), crate::player::PlayerError> {
-        match self {
-            Self::Real(p) => p.set_volume(v),
-            Self::Fake(p) => p.set_volume(v),
-        }
-    }
-    fn play_uri(&self, uri: &str) -> Result<(), crate::player::PlayerError> {
-        match self {
-            Self::Real(p) => p.play_uri(uri),
-            Self::Fake(p) => p.play_uri(uri),
-        }
-    }
-    fn command(&self, script: &str) -> Result<(), crate::player::PlayerError> {
-        match self {
-            Self::Real(p) => p.command(script),
-            Self::Fake(p) => p.command(script),
-        }
-    }
-}
-
-fn fail(e: player::PlayerError) -> i32 {
-    let (msg, code) = cli::report(e);
+fn fail(e: trak::player::PlayerError) -> i32 {
+    let (msg, code) = trak::cli::report(e);
     eprintln!("{msg}");
     code
 }
@@ -291,9 +181,9 @@ fn status(player: &AnyPlayer, json: bool, style: Style, field: Option<Field>) ->
     }
 
     if json {
-        println!("{}", cli::render_json(&state));
+        println!("{}", trak::cli::render_json(&state));
     } else {
-        print!("{}", cli::render_status(&state, style));
+        print!("{}", trak::cli::render_status(&state, style));
     }
     EXIT_OK
 }
@@ -301,16 +191,16 @@ fn status(player: &AnyPlayer, json: bool, style: Style, field: Option<Field>) ->
 /// `trak play <something>`.
 ///
 /// A Spotify URI plays straight away through AppleScript, which works on the Free
-/// tier. A *name* needs search, which needs the Web API and therefore a Client
-/// ID. Without one this says how to get a Client ID and exits 2 rather than
-/// pretending to have played something (SPEC §9, TODO 7.12).
+/// tier. A *name* needs search, which needs a Client ID. Without one this says how
+/// to get a Client ID and exits 2 rather than pretending to have played something
+/// (SPEC §9, TODO 7.12).
 fn play(player: &AnyPlayer, target: &str) -> i32 {
     let t = target.trim();
     // A URI is validated here, at the one point a user-supplied string enters
     // trak, so every backend enforces the same rule and none can be bypassed.
     if t.starts_with("spotify:") || t.contains("://") {
-        if let Err(e) = crate::player::check_playable_uri(t) {
-            let (msg, code) = cli::report(e);
+        if let Err(e) = trak::player::check_playable_uri(t) {
+            let (msg, code) = trak::cli::report(e);
             eprintln!("{msg}");
             return code;
         }
@@ -320,8 +210,6 @@ fn play(player: &AnyPlayer, target: &str) -> i32 {
         };
     }
 
-    // Search half, not built yet (TODO 7.12). shpotify needed a Client ID for this
-    // too, so the behaviour is the same: explain, then exit 2.
     eprintln!(
         "`trak play \"{t}\"` needs to search Spotify, which needs a Client ID.\n\n\
          One-time setup:\n\
@@ -329,7 +217,7 @@ fn play(player: &AnyPlayer, target: &str) -> i32 {
            2. create an app, and add the redirect URI  http://127.0.0.1\n\
            3. run `trak config` and paste the Client ID\n\n\
          Until then you can play a URI directly:\n\
-           trak play uri spotify:track:6HacgXCExkzS552ILfJTXu"
+           trak play spotify:track:6HacgXCExkzS552ILfJTXu"
     );
     EXIT_USAGE
 }
@@ -339,7 +227,7 @@ fn play(player: &AnyPlayer, target: &str) -> i32 {
 /// say so (docs/APPLESCRIPT.md §6).
 fn stop(player: &mut AnyPlayer) -> i32 {
     match player.state() {
-        Ok(s) if s.playback == player::PlaybackState::Playing => {
+        Ok(s) if s.playback == trak::player::PlaybackState::Playing => {
             println!("Pausing Spotify.");
             match player.pause() {
                 Ok(()) => EXIT_OK,
@@ -356,7 +244,7 @@ fn stop(player: &mut AnyPlayer) -> i32 {
 
 /// `quit`. A write, so it only ever runs because the user asked (COMPAT rule 3).
 fn quit(player: &mut AnyPlayer) -> i32 {
-    if player.real().is_none() {
+    if !player.is_real() {
         eprintln!("the fake player cannot quit Spotify");
         return EXIT_USAGE;
     }
@@ -375,7 +263,7 @@ fn replay(player: &mut AnyPlayer) -> i32 {
             Ok(()) => {
                 // shpotify's `replay` restarts without changing play state, so a
                 // paused track stays paused.
-                if s.playback == player::PlaybackState::Paused {
+                if s.playback == trak::player::PlaybackState::Paused {
                     let _ = player.pause();
                 }
                 EXIT_OK
@@ -399,8 +287,8 @@ fn vol(player: &mut AnyPlayer, arg: Option<VolArg>, json: bool) -> i32 {
             }
             Err(e) => fail(e),
         },
-        Some(VolArg::Up) => cli::run_volume(player, VOLUME_STEP as i16, json),
-        Some(VolArg::Down) => cli::run_volume(player, -(VOLUME_STEP as i16), json),
+        Some(VolArg::Up) => trak::cli::run_volume(player, VOLUME_STEP as i16, json),
+        Some(VolArg::Down) => trak::cli::run_volume(player, -(VOLUME_STEP as i16), json),
     }
 }
 
@@ -413,11 +301,10 @@ fn mode(player: &mut AnyPlayer, what: Mode) -> i32 {
         Mode::Shuffle => format!("set shuffling to {}", !state.shuffling_enabled),
         // AppleScript cannot read back "repeat one" as distinct from "repeat all",
         // so trak cycles its own remembered mode and writes the matching boolean.
-        // Without the remembered mode the `r` key would never come back round.
         Mode::Repeat => {
             let next = player.repeat_mode().next();
             player.set_repeat_mode(next);
-            format!("set repeating to {}", next != player::RepeatMode::Off)
+            format!("set repeating to {}", next != trak::player::RepeatMode::Off)
         }
     };
     // The same guarded path every other write uses, so the "never launch
@@ -446,15 +333,104 @@ fn share(player: &AnyPlayer, what: ShareArg) -> i32 {
     };
     println!("{link}");
     // Copying needs a pasteboard write; failures are not worth failing over.
-    if let Ok(mut pbcopy) = std::process::Command::new("pbcopy")
-        .stdin(std::process::Stdio::piped())
-        .spawn()
-    {
+    if trak::player::copy_to_clipboard(&link) {
         use std::io::Write;
-        let _ = pbcopy
-            .stdin
-            .take()
-            .map(|mut s| s.write_all(link.as_bytes()));
+        let _ = std::io::stdout().flush();
     }
     EXIT_OK
+}
+
+/// Either player, erased to the trait.
+///
+/// An enum rather than `Box<dyn Player>` because a boxed trait object would have
+/// to promise `Send`, which the CLI has no need for and the TUI worker does.
+enum AnyPlayer {
+    // Boxed because the fake is a RefCell-heavy struct and the real one holds
+    // nothing; without this the enum is as large as its biggest variant for no
+    // reason, since exactly one is ever live.
+    Real(Box<AppleScriptPlayer>),
+    Fake(Box<trak::player::FakePlayer>),
+}
+
+impl AnyPlayer {
+    fn is_real(&self) -> bool {
+        matches!(self, Self::Real(_))
+    }
+
+    fn repeat_mode(&self) -> trak::player::RepeatMode {
+        match self {
+            Self::Real(p) => p.repeat_mode(),
+            Self::Fake(_) => trak::player::RepeatMode::Off,
+        }
+    }
+
+    fn set_repeat_mode(&mut self, m: trak::player::RepeatMode) {
+        if let Self::Real(p) = self {
+            p.set_repeat_mode(m);
+        }
+    }
+}
+
+/// Delegates to whichever backend is active, so no call site has to care.
+impl Player for AnyPlayer {
+    fn state(&self) -> Result<trak::player::PlayerState, trak::player::PlayerError> {
+        match self {
+            Self::Real(p) => p.state(),
+            Self::Fake(p) => p.state(),
+        }
+    }
+    fn play(&self) -> Result<(), trak::player::PlayerError> {
+        match self {
+            Self::Real(p) => p.play(),
+            Self::Fake(p) => p.play(),
+        }
+    }
+    fn pause(&self) -> Result<(), trak::player::PlayerError> {
+        match self {
+            Self::Real(p) => p.pause(),
+            Self::Fake(p) => p.pause(),
+        }
+    }
+    fn toggle(&self) -> Result<(), trak::player::PlayerError> {
+        match self {
+            Self::Real(p) => p.toggle(),
+            Self::Fake(p) => p.toggle(),
+        }
+    }
+    fn next(&self) -> Result<(), trak::player::PlayerError> {
+        match self {
+            Self::Real(p) => p.next(),
+            Self::Fake(p) => p.next(),
+        }
+    }
+    fn previous(&self) -> Result<(), trak::player::PlayerError> {
+        match self {
+            Self::Real(p) => p.previous(),
+            Self::Fake(p) => p.previous(),
+        }
+    }
+    fn seek(&mut self, secs: f64) -> Result<(), trak::player::PlayerError> {
+        match self {
+            Self::Real(p) => p.seek(secs),
+            Self::Fake(p) => p.seek(secs),
+        }
+    }
+    fn set_volume(&mut self, v: u8) -> Result<(), trak::player::PlayerError> {
+        match self {
+            Self::Real(p) => p.set_volume(v),
+            Self::Fake(p) => p.set_volume(v),
+        }
+    }
+    fn play_uri(&self, uri: &str) -> Result<(), trak::player::PlayerError> {
+        match self {
+            Self::Real(p) => p.play_uri(uri),
+            Self::Fake(p) => p.play_uri(uri),
+        }
+    }
+    fn command(&self, script: &str) -> Result<(), trak::player::PlayerError> {
+        match self {
+            Self::Real(p) => p.command(script),
+            Self::Fake(p) => p.command(script),
+        }
+    }
 }

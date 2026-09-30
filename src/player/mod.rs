@@ -7,9 +7,10 @@
 pub mod actions;
 pub mod applescript;
 pub mod fake;
+pub mod notify;
 pub mod parse;
 
-pub use actions::PlayerCommand;
+pub use actions::{PlayerCommand, copy_to_clipboard};
 pub use applescript::AppleScriptPlayer;
 pub use fake::volume_write_landed;
 #[allow(

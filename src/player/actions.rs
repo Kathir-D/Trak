@@ -116,7 +116,11 @@ pub enum PlayerCommand {
     SetVolume(u8),
     ToggleShuffle,
     CycleRepeat,
+    /// Play a URI. `enter` on a history row (TODO 3.6) and the CLI both need it.
+    #[allow(dead_code, reason = "wired up with the history list, TODO 3.6")]
     PlayUri(String),
+    /// Put a link on the pasteboard. Not a Spotify write.
+    CopyLink(String),
     /// The idle card's enter. The only launch trak ever performs (COMPAT rule 2).
     Launch,
 }
@@ -151,6 +155,34 @@ pub struct Worker {
     /// Set while a command is in flight, so a held-down key does not queue ten
     /// of them.
     busy: Arc<AtomicBool>,
+}
+
+/// Put text on the macOS pasteboard.
+///
+/// `pbcopy` rather than a pasteboard API: it needs no entitlement, no framework
+/// binding, and it is what every other tool on the machine already uses. A
+/// failure is not worth surfacing as an error -- the link has already been
+/// printed -- so it is reported as a bool and the caller carries on.
+pub fn copy_to_clipboard(text: &str) -> bool {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let Ok(mut child) = Command::new("pbcopy")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    if let Some(mut stdin) = child.stdin.take()
+        && stdin.write_all(text.as_bytes()).is_err()
+    {
+        let _ = child.kill();
+        return false;
+    }
+    // Dropping stdin closes the pipe, which is what makes pbcopy commit.
+    child.wait().map(|s| s.success()).unwrap_or(false)
 }
 
 /// A unit of work for the worker, boxed so one channel carries every command.
@@ -423,6 +455,21 @@ mod tests {
         let n = ran.load(Ordering::Acquire);
         assert!(n >= 1, "at least one command must run");
         assert!(n < 50, "commands must be coalesced, but {n} of 50 ran");
+    }
+
+    #[test]
+    fn the_clipboard_helper_actually_copies() {
+        // pbcopy is present on every macOS, so this is safe in CI.
+        let marker = format!("trak-clipboard-test-{}", std::process::id());
+        assert!(
+            copy_to_clipboard(&marker),
+            "pbcopy should have accepted the text"
+        );
+        // Read it back to be sure, rather than trusting the exit status.
+        let out = std::process::Command::new("pbpaste")
+            .output()
+            .expect("pbpaste");
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), marker);
     }
 
     #[test]

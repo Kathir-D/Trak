@@ -347,14 +347,16 @@ fn handle_key(app: &mut App, c: char, commands: &mut Vec<PlayerCommand>) {
             PlayerCommand::VolumeStep(-app.settings.volume_step),
         ),
         'c' => {
-            // Copy the share URL (TODO 3.11). The clipboard write happens on the
-            // worker, which has the link.
+            // Copy the share URL (TODO 3.11). The clipboard write goes to the
+            // worker so a slow pasteboard cannot block the render loop.
             if let Some(uri) = app.track().and_then(|t| t.uri.clone()) {
                 let id = uri.rsplit(':').next().unwrap_or_default();
                 let link = format!("https://open.spotify.com/track/{id}");
-                commands.push(PlayerCommand::PlayUri(String::new()));
-                commands.pop();
                 app.toast(format!("copied {link}"));
+                if app.busy.is_none() {
+                    app.busy = Some(PlayerCommand::CopyLink(link.clone()));
+                    commands.push(PlayerCommand::CopyLink(link));
+                }
             }
         }
         _ => {}
