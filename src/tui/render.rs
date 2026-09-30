@@ -1160,7 +1160,7 @@ mod tests {
         let buf = term.backend().buffer().clone();
         let rows: Vec<String> = (0..popup.height)
             .map(|i| {
-                let y = popup.y + 1 + i as u16;
+                let y = popup.y + 1 + i;
                 (popup.x + 1..popup.x + 1 + HELP_KEY_WIDTH as u16)
                     .map(|x| buf[(x, y)].symbol().to_string())
                     .collect::<String>()
