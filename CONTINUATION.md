@@ -22,35 +22,48 @@ deliberately did **not** do and why.
 
 ---
 
-## HOW TO WORK (the owner's instructions, repeated verbatim in intent)
+## ⚠ HOW TO WORK — the owner's standing instructions (highest priority)
 
-- **Use subagents liberally** — the way Phase 6 was done. The project is big and
-  the modules divide cleanly. Give each subagent a **strict file boundary** and
-  tell it not to touch anything outside it. That has been the single biggest
-  source of wasted work, and the single biggest source of speed.
-- **Do not idle while a subagent runs.** Work in parallel on the next thing in the
-  TODO, on files the subagent does not own. Idle time is wasted time.
-- **Parallel agents share one working tree**, so a subagent editing a file you are
-  editing will collide with you. Two options, both used successfully: give it
-  *disjoint files*, or give it its own `git worktree` (see "Worktrees" below) and
-  merge its branch when it reports done.
-- **Commit and push constantly.** After every coherent piece:
-  `git add -A && git commit && git push`. Save progress as you go. Push to `main`
-  directly unless a branch is part of the plan.
-- **Do not stop to ask questions.** You are an unattended agent with full
-  permissions. The *only* reason to stop and talk to the owner is reaching the end
-  of `TODO.md`. Everything marked `[owner]` — a browser login, a paid step, a
-  macOS permission click, a GitHub secret — you leave untouched and list in your
-  final message.
-- **Follow `TODO.md` in order**, top to bottom, first unchecked task whose `Needs`
-  are met. Do not reorder for convenience.
-- **Test extensively and re-read your own diff.** Look over your changes often.
-  The test suite here is the safety net and it has caught real bugs that "looked
-  fine" — see "Bugs the tests keep finding" below.
-- **Context management:** if you are compacted or your context fills, re-read
-  `git log --oneline -20`, `git status`, and the ticked notes in `TODO.md` rather
-  than fishing through history. Everything that matters is written down in the
-  repo — which is the point of the note on every ticked task.
+These are **not** suggestions. They outrank convenience, tidiness, and your own preferences about
+how to sequence a session. The owner has restated each of them repeatedly, across sessions. They are
+also written into `AGENTS.md` under "⚠ Working style — the owner's standing instructions", so they
+survive without this file; read them there too.
+
+1. **Work through `TODO.md` in order, top to bottom.** Take the first unchecked task whose `Needs`
+   are met. The order in that file *is* the plan; do not reorder it because something else looks more
+   interesting or easier. When you reach the very end of `TODO.md`, that is the **only** moment you
+   stop and talk to the owner.
+2. **Use subagents constantly.** The project is big and the modules divide cleanly. Many focused
+   subagents, each with a **strict file boundary** ("you own these files, touch nothing else"), the
+   way Phase 6 (6.1–6.4) was done. Parallel agents share one working tree, so overlapping files
+   collide: either hand each subagent disjoint files, or give each its own `git worktree` and merge
+   the branch when it reports done.
+3. **Never idle while a subagent is running.** Start the next piece of work in parallel, on files
+   that subagent does not own. Sitting and waiting is wasted time.
+4. **Commit and push constantly.** After every coherent piece of work:
+   `git add -A && git commit && git push`. Saving progress is part of the task, not a finishing step
+   — a context loss or a crash must never cost more than the last few minutes of work. Never leave a
+   session's worth of work uncommitted.
+5. **Do not stop to ask the owner anything.** You are an unattended agent with full permissions on
+   their machine. Finish the task. The one exception is the end of `TODO.md`; also list the `[owner]`
+   items you could not do (a browser login, a paid step, a macOS permission click, a GitHub secret)
+   in your final message instead of asking for them mid-flight.
+6. **Test extensively, and re-read your own work.** Run the whole suite, not just the tests you
+   added. Read your diff before you commit, and read it again after. Look for the failure classes
+   listed under "Things that will bite you" — they are the ones that have actually bitten this
+   codebase, and every one of them got through to a "looks fine" moment first.
+7. **You may be continuing someone else's mid-task work.** The previous agent stalled mid-Phase 6
+   and left the repo uncompilable; the session after it found the cause by reading the diff, not by
+   being told. Check `git status`, `git log --oneline -20`, and whether the suite compiles before
+   assuming the tree is sane. If you find broken work, finish or revert it deliberately — never
+   assume a half-edited file is intentional.
+8. **Manage your context deliberately.** If you are compacted or your context fills, do **not** fish
+   through history. Re-read, in this order: `git log --oneline -20`, `git status`, the ticked notes
+   in `TODO.md`, `AGENTS.md`, then this file. Everything worth keeping is written into the repo on
+   purpose — that is why every ticked task carries a note and why this file exists. When you stop at
+   the end of the TODO, **rewrite `CONTINUATION.md`** so the next agent inherits the plan, the
+   decisions and the traps instead of rediscovering them: the next task, every unmerged worktree and
+   its branch, the audit findings, and the traps.
 
 ---
 

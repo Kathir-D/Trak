@@ -3,9 +3,53 @@
 Instructions for any coding agent (Claude Code, opencode, Codex, ...) working in this repo. You are
 assumed to have **no prior context**. Read this file fully, then follow "Start here".
 
+---
+
+## ⚠ Working style — the owner's standing instructions (highest priority)
+
+These are not suggestions and they outrank convenience, tidiness, and your own preferences about
+how to sequence a session. The owner has restated each of them repeatedly, across sessions.
+
+1. **Work through `TODO.md` in order, top to bottom.** Take the first unchecked task whose `Needs`
+   are met. The order in that file *is* the plan; do not reorder it because something else looks
+   more interesting or easier. When you reach the very end of `TODO.md`, that is the only moment
+   you stop and talk to the owner.
+2. **Use subagents constantly.** This is a big project and the modules divide cleanly. The way to
+   get through it is many focused subagents, each with a **strict file boundary** ("you own these
+   files, touch nothing else"), the same way Phase 6 (6.1–6.4) was done. Parallel agents share one
+   working tree, so overlapping files collide: either hand each subagent disjoint files, or give
+   each its own `git worktree` and merge the branch when it reports done.
+3. **Never idle while a subagent is running.** Start the next piece of work in parallel, on files
+   that subagent does not own. Sitting and waiting is wasted time.
+4. **Commit and push constantly.** After every coherent piece of work:
+   `git add -A && git commit && git push`. Treat saving progress as part of the task, not as a
+   finishing step — a context loss or a crash must never cost more than the last few minutes of
+   work. Never leave a session's worth of work uncommitted.
+5. **Do not stop to ask the owner anything.** You are an unattended agent with full permissions on
+   their machine. Finish the task. The one exception is the end of `TODO.md`; also list the `[owner]`
+   items you could not do (a browser login, a paid step, a macOS permission click, a GitHub secret)
+   in your final message instead of asking for them mid-flight.
+6. **Test extensively, and re-read your own work.** Run the whole suite, not just the tests you
+   added. Read your diff before you commit, and read it again after. Look for the failure classes
+   listed under "Conventions" — they are the ones that have actually bitten this codebase, and
+   every one of them got through to a "looks fine" moment first.
+7. **Be aware you may be continuing someone else's mid-task work.** Check `git status`,
+   `git log --oneline -20`, and whether a test suite compiles before assuming the tree is sane. A
+   previous agent once stalled mid-task and left the repo uncompilable; the next session found the
+   cause by reading the diff, not by being told. If you find broken work, finish or revert it
+   deliberately — never assume a half-edited file is intentional.
+8. **Manage your own context deliberately.** If you are compacted or your context fills, do not fish
+   through history: re-read `git log --oneline -20`, `git status`, the ticked notes in `TODO.md`,
+   and this file. Everything worth keeping is written into the repo on purpose — that is why every
+   ticked task carries a note and why `CONTINUATION.md` exists. When you stop at the end of the
+   TODO, rewrite `CONTINUATION.md` so the next agent inherits the plan, the decisions and the traps
+   rather than rediscovering them.
+
+---
+
 ## What this project is
 
-`trak` is a Rust + ratatui terminal UI and CLI that controls the **official Spotify desktop app on
+Trak is a Rust + ratatui terminal UI and CLI that controls the **official Spotify desktop app on
 macOS** (through AppleScript, so the Free tier works with zero setup) and, optionally, the Spotify
 Web API (with a user-supplied Client ID) for search, playlists, queue and library. It is a Rust
 rewrite and expansion of [shpotify](https://github.com/hnarayanan/shpotify) (MIT), keeps all of its
@@ -16,8 +60,11 @@ It is one piece of the owner's music setup, alongside two sibling projects in `.
 **headless-spotify** (hides Spotify from the Dock) and **Sonar** (menu-bar skip/prev + auto-pause).
 Trak must coexist with both. That contract is `docs/COMPAT.md` and is non-negotiable.
 
-**Status:** pre-alpha. Only a scaffold exists (`src/main.rs` prints `--version`). Everything else is
-planned in `TODO.md`.
+**Status:** pre-alpha, and further along than it looks. Phases 1–6 are done: the player layer and
+the full shpotify CLI, the TUI, album art and the accent extracted from it, config and the settings
+screen, and synced lyrics with a full-screen page. Phase 7 (the Web API, "Version A") has its client,
+token store and tabs built but is not finished. `TODO.md` is the truth, and every ticked box carries
+a note about the decisions behind it — read those notes, not just the boxes.
 
 ## Start here (read in this order)
 
