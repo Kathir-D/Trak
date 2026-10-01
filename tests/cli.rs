@@ -15,6 +15,16 @@ fn trak() -> Command {
     c
 }
 
+/// A `trak` invocation with the fake player *and* the fake library: the state
+/// `trak play <name>` needs, a machine with something to search. `--fake` on
+/// its own deliberately still has no library — that is the state of a machine
+/// with no Client ID, and the setup path has to stay testable too.
+fn trak_with_library() -> Command {
+    let mut c = trak();
+    c.arg("--fake-library");
+    c
+}
+
 #[test]
 fn version_works_without_a_player() {
     trak().arg("--version").assert().success();
@@ -29,6 +39,18 @@ fn help_lists_every_shpotify_command() {
         "toggle", "share",
     ] {
         assert!(s.contains(cmd), "--help is missing `{cmd}`:\n{s}");
+    }
+
+    // SPEC §9's qualified play spellings, or a user who read the spec cannot
+    // find them.
+    let play = trak()
+        .arg("play")
+        .arg("--help")
+        .output()
+        .expect("run play --help");
+    let p = String::from_utf8_lossy(&play.stdout);
+    for sub in ["album", "artist", "list", "uri"] {
+        assert!(p.contains(sub), "play --help is missing `{sub}`:\n{p}");
     }
 }
 
@@ -254,15 +276,217 @@ fn play_without_an_argument_resumes() {
     trak().arg("play").assert().success();
 }
 
-/// TODO 2.7's search half needs a Client ID, so without one it must say how to
-/// get one and exit 2 rather than pretending to work.
+/// A name needs search, and `--fake` alone still means no library — the state
+/// of every machine with no Client ID — so it must say how to get one and exit
+/// 2 rather than pretending to have played something. The other half of the
+/// behaviour, a name with a library to search, is pinned by the tests below.
+///
+/// `XDG_CONFIG_HOME` is pinned to an empty directory: the real library half of
+/// `play` reads the token file wherever the user's variables say it is, and a
+/// test must not depend on whether this machine has logged in.
 #[test]
 fn a_bare_name_is_a_setup_error_not_a_silent_nothing() {
+    let xdg = tempdir().join("xdg-empty");
+    std::fs::create_dir_all(&xdg).unwrap();
     trak()
+        .env("XDG_CONFIG_HOME", &xdg)
         .args(["play", "some song name"])
         .assert()
         .code(2)
         .stderr(predicate::str::contains("Client ID"));
+}
+
+/// The setup message quotes the command back, and each group has to quote its
+/// own — telling someone who asked for an album that `trak play "x"` needs a
+/// Client ID reads as though the group had been dropped on the floor.
+#[test]
+fn the_setup_message_quotes_the_spelling_that_was_typed() {
+    let xdg = tempdir().join("xdg-empty-groups");
+    std::fs::create_dir_all(&xdg).unwrap();
+    for (args, quoted) in [
+        (vec!["play", "x"], "trak play \"x\""),
+        (vec!["play", "album", "x"], "trak play album \"x\""),
+        (vec!["play", "artist", "x"], "trak play artist \"x\""),
+        (vec!["play", "list", "x"], "trak play list \"x\""),
+    ] {
+        trak()
+            .env("XDG_CONFIG_HOME", &xdg)
+            .args(&args)
+            .assert()
+            .code(2)
+            .stderr(predicate::str::contains(quoted));
+    }
+}
+
+/// A token file nobody could use is the pre-setup state too — the store refuses
+/// a loose mode without reading it and a file it cannot parse without using it
+/// — and both must land in the same setup message, not a crash and not a
+/// search. This is the "fail soft" rule for the one command that reads the
+/// token file.
+#[test]
+fn an_unusable_token_file_is_still_the_setup_state() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let xdg = tempdir().join("xdg-unusable");
+    std::fs::create_dir_all(xdg.join("trak")).unwrap();
+    let token = xdg.join("trak").join("token.json");
+
+    // World-readable: refused on mode alone, bytes never read.
+    std::fs::write(&token, "irrelevant").unwrap();
+    let mut loose = std::fs::metadata(&token).unwrap().permissions();
+    loose.set_mode(0o644);
+    std::fs::set_permissions(&token, loose).unwrap();
+    trak()
+        .env("XDG_CONFIG_HOME", &xdg)
+        .args(["play", "some song name"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("Client ID"));
+
+    // Owner-only but not JSON: read, refused, left on disk.
+    std::fs::write(&token, "{\"not\":\"a token\"}").unwrap();
+    let mut tight = std::fs::metadata(&token).unwrap().permissions();
+    tight.set_mode(0o600);
+    std::fs::set_permissions(&token, tight).unwrap();
+    trak()
+        .env("XDG_CONFIG_HOME", &xdg)
+        .args(["play", "some song name"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("Client ID"));
+}
+
+/// TODO 7.12: a bare name searches tracks, plays the best match and says what
+/// it chose — the one play spelling that is not silent, because "the best
+/// match" is a decision the user has to be able to see.
+#[test]
+fn play_a_name_searches_and_prints_what_it_chose() {
+    trak_with_library()
+        .args(["play", "teardrop"])
+        .assert()
+        .success()
+        .stdout("Playing Teardrop — Massive Attack (Mezzanine)\n");
+}
+
+/// The query names both a song and the album it sits on; the track search must
+/// prefer the song actually named that, which sits behind two results that only
+/// match through their album.
+#[test]
+fn play_a_name_prefers_the_row_named_after_the_query() {
+    trak_with_library()
+        .args(["play", "mezzanine"])
+        .assert()
+        .success()
+        .stdout("Playing Mezzanine — Massive Attack (Mezzanine)\n");
+}
+
+/// shpotify joined its arguments into one phrase, so an unquoted multi-word
+/// search is one query, not a usage error.
+#[test]
+fn play_joins_several_words_into_one_search() {
+    trak_with_library()
+        .args(["play", "massive", "attack"])
+        .assert()
+        .success()
+        .stdout(predicate::str::starts_with("Playing Teardrop"));
+}
+
+/// `album|artist|list` search their own group (SPEC §9) and print the row's
+/// one-line form, which is the same line the tabs draw.
+#[test]
+fn play_album_artist_and_list_search_their_own_group() {
+    trak_with_library()
+        .args(["play", "album", "mezzanine"])
+        .assert()
+        .success()
+        .stdout("Playing Mezzanine — Massive Attack (1998)\n");
+    trak_with_library()
+        .args(["play", "artist", "massive attack"])
+        .assert()
+        .success()
+        .stdout("Playing Massive Attack\n");
+    trak_with_library()
+        .args(["play", "list", "mass"])
+        .assert()
+        .success()
+        .stdout("Playing Massive Attack on Repeat · 3 tracks\n");
+}
+
+/// A miss is a clean failure with shpotify's own sentence, not a play of
+/// whatever happened to be nearby.
+#[test]
+fn play_reports_a_miss_as_a_failure() {
+    trak_with_library()
+        .args(["play", "nothing by this name"])
+        .assert()
+        .code(1)
+        .stderr("No results when searching for \"nothing by this name\"\n");
+    // And the qualified spellings miss the same way, not with a different
+    // message per group.
+    trak_with_library()
+        .args(["play", "artist", "nobody of this name"])
+        .assert()
+        .code(1)
+        .stderr("No results when searching for \"nobody of this name\"\n");
+}
+
+/// A URI never becomes a search term just because a library exists: both the
+/// bare spelling and shpotify's `uri` one play straight through, silently, the
+/// way the README documents.
+#[test]
+fn a_uri_still_bypasses_search() {
+    trak_with_library()
+        .args(["play", "spotify:track:6HacgXCExkzS552ILfJTXu"])
+        .assert()
+        .success()
+        .stdout("");
+    trak_with_library()
+        .args(["play", "uri", "spotify:album:5nMdc39z78kifAc5WXv9Yj"])
+        .assert()
+        .success()
+        .stdout("");
+}
+
+/// A group with no name is a usage error, exit 2, the code every clap usage
+/// error already exits with.
+#[test]
+fn a_group_with_no_name_is_a_usage_error() {
+    trak().args(["play", "album"]).assert().code(2);
+    trak().args(["play", "list"]).assert().code(2);
+}
+
+/// The whole chain against the real player path: the search finds the album,
+/// and the URI AppleScript receives is the album's context URI, not a track's.
+/// The stub records the one script it is fed, which is the only place the URI
+/// is visible from outside the process.
+#[test]
+fn play_album_puts_the_album_uri_in_the_applescript() {
+    let stub = tempdir().join("osascript-recorded");
+    let recorded = tempdir().join("recorded-play-album");
+    std::fs::write(
+        &stub,
+        format!(
+            "#!/bin/sh\ncat > '{}'\nprintf 'ok\\n'\n",
+            recorded.display()
+        ),
+    )
+    .unwrap();
+    make_executable(&stub);
+
+    let mut c = Command::cargo_bin("trak").unwrap();
+    c.env("TRAK_OSASCRIPT", &stub);
+    // The real player with the fake library: search without a network, play
+    // through the same script path production uses.
+    c.arg("--fake-library")
+        .args(["play", "album", "mezzanine"])
+        .assert()
+        .success()
+        .stdout("Playing Mezzanine — Massive Attack (1998)\n");
+
+    let script = std::fs::read_to_string(&recorded).unwrap();
+    assert!(
+        script.contains(r#"play track "spotify:album:5nMdc39z78kifAc5WXv9Yj""#),
+        "the album URI never reached AppleScript:\n{script}"
+    );
 }
 
 /// Bare `trak` is the TUI, and a TUI cannot run on a pipe. It must say so and
