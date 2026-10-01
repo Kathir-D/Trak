@@ -32,7 +32,7 @@ Legend: `[ ]` todo · `[x]` done · **A/B** = with / without a Spotify Client ID
 | R3 | ~~Keychain items created by an ad-hoc-signed binary can re-prompt after every upgrade~~ **CONFIRMED AND WORSE (1.8):** a keychain item is readable only by the exact binary that created it. A *new* identity raises a dialog and blocks (first encounter); a repeat of the *same* identity errors immediately from cache. Every release is a new identity, so trak always gets the blocking case — a **hang, not a prompt** | **Resolved: use a `0600` file** (`docs/KEYCHAIN.md`). SPEC §2 and §6 updated. 7.4 drops the second backend |
 | R4 | ~~Spotify Web API developer-mode rules changed recently~~ **CONFIRMED AND WORSE THAN EXPECTED (1.7):** `localhost` redirect URIs are **banned** (use `http://127.0.0.1`, no port); Premium now required of the **app owner**; user cap **5**; all batch "get several" endpoints, `/markets` and **`/artists/{id}/top-tracks` removed**; `Track.popularity` removed; search `limit` max **10**; refresh tokens expire in **6 months**; no numeric rate limits are published | All recorded with citations in `docs/WEB-API.md`; SPEC §6 and this phase rewritten to match. Still verify playlist `/items` against a real dev-mode login |
 | R5 | ~~cmux may not pass the Kitty image protocol through~~ **REFUTED (1.4):** cmux speaks Kitty graphics at full fidelity, and `Picker::from_query_stdio()` detects it unattended | `docs/TERMINALS.md` + `docs/images/spike-1.4-cmux.png`. Half-blocks remains the Terminal.app path and must still look good |
-| R6 | `cidre` API for process taps is unstable / under-documented | **MATERIALISED (1.5):** every *process-specific* tap description fails with `!obj` / `kAudioHardwareBadObjectError` (560947818) — both `*MixdownOfProcesses:` and `*GlobalTapButExcludeProcesses:` with a non-empty list, at every NSNumber width. An **empty** list is accepted. So a global tap works and "tap Spotify only" does not | **Decision in `docs/AUDIO-TAP.md` §3c: bypass `cidre` for the 4 ObjC initialisers with `objc2` (~60 lines) to find out whether the fault is the binding or the OS; ship simulated as the default meanwhile** |
+| R6 | ~~`cidre` API for process taps is unstable / under-documented~~ **RESOLVED (1.5): the fault was the missing pid→AudioObjectID translation, not the OS or the binding.** `CATapDescription.h` documents that the array holds **AudioObjectIDs**, not pids; translating via `kAudioHardwarePropertyTranslatePIDToProcessObject` (`'id2p'`) makes every process-specific shape work. End-to-end capture delivered real Spotify audio from Spotify's process only, clean teardown | `docs/AUDIO-TAP.md` §3b/§3c; spike `spikes/tap/src/bin/tap-objc2.rs`. **8.3 is unblocked** |
 | R7 | Spotify hiding is blocked on ≥ 1.3.1, so headless behaviour cannot be tested today | COMPAT test matrix row stays unverified until it works; do not fake it |
 | R8 | Homebrew audit / policy rejects the formula | `brew audit --strict` in CI and before every release (9.5) |
 
@@ -96,28 +96,28 @@ Each spike ends with facts written to a doc, not just working code. Throwaway co
       `(10,20)` in Terminal.app — and the art layout must use it. > **Trap:** `new_protocol()`
       *succeeds* for all four protocols in both terminals, so `is_ok()` proves nothing about
       rendering; 4.1's "done when" cannot be met by a unit test alone.
-- [ ] 1.5 **Process-tap visualizer spike (R1, R6).** Spike is `spikes/tap`; write-up is
-      `docs/AUDIO-TAP.md` §3. **Left unticked because "tap Spotify's process only" does not work yet**,
-      but most of the task is now answered. > **R1 REFUTED — no permission prompt at all.** A global
+- [x] 1.5 **Process-tap visualizer spike (R1, R6).** Spike is `spikes/tap`; write-up is
+      `docs/AUDIO-TAP.md` §3. > **R1 REFUTED — no permission prompt at all.** A global
       tap from an un-bundled `cargo run` binary delivered real audio (48 kHz, 1 ch, 32-bit float,
       958 976 samples in 20 s ≈ 47 950/s, -17.57 dBFS RMS, peak 0.383) with **no System Audio
       Recording click**, on a machine whose TCC had no audio grant at all. Clean teardown, no
-      leftover device. > **The real blocker (R6): every process-specific tap description fails** with
-      `!obj` / `kAudioHardwareBadObjectError` (560947818, 0x216F626A) — `initMonoMixdownOfProcesses:`,
-      `initStereoMixdownOfProcesses:`, and `initMonoGlobalTapButExcludeProcesses:` with a non-empty
-      pid list, **at every NSNumber width (f64/i32/i64/u32)**. An *empty* list is accepted. It is
-      **not** `kAudioDevicePermissionsError` (`!hog`), so there is nothing for the owner to grant.
-      > **Decision (`docs/AUDIO-TAP.md` §3c): bypass `cidre` for the four ObjC initialisers using
-      `objc2` (~60 lines) to find out whether the fault is cidre's binding or macOS; keep simulated
-      as the default until then. Do NOT fall back to a global tap — it captures all system audio,
-      including Sonar's, which is what COMPAT rule 3 is about.**
-      > **Two traps carried into 8.3/8.5: (a) the tap is 48 000 Hz, so 1.6's sample rate is corrected
-      and 8.3 must read `asbd.sample_rate` rather than hard-code; (b) `ca::device_start` returns a
-      `StartedDevice` that must be kept alive — dropping it early stops the device and looks exactly
-      like a hang with 0 samples.**
-      > **No [owner] step is needed for the permission question** — there is no prompt to click. The
-      remaining question for a human is only whether the `objc2` bypass fixes the allow-list; if it
-      does not, 8.3 ships simulated and this task can be closed as a documented no-go.
+      leftover device. > **R6 RESOLVED — the fault was the missing pid→AudioObjectID translation.**
+      `CATapDescription.h` says the array holds **AudioObjectIDs, not pids**; every earlier attempt
+      passed the pid and got `!obj` (560947818) for any non-empty list. Translating first with
+      `kAudioHardwarePropertyTranslatePIDToProcessObject` (`'id2p'`) makes all four process-specific
+      shapes work, including the include-list mono mixdown SPEC §7 wants. The objc2 bypass
+      (`spikes/tap/src/bin/tap-objc2.rs`, ~60 lines) builds `CATapDescription` directly; cidre's
+      class resolution was fine all along, its binding just does not translate. End-to-end capture:
+      **575 488 float samples in 12 s ≈ 47 957/s, real Spotify audio from Spotify's process only**
+      (RMS −12 to −17 dBFS), clean teardown, no leftover tap/aggregate device. > Traps for 8.3/8.5:
+      (a) the tap is 48 000 Hz — read `asbd.sample_rate`, do not hard-code; (b) `ca::device_start`
+      returns a `StartedDevice` that must be kept alive — dropping it early stops the device and
+      looks exactly like a hang with 0 samples; (c) `name` on `CATapDescription` is an *instance*
+      method and objc2 panics on a class-method send to it — `AnyClass::name()` instead; (d) the
+      `'prs#'` process list read returns `'nope'` here even though `'id2p'` works — translate the
+      pids you care about, do not enumerate. > Do NOT fall back to a global tap — it captures all
+      system audio, including Sonar's, which is what COMPAT rule 3 is about. No [owner] step was
+      needed — there was no prompt to click.
 - [x] 1.6 **cavacore feasibility.** `docs/AUDIO-TAP.md`; spike is `spikes/viz`; bar output is a
       committed fixture at `tests/fixtures/visualizer/cavacore-bars.txt`. > **Builds on stable
       (rustc 1.98.1) for both `aarch64-apple-darwin` and `x86_64-apple-darwin`** — 1.6's

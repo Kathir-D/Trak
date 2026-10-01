@@ -130,11 +130,11 @@ refuted**, and with it the biggest scheduling risk in the project. TODO 3.x and
 Teardown is clean: after the process exited, `system_profiler SPAudioDataType`
 showed no tap or aggregate device.
 
-### 3b. The one real blocker: a process-specific tap does not work
+### 3b. The blocker, and what actually caused it: pids are not AudioObjectIDs
 
 trak must tap **Spotify only**, so it neither picks up unrelated system audio nor
 disturbs Sonar's own tap (SPEC §7, COMPAT rule 3). That needs a tap description
-that names pids. Every such shape fails identically:
+that names processes. The first round of experiments failed identically:
 
 | `TRAK_TAP_MODE` | ObjC selector | Result |
 | --- | --- | --- |
@@ -147,49 +147,74 @@ that names pids. Every such shape fails identically:
 `560947818` is `0x216F626A` = fourcc **`!obj`** = `kAudioHardwareBadObjectError`
 ("The AudioObjectID passed to the function doesn't map to a valid AudioObject"),
 from `AudioHardwareBase.h`. It is **not** `kAudioDevicePermissionsError`
-(`!hog`, 0x21686F67) — so this is not a permission problem, and there is nothing
-for the owner to grant.
+(`!hog`, 0x21686F67) — so it was never a permission problem, and there was
+nothing for the owner to grant.
 
-The pattern is sharp: **an empty pid list is accepted, any non-empty pid list is
-rejected**, in both the include and the exclude form. The obvious explanation is
-a marshalling problem rather than a macOS policy, so the obvious thing was tried
-first — the pids were boxed as `NSNumber` at every width:
+The pattern was sharp — **an empty pid list is accepted, any non-empty pid list
+is rejected**, in both the include and the exclude form — and boxing the pids as
+`NSNumber` at every width made no difference. The cause turned out to be simpler
+and is now proven by the objc2 bypass (`spikes/tap/src/bin/tap-objc2.rs`):
 
-| `TRAK_PID_TYPE` | `global-exclude-spotify` | `mono-mixdown` |
-| --- | --- | --- |
-| `f64` | `!obj` | `!obj` |
-| `i32` | `!obj` | `!obj` |
-| `i64` | `!obj` | — |
-| `u32` | `!obj` | — |
+> **`CATapDescription.h` says the array holds AudioObjectIDs, not pids:**
+>
+> ```
+> @param processesObjectIDsToIncludeInTap
+>     An NSArray of NSNumbers where each NSNumber holds an AudioObjectID of the
+>     process object to include in the tap
+> ```
+>
+> Every earlier attempt passed the **pid** directly. Translating it first, via
+> `kAudioHardwarePropertyTranslatePIDToProcessObject` (`'id2p'`), makes every
+> process-specific shape work. A pid has to be translated into that
+> AudioObjectID first, via
+> `kAudioHardwarePropertyTranslatePIDToProcessObject` ('id2p'). Passing the pid
+> directly is what every earlier attempt did, and it is why `!obj` appeared for a
+> non-empty list and not for an empty one.
 
-The number width makes no difference, so the obvious cause is ruled out. This is
-exactly risk **R6** ("`cidre` API for process taps is unstable / under-documented")
-materialising, and it is the thing TODO 1.5 exists to find.
+With the translation in place (objc2-built `CATapDescription`, everything after
+it still cidre):
+
+| ObjC selector | pids (not translated) | process AudioObjectIDs | empty |
+| --- | --- | --- | --- |
+| `initMonoMixdownOfProcesses:` | `!obj` | **ok — 48 kHz mono** | ok |
+| `initStereoMixdownOfProcesses:` | `!obj` | **ok — 48 kHz stereo** | ok |
+| `initMonoGlobalTapButExcludeProcesses:` | `!obj` | **ok** | ok |
+| `initStereoGlobalTapButExcludeProcesses:` | `!obj` | **ok** | ok |
+
+The end-to-end capture on the include-list cell (`TRAK_CAPTURE=1
+TRAK_TAP_MODE=mono-mixdown TRAK_LIST=objects`) delivered **real Spotify audio
+from Spotify's process only**: 575 488 float samples in 12 s ≈ 47 957/s, RMS
+−12 to −17 dBFS, clean teardown, no leftover tap or aggregate device in
+`system_profiler SPAudioDataType`. R6 is resolved: **the fault was the missing
+pid→object translation, not the OS and not cidre's class resolution** (cidre's
+`TapDesc::cls()` resolves to the real `CATapDescription`; the binding simply
+does not do the translation for you).
+
+Two incidental traps the bypass binary hit, for whoever copies this:
+
+- `name` on `CATapDescription` is an **instance** method; there is no class
+  method, and objc2 panics on a message send to one that does not exist.
+  `AnyClass::name()` is the way to read a class's name.
+- The `'prs#'` (`kAudioHardwarePropertyProcessObjectList`) read returned
+  `'nope'` (0x6E6F7065) on this machine even though `'id2p'` works, so do not
+  make enumerating processes a dependency — translate the pids you care about.
 
 ### 3c. What this means, and the decision
 
-**Go / no-go for real audio: conditional go.** Real audio works; process isolation
-does not. Three options, in the order they should be tried:
+**RESOLVED (1.5): process-specific taps work, and trak ships real audio.** The
+bypass proved the only missing piece was the pid→AudioObjectID translation
+(§3b). The 8.3 source taps Spotify's process directly:
 
-1. **Bypass `cidre` for the tap description only.** `TapDesc` is four thin ObjC
-   initialisers. Calling them directly through `objc2` is maybe 60 lines and would
-   test whether the fault is in cidre's binding or in the OS. This is the cheapest
-   way to find out, and TODO 1.5's own escape hatch ("if unusable, write a ~150-line
-   binding") already anticipates it.
-2. **Fall back to the global tap with a filter.** A global tap sees all system
-   audio, including whatever Sonar is playing. trak could still restrict *what it
-   renders* to the Spotify track it currently knows about — but that is a visual
-   approximation, it would pick up other apps' audio during Spotify's silence, and
-   it sits badly with COMPAT rule 3's intent. Only acceptable as a labelled
-   opt-in.
-3. **Ship simulated.** TODO 8.1/8.2 are already specified and need nothing from
-   this spike, so this is always available and must remain the default until
-   option 1 is settled.
-
-**Recommendation: do option 1, and keep simulated as the default meanwhile.** The
-audio path is proven to work end to end — 48 kHz, mono, float32, clean teardown —
-so the only thing missing is a working way to name one process, and that is a
-small amount of code rather than a platform limitation.
+- translate each pid with `kAudioHardwarePropertyTranslatePIDToProcessObject`
+  (`'id2p'`) — a pid that names no Core Audio process returns `kAudioObjectUnknown`
+  (0), so a Spotify that is paused or exited yields an empty include list, and the
+  tap is not created for one;
+- build `CATapDescription` through the ObjC runtime (`objc2`): `CATapDescription`
+  has no objc2 bindings, and cidre's `TapDesc` does not translate pids —
+  `spikes/tap/src/bin/tap-objc2.rs` holds the ~60 lines, and the objc2→cidre
+  handoff is a runtime-checked pointer cast;
+- the global tap stays unused: it captures all system audio, including Sonar's,
+  which is what COMPAT rule 3 is about.
 
 ### 3d. Two more things for 8.3 and 8.5
 
