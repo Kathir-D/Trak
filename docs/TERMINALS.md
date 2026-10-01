@@ -1,4 +1,4 @@
-# trak — terminal image protocols (TODO 1.4, risk R5)
+# Trak — terminal image protocols (TODO 1.4, risk R5)
 
 **Measured 2026-09-29** on the owner's machine by running `spikes/images` inside
 each terminal and screenshotting the result with `screencapture`. Not reasoned
@@ -39,11 +39,11 @@ and any terminal that does not speak Kitty.
 The visual difference is large and worth choosing deliberately: the half-blocks
 version of the same image is visibly chunky, because each cell is two stacked
 square pixels. That is still perfectly presentable — it is what Terminal.app gets
-and it is what trak's `art_protocol = "halfblocks"` setting is for.
+and it is what Trak's `art_protocol = "halfblocks"` setting is for.
 
 ### Detection works unattended
 
-This matters because trak must pick a protocol with no user interaction. In both
+This matters because Trak must pick a protocol with no user interaction. In both
 terminals, `Picker::from_query_stdio()` returned the right answer on its own:
 
 ```
@@ -56,11 +56,11 @@ AUTO cap CellSize(Some((8, 17)))
 AUTO ok protocol_type=Halfblocks font_size=(10, 20)
 ```
 
-Note it reports a **font size / cell size**, not just a protocol. trak must use
+Note it reports a **font size / cell size**, not just a protocol. Trak must use
 that when computing how many cells an image occupies, or album art will be
-mis-sized. The environment trak should look at as a fallback is the usual
+mis-sized. The environment Trak should look at as a fallback is the usual
 `TERM_PROGRAM` / `KITTY_WINDOW_ID` / `TERM` set, but the picker already does the
-hard part and trak's `art_protocol = "auto"` setting should just defer to it.
+hard part and Trak's `art_protocol = "auto"` setting should just defer to it.
 
 ### A trap in the spike worth remembering
 

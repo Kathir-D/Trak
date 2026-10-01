@@ -1,4 +1,4 @@
-# trak — Keychain vs. a `0600` file (TODO 1.8, risk R3)
+# Trak — Keychain vs. a `0600` file (TODO 1.8, risk R3)
 
 **Measured 2026-09-29 on the owner's machine** (macOS 27.0, arm64) with
 `spikes/keychain`, a Rust binary using the `security-framework` crate.
@@ -48,7 +48,7 @@ authorization decision per (item, code identity)**:
   with no dialog.
 
 Neither returns the secret, so the item is unreadable either way. What makes this
-fatal for trak is that the blocking case is always the one it hits: every release
+fatal for Trak is that the blocking case is always the one it hits: every release
 is a brand-new identity, so there is never a cached decision to fall back on. If a
 future reader of this doc only ever sees the second behaviour, that is an artifact
 of testing the same binary twice, not evidence the problem went away.
@@ -89,15 +89,15 @@ fine, because there is nothing to authorize. So the Keychain looks like it works
 during development. The failure only shows up on the first launch after the
 binary changes, which is exactly the moment nobody is watching.
 
-### Why trak cannot live with this
+### Why Trak cannot live with this
 
 The distribution model guarantees the identity changes. `scripts/package-release.sh`
 (TODO 9.1) builds both architectures, `lipo`s them together, and runs
 `codesign --force -s -`. Every release is therefore a new code hash, so:
 
-1. trak v1.0.0 stores a refresh token, created by binary A.
-2. `brew upgrade` installs trak v1.1.0, which is binary B.
-3. v1.1.0 reads the token → blocks on a GUI panel → **trak hangs on startup**.
+1. Trak v1.0.0 stores a refresh token, created by binary A.
+2. `brew upgrade` installs Trak v1.1.0, which is binary B.
+3. v1.1.0 reads the token → blocks on a GUI panel → **Trak hangs on startup**.
 
 The hang is the worst possible failure for a TUI: it is not an error the user can
 read, and it cannot be recovered from without `kill -9`. Detecting it would mean a
@@ -106,7 +106,7 @@ be cancelled — the thread leaks. And because the Keychain path is the
 *default*, the failure lands on the upgrade path, which is the one every user
 takes.
 
-A secondary cost: because `security` is also blocked (row G), trak cannot inspect
+A secondary cost: because `security` is also blocked (row G), Trak cannot inspect
 or migrate its own item with the standard tool, so there is no escape hatch
 short of a GUI click.
 
@@ -123,7 +123,7 @@ short of a GUI click.
 | Needs a GUI to be usable | effectively yes | no |
 
 The file's only real weakness is that `0600` is advisory, so the guarantee depends
-on trak creating the file with the right mode and not loosening it. That is
+on Trak creating the file with the right mode and not loosening it. That is
 testable, so TODO 5.1 and 7.4 must assert the mode in their tests:
 
 - create with `OpenOptions::mode(0o600)` and verify with `metadata().permissions().mode() & 0o777 == 0o600`;

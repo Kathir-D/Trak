@@ -1,4 +1,4 @@
-# trak — continuation prompt
+# Trak — continuation prompt
 
 Paste everything below into a fresh session. It is written to be self-contained:
 you do not need this conversation, and you should not try to reconstruct it.
@@ -22,7 +22,7 @@ Working style the owner has asked for repeatedly:
   cleanly. Give each one a strict file boundary and tell it not to touch anything
   else — that has been the single biggest source of wasted work.
 - **Commit and push constantly.** After every coherent piece of work:
-  `git add -A && git commit && git push`. The repo is `github.com/Kathir-D/trak`,
+  `git add -A && git commit && git push`. The repo is `github.com/Kathir-D/Trak`,
   branch `main`, and every commit so far has gone to `main` directly.
 - **Wrap every long command in `scripts/with-timeout`.** See below; it matters.
 
@@ -36,7 +36,7 @@ Working style the owner has asked for repeatedly:
 3. `docs/SPEC.md` — the product. `SPEC §3` is the tab layout, `§4` the key table,
    `§8` the config schema. **SPEC wins over TODO** where they disagree, and several
    TODO entries already say so explicitly.
-4. `docs/COMPAT.md` — non-negotiable. trak shares a machine with two sibling
+4. `docs/COMPAT.md` — non-negotiable. Trak shares a machine with two sibling
    projects (`../Sonar`, `../headless-spotify`) and those are read-only to you.
 5. `docs/WEB-API.md` — researched authority for the Web API. **Four things in the
    original plan were removed in dev mode and this document is the corrected
@@ -170,7 +170,7 @@ do not attempt them.
 
 There is no interactive TTY, so:
 
-- `scripts/screen.py W H --keys 'jj?'` runs trak in a pty and prints the screen.
+- `scripts/screen.py W H --keys 'jj?'` runs Trak in a pty and prints the screen.
   It is an approximation — it leaks some SGR, so colours are unreliable — but it
   catches layout, and the keys work now that `Picker` no longer breaks input.
 - `trak config < /dev/null` prints the settings as TOML and exits 2, which is a
@@ -179,7 +179,7 @@ There is no interactive TTY, so:
   TUI** — it leaves the terminal in a broken state. Use `SIGINT`, or close only the
   tab you created.
 - AppleScript from an agent session must go through the shim:
-  `ASRUN_BYPASS=1 $HOME/.local/bin/osascript`. trak itself uses `$TRAK_OSASCRIPT`,
+  `ASRUN_BYPASS=1 $HOME/.local/bin/osascript`. Trak itself uses `$TRAK_OSASCRIPT`,
   default `/usr/bin/osascript`.
 - `./spikes/verify.sh --quick` re-checks the Phase 1 spike claims in about three
   minutes. Read it before re-deriving anything in `docs/APPLESCRIPT.md`,

@@ -1,10 +1,10 @@
-# trak — audio tap and visualisation (TODO 1.5 and 1.6)
+# Trak — audio tap and visualisation (TODO 1.5 and 1.6)
 
 Both spikes were run on 2026-09-29. `spikes/viz` covers the analysis half (1.6)
 and `spikes/tap` covers the capture half (1.5).
 
 Headline: **the audio tap works, and no permission prompt was needed at all** —
-so R1 is refuted. But the process-*specific* tap that trak's design requires does
+so R1 is refuted. But the process-*specific* tap that Trak's design requires does
 not, and that is the open problem. Details in §3.
 
 ---
@@ -24,7 +24,7 @@ not, and that is the open problem. Details in §3.
 
 `cavacore` 2.0.2 is a pure-Rust port of cava's core engine. It is a good fit: it
 does the FFT, the three-band weighting, the peak/ballistics maths and the
-falloff, and leaves trak to do nothing but hand it `f64` samples and read `f64`
+falloff, and leaves Trak to do nothing but hand it `f64` samples and read `f64`
 bars back. The API is small:
 
 ```rust
@@ -132,7 +132,7 @@ showed no tap or aggregate device.
 
 ### 3b. The blocker, and what actually caused it: pids are not AudioObjectIDs
 
-trak must tap **Spotify only**, so it neither picks up unrelated system audio nor
+Trak must tap **Spotify only**, so it neither picks up unrelated system audio nor
 disturbs Sonar's own tap (SPEC §7, COMPAT rule 3). That needs a tap description
 that names processes. The first round of experiments failed identically:
 
@@ -201,7 +201,7 @@ Two incidental traps the bypass binary hit, for whoever copies this:
 
 ### 3c. What this means, and the decision
 
-**RESOLVED (1.5): process-specific taps work, and trak ships real audio.** The
+**RESOLVED (1.5): process-specific taps work, and Trak ships real audio.** The
 bypass proved the only missing piece was the pid→AudioObjectID translation
 (§3b). The 8.3 source taps Spotify's process directly:
 
@@ -238,7 +238,7 @@ disk** — it is in the dyld shared cache — so the binary dies at launch with
 println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
 ```
 
-`spikes/tap/build.rs` has it. Whoever adds `cidre` to trak proper must carry that
+`spikes/tap/build.rs` has it. Whoever adds `cidre` to Trak proper must carry that
 line across, or the Homebrew binary will not start on this OS. It also needs
 `default-features = false` with an explicit feature list (`core_audio`, `ca`,
 `cat`, `av`, `app`, `objc`, `blocks`, `dispatch`, `cf`, `ns`, `macos_14_2`); the

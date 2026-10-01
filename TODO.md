@@ -1,4 +1,4 @@
-# trak — TODO
+# Trak — TODO
 
 The master task list. **Read `AGENTS.md` first**, then `docs/SPEC.md` (what to build, all decisions
 made), `docs/COMPAT.md` (Sonar / headless-spotify contract), `docs/ARCHITECTURE.md` (how).
@@ -29,7 +29,7 @@ Legend: `[ ]` todo · `[x]` done · **A/B** = with / without a Spotify Client ID
 | --- | --- | --- |
 | R1 | ~~Real-audio visualizer: the process-tap permission is attributed to the terminal app; a CLI child may not get a usable "System Audio Recording" prompt~~ **REFUTED (1.5): a global tap works from an un-bundled CLI with NO prompt at all** — 48 kHz mono f32, ~47 950 samples/s, real audio at -17.6 dBFS, clean teardown. The machine had no audio TCC grant beforehand | `docs/AUDIO-TAP.md` §3a. **A new blocker replaces it: see R6** |
 | R2 | ~~Spotify ≥ 1.3.x ignores AppleScript `set sound volume`~~ **REFUTED on 1.3.1.234 (1.1):** sets work 8/8, but the read-back is often target−1 (quantisation). Rule now = read back with a ±1 tolerance (`docs/APPLESCRIPT.md` §5) | 4.4 (reframed as a preference) |
-| R3 | ~~Keychain items created by an ad-hoc-signed binary can re-prompt after every upgrade~~ **CONFIRMED AND WORSE (1.8):** a keychain item is readable only by the exact binary that created it. A *new* identity raises a dialog and blocks (first encounter); a repeat of the *same* identity errors immediately from cache. Every release is a new identity, so trak always gets the blocking case — a **hang, not a prompt** | **Resolved: use a `0600` file** (`docs/KEYCHAIN.md`). SPEC §2 and §6 updated. 7.4 drops the second backend |
+| R3 | ~~Keychain items created by an ad-hoc-signed binary can re-prompt after every upgrade~~ **CONFIRMED AND WORSE (1.8):** a keychain item is readable only by the exact binary that created it. A *new* identity raises a dialog and blocks (first encounter); a repeat of the *same* identity errors immediately from cache. Every release is a new identity, so Trak always gets the blocking case — a **hang, not a prompt** | **Resolved: use a `0600` file** (`docs/KEYCHAIN.md`). SPEC §2 and §6 updated. 7.4 drops the second backend |
 | R4 | ~~Spotify Web API developer-mode rules changed recently~~ **CONFIRMED AND WORSE THAN EXPECTED (1.7):** `localhost` redirect URIs are **banned** (use `http://127.0.0.1`, no port); Premium now required of the **app owner**; user cap **5**; all batch "get several" endpoints, `/markets` and **`/artists/{id}/top-tracks` removed**; `Track.popularity` removed; search `limit` max **10**; refresh tokens expire in **6 months**; no numeric rate limits are published | All recorded with citations in `docs/WEB-API.md`; SPEC §6 and this phase rewritten to match. Still verify playlist `/items` against a real dev-mode login |
 | R5 | ~~cmux may not pass the Kitty image protocol through~~ **REFUTED (1.4):** cmux speaks Kitty graphics at full fidelity, and `Picker::from_query_stdio()` detects it unattended | `docs/TERMINALS.md` + `docs/images/spike-1.4-cmux.png`. Half-blocks remains the Terminal.app path and must still look good |
 | R6 | ~~`cidre` API for process taps is unstable / under-documented~~ **RESOLVED (1.5): the fault was the missing pid→AudioObjectID translation, not the OS or the binding.** `CATapDescription.h` documents that the array holds **AudioObjectIDs**, not pids; translating via `kAudioHardwarePropertyTranslatePIDToProcessObject` (`'id2p'`) makes every process-specific shape work. End-to-end capture delivered real Spotify audio from Spotify's process only, clean teardown | `docs/AUDIO-TAP.md` §3b/§3c; spike `spikes/tap/src/bin/tap-objc2.rs`. **8.3 is unblocked** |
@@ -40,7 +40,7 @@ Legend: `[ ]` todo · `[x]` done · **A/B** = with / without a Spotify Client ID
 
 ## Phase 0 — Project init
 
-- [x] 0.1 Create repo `Kathir-D/trak` (public), MIT `LICENSE` (with shpotify's notice), `.gitignore`,
+- [x] 0.1 Create repo `Kathir-D/Trak` (public), MIT `LICENSE` (with shpotify's notice), `.gitignore`,
       `rustfmt.toml`, `VERSION`, minimal `Cargo.toml` + `src/main.rs` (`trak --version`).
 - [x] 0.2 Write `AGENTS.md`, `CLAUDE.md`, `README.md` (placeholder), `TODO.md`, `docs/SPEC.md`,
       `docs/COMPAT.md`, `docs/ARCHITECTURE.md`, `docs/AGENT-PROMPTS.md`, `THIRD-PARTY-NOTICES.md`.
@@ -188,12 +188,12 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
 - [x] 2.4 **Write actions with read-back.** `src/player/actions.rs` holds `seek_checked`,
       `set_volume_checked`, `step_volume` and the background `Worker`. > The ±1 tolerance lives in
       **one** function, so there is one implementation and one set of tests; getting this wrong is
-      what makes trak hide the volume meter after every keypress. > A seek is compared against the
+      what makes Trak hide the volume meter after every keypress. > A seek is compared against the
       **clamped** target, not the raw request — the first version reported every over-seek as a
       failure, which two tests caught. > The `Worker` drops a submission while one is in flight, so
       a held key cannot build a backlog. > `check_playable_uri` is an **allow-list in
       `player/mod.rs`, not in the AppleScript transport** — it was in the transport first, and the
-      CLI tests caught that the fake bypassed it. User input enters trak at exactly one place.
+      CLI tests caught that the fake bypassed it. User input enters Trak at exactly one place.
 - [x] 2.5 **CLI.** Every shpotify command: `status [artist|album|track]`, `play`, `pause`, `stop`,
       `quit`, `next`, `prev`, `replay`, `pos`, `vol up|down|show`, `toggle shuffle|repeat`,
       `share url|uri`. Tidy on a TTY, plain when piped, `--plain` and `--json`. Exit codes 0/1/2.
@@ -256,7 +256,7 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
       asserted to be **one cell wide per character** (via `unicode-width`), because a wide glyph in a
       bar is the first thing that tears a layout.
 - [x] 3.5 **Idle card.** Centred, replaces the whole dashboard, says "press enter to launch it in
-      the background" and "trak never starts Spotify on its own". > `enter` and space are the only
+      the background" and "Trak never starts Spotify on its own". > `enter` and space are the only
       keys it accepts, and a test asserts every other key does nothing on it. > The launch runs
       `headless-spotify launch` when it is on PATH, else `open -g -j -a Spotify` — no focus, no Dock
       bounce. A test asserts the flags, not just that the command exists.
@@ -337,7 +337,7 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
       the user's volume, not the polled one.** A read only updates `read_volume`; `user_volume` is
       set by `m`, `+`, `-` and by the target the player layer actually aimed for, so the clamp lives
       in one place. This is COMPAT rule 3, not just rule 5: during a Sonar fade the polled value *is*
-      the mid-fade value, and a meter that follows it down says trak turned the music down. > An
+      the mid-fade value, and a meter that follows it down says Trak turned the music down. > An
       ignored volume write hides the meter and shows the one-line notice; a landed one brings it
       back, so one bad keypress is not a permanently broken display. An ignored *seek* gets the
       notice but does not hide the meter. > Measured on real Spotify 1.3.1.234: `-` at 78 → 67 →
@@ -376,16 +376,16 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
       the Now Playing pane's own border already frames the hole, and a second frame drawn as text
       landed a whole art-height below the space it was reserving. While a cover is downloading the
       hole says `fetching cover…`; otherwise it is empty. > **Verified live**: with a pty answering
-      the Kitty query exactly as cmux does, trak sent **25 chunks totalling 73 984 bytes = 136×136×4**
+      the Kitty query exactly as cmux does, Trak sent **25 chunks totalling 73 984 bytes = 136×136×4**
       — a raw RGBA image at `f=32`, sized 17×8 cells from cmux's 8×17 px cell — and **zero**
       half-block glyphs. Without an answer it fell back to half-blocks and drew 64 `▀` cells. The
       half-block path is snapshot-tested: a red/blue fixture must put both colours in the buffer.
       > **[owner]** still worth one look: real cover art in a real cmux window, since a pty can only
-      prove the bytes trak sends, not how they land on screen. > **The protocol is detected from the
+      prove the bytes Trak sends, not how they land on screen. > **The protocol is detected from the
       environment, not by asking the terminal**, and that is not a shortcut. `Picker::
       from_query_stdio()` starts a thread that calls `enable_raw_mode`, reads the reply from stdin and
       then calls `disable_raw_mode` -- and when the terminal does not answer inside its one second,
-      that thread is still running after trak has re-enabled raw mode and switches it back off
+      that thread is still running after Trak has re-enabled raw mode and switches it back off
       underneath. crossterm then sees canonical mode and **every single keypress is silently
       discarded**: the clock ticks, the frame redraws, nothing responds to anything. Found by
       running the TUI in a pty and logging `poll`, which returned `Ok(false)` for every key pressed,
@@ -441,7 +441,7 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
 - [x] 4.5 **Song-change notification.** `display notification` through osascript, off by default,
       title = track, body = `artist — album`. > **It fires on a change, never on the first read**:
       the event is raised from the notification path, which only runs when a track *changes*, so
-      starting trak cannot announce whatever happened to be playing. A test asserts both, including
+      starting Trak cannot announce whatever happened to be playing. A test asserts both, including
       that the setting is off by default. > The body copes with every shape of a track: a promo with
       an artist but no album gets the artist, and one with neither gets an empty body rather than
       " — ". > A quote in a title is escaped, because the title is interpolated into an AppleScript
@@ -451,14 +451,14 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
       > The state file is re-read **every 2 s, not per frame**: it is a small file, the answer changes
       on the order of seconds, and a frame is 100 ms. Reading it faster would be a way of making the
       disk busy for no information. > **The whole point of this task is the volume guard, and it is
-      not just the mute.** COMPAT rule 3 says trak must never write a mid-fade volume, and a
+      not just the mute.** COMPAT rule 3 says Trak must never write a mid-fade volume, and a
       *relative* step (`-`) is computed from the **live** volume -- which mid-fade is Sonar's value --
       so pressing `-` during a duck would write Sonar's own number back and appear to undo the fade.
       `m`, `+`, `-` are all refused while ducking, and each says why: a key that silently stops
       working looks like a broken keyboard. > A duck that has just begun raises a toast once, and not
       again on every re-read, and the keys come back the moment it ends. > **`pid` in Sonar's file is
       *Spotify's* pid, not Sonar's** (per `docs/AGENT-PROMPTS.md`), which is the opposite of what the
-      task text implies; trak therefore vets the file against its own Spotify process, and a live
+      task text implies; Trak therefore vets the file against its own Spotify process, and a live
       Sonar makes an otherwise-stale file acceptable, because that is what COMPAT says. > The parser
       refuses an unknown *version* rather than guessing -- a file from the future could mean anything.
       26 tests cover valid, malformed, truncated, unknown-field, wrong-pid, stale and missing files;
@@ -470,9 +470,9 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
       the docs** -- and that changed the design. The real `status --json` prints **no `schema`
       field** and escapes slashes in paths, and it exits 1; both are now pinned fixtures. > An
       unknown `schema` is *read, not refused*, the opposite of Sonar: this decides a badge and a
-      sentence, both of which have a safe absence, whereas Sonar decides whether trak may write a
-      volume. > `installed` in the sibling's JSON means *Spotify.app exists*, which trak already knows
-      from AppleScript; a field with that name sitting next to trak's own "is the tool installed" is a
+      sentence, both of which have a safe absence, whereas Sonar decides whether Trak may write a
+      volume. > `installed` in the sibling's JSON means *Spotify.app exists*, which Trak already knows
+      from AppleScript; a field with that name sitting next to Trak's own "is the tool installed" is a
       trap, so it is ignored. > `is_installed` requires the **execute bit**, unlike the old `which`
       helper: a non-runnable file with the right name must not win COMPAT rule 2's one launch. The
       test asserts the exact argv of both launch branches, because a test that only checks the
@@ -493,7 +493,7 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
       from by hand, and one typo in one setting must not throw away the other forty. > **A leading
       BOM is stripped**: TextEdit writes one, and refusing the file would silently reset every setting
       the moment someone edited it in the obvious editor. > Unknown keys *and* unknown tables are
-      ignored, so the file can gain keys before trak knows them. > Save is atomic (temp + rename) and
+      ignored, so the file can gain keys before Trak knows them. > Save is atomic (temp + rename) and
       `0600`, and fixes the mode even over an existing `0644` file. > 77 tests, including a
       **round-trip with every key set to a non-default value** and a truncation sweep over all 1,378
       cut points of a real file. > `Paths` takes `HOME`/`XDG_CONFIG_HOME` as arguments, so no test can
@@ -518,7 +518,7 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
 - [x] 5.4 **First-run experience**. > First run is **a fact to remember, not a state to model**: the
       loader already distinguishes a missing file from an empty one, and the hint is never saved — the
       config file appearing at all is what makes the next launch a *not*-first run. > The hint
-      outranks the key list in the footer, because a user who has never run trak does not know it has
+      outranks the key list in the footer, because a user who has never run Trak does not know it has
       a settings screen and the key list cannot say so in the space it has.
 
 ---
@@ -527,7 +527,7 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
 
 - [x] 6.1 **LRCLIB client** (`https://lrclib.net/api/get?...` by track/artist/album/duration; fall back
       to search). Read their docs first and set a descriptive `User-Agent: trak/<version>
-      (https://github.com/Kathir-D/trak)`. Timeouts, cache results on disk, never block the UI, no
+      (https://github.com/Kathir-D/Trak)`. Timeouts, cache results on disk, never block the UI, no
       lyrics = clean empty state. Done when: tests with recorded JSON fixtures (no live network in CI).
       > Finished on top of the 4.x part-done pass: the disk cache lives next to the art cache
       > (`~/Library/Caches/trak/<fnv>.json`, 64 entries, temp+rename, zero-length and
@@ -535,7 +535,7 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
       > 2026-10-01 are committed under `tests/fixtures/lyrics/` and read at compile time.
       > **A 404 from the search fallback is `NotFound`, not `Malformed`**: the miss body is a
       > JSON *object* (`TrackNotFound`), so without a status check in `search` a double miss came
-      > out as "LRCLIB sent an answer trak could not read" — a message that blames the service for
+      > out as "LRCLIB sent an answer Trak could not read" — a message that blames the service for
       > the song not being there.
 - [x] 6.2 **LRC parser + "current line for position"** (handles `[mm:ss.xx]`, multiple stamps per line,
       offset tag, plain-text lyrics without stamps). Done when: unit tests incl. malformed input.
@@ -710,22 +710,22 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
       runs on arm64 with `--version`; `xattr` shows no quarantine after `curl` download.
       Alternative if lipo/sign misbehaves: two tarballs + `on_arm`/`on_intel` (see ARCHITECTURE).
 - [x] 9.2 **`.github/workflows/release.yml`** on `v*` tags: verify tag == VERSION, build, package,
-      create the GitHub release with tarball + checksums, then update `Formula/trak.rb` in
+      create the GitHub release with tarball + checksums, then update `Formula/Trak.rb` in
       `Kathir-D/homebrew-tap` (needs a `HOMEBREW_TAP_TOKEN` secret). Model it on
       `../headless-spotify/.github/workflows/release.yml`. Done when: a dry-run on a pre-release tag
       produces a release and a tap commit. **[owner]** adds the secret (fine-grained PAT, contents:write
       on the tap repo only).
-- [x] 9.3 **`Formula/trak.rb`**: `desc`, `homepage`, `url`, `sha256`, `license "MIT"`,
+- [x] 9.3 **`Formula/Trak.rb`**: `desc`, `homepage`, `url`, `sha256`, `license "MIT"`,
       `depends_on macos: :sonoma` (14.x; the audio tap needs 14.2 — note this in `caveats` since Homebrew
-      cannot express minor versions), `def install; bin.install "trak"; end`, caveats (optional Client
+      cannot express minor versions), `def install; bin.install "Trak"; end`, caveats (optional Client
       ID via `trak config`, terminal permissions, optional Sonar / headless-spotify), `test do`
       asserting `trak --version` matches. No `system "codesign"`, no quarantine hacks: Homebrew formula
-      downloads are not quarantined. Done when: `brew install --formula ./Formula/trak.rb` works from a
-      local tap and `brew test trak` passes.
-- [ ] 9.4 **Add the row to the tap README** (`brew install kathir-d/tap/trak`, uninstall, description)
-      — or run prompt 3 in `docs/AGENT-PROMPTS.md`. Done when: the tap README lists trak.
-- [ ] 9.5 **`brew audit --strict --online kathir-d/tap/trak`** clean; `brew style`. Done when: both pass.
-- [ ] 9.6 **Fresh-machine test**: `brew install kathir-d/tap/trak` on a clean user/VM (or after
+      downloads are not quarantined. Done when: `brew install --formula ./Formula/Trak.rb` works from a
+      local tap and `brew test Trak` passes.
+- [ ] 9.4 **Add the row to the tap README** (`brew install kathir-d/tap/Trak`, uninstall, description)
+      — or run prompt 3 in `docs/AGENT-PROMPTS.md`. Done when: the tap README lists Trak.
+- [ ] 9.5 **`brew audit --strict --online kathir-d/tap/Trak`** clean; `brew style`. Done when: both pass.
+- [ ] 9.6 **Fresh-machine test**: `brew install kathir-d/tap/Trak` on a clean user/VM (or after
       `brew uninstall`), run `trak --version`, `trak status`, open the TUI. Done when: no Gatekeeper
       prompt, no manual steps. Record in `docs/RELEASING.md`.
 - [x] 9.7 **`docs/RELEASING.md`**: bump VERSION and Cargo.toml, changelog entry, tag, what CI does,
@@ -740,10 +740,10 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
 Run each row of the table in `docs/COMPAT.md`, tick it there with the date and what was observed.
 Requires Sonar installed and running (`brew install --cask kathir-d/tap/sonar`) and the real Spotify.
 
-- [ ] 10.1 trak ↔ Sonar skip/prev both directions (< ~1 s propagation).
-- [ ] 10.2 Ducking: trak shows the Sonar badge (needs Sonar prompt 1) and stays consistent; the volume
+- [ ] 10.1 Trak ↔ Sonar skip/prev both directions (< ~1 s propagation).
+- [ ] 10.2 Ducking: Trak shows the Sonar badge (needs Sonar prompt 1) and stays consistent; the volume
       meter is not corrupted; `m` is disabled during a duck.
-- [ ] 10.3 Ownership: pausing in trak during/after a duck never gets undone by Sonar.
+- [ ] 10.3 Ownership: pausing in Trak during/after a duck never gets undone by Sonar.
 - [ ] 10.4 Spotify quit / relaunch while both are running.
 - [ ] 10.5 Without Sonar and without headless-spotify installed: zero errors, zero warnings.
 - [ ] 10.6 Headless Spotify: badge + full control, **when Spotify honours LSUIElement again (R7)**;
@@ -765,7 +765,7 @@ Requires Sonar installed and running (`brew install --cask kathir-d/tap/sonar`) 
       2. Produce: a centered hero (logo/wordmark + one-line pitch), a badge row (CI, release, macOS,
          Rust, license, Homebrew), a **demo GIF/screenshot right under the hero** (record with
          [vhs](https://github.com/charmbracelet/vhs) or a screen recording; commit under `docs/images/`;
-         keep it < ~3 MB), a "Why trak" three-line pitch, feature list with icons, install (Homebrew
+         keep it < ~3 MB), a "Why Trak" three-line pitch, feature list with icons, install (Homebrew
          first), a quick usage table, a clear **Version A vs Version B** comparison table, the
          `trak config` settings table, keybindings, "Works with Sonar & headless-spotify" (link to
          COMPAT), troubleshooting (permissions!), credits (shpotify, spotify-tui inspiration,
@@ -774,13 +774,13 @@ Requires Sonar installed and running (`brew install --cask kathir-d/tap/sonar`) 
          image, every claim true for the released version (no features that are not built).
       Needs: phases 3–8 built enough to screenshot. Done when: the README renders well on GitHub in
       light and dark mode (check both), all links work (`lychee` or manual), and an outsider can
-      install and use trak from it alone.
+      install and use Trak from it alone.
 - [ ] 11.2 Record the demo GIF/screenshots: Version B, Version A, visualizer styles, settings screen,
       full-screen lyrics. Done when: images committed and referenced.
 - [ ] 11.3 GitHub repo polish: description, topics (`spotify`, `tui`, `rust`, `ratatui`, `macos`,
       `homebrew`, `terminal`), social preview image, `CONTRIBUTING.md`, issue templates,
       `SECURITY.md` (token handling note), `CODE_OF_CONDUCT.md` optional.
-- [ ] 11.4 Add a "Works with trak" mention in Sonar's and headless-spotify's READMEs (their agents do
+- [ ] 11.4 Add a "Works with Trak" mention in Sonar's and headless-spotify's READMEs (their agents do
       this via prompts 1 and 2). Confirm the three READMEs cross-link.
 - [ ] 11.5 Performance and battery pass: idle CPU < 1 % with the visualizer off and < ~5 % on;
       wake-ups minimised when paused; measure and record.

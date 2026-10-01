@@ -1,4 +1,4 @@
-# trak — architecture
+# Trak — architecture
 
 Target design. The code currently contains only a scaffold (`src/main.rs`); this describes what to
 build. If reality diverges, update this file in the same commit.

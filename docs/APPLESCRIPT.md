@@ -1,4 +1,4 @@
-# trak — AppleScript field survey (TODO 1.1 and 1.2)
+# Trak — AppleScript field survey (TODO 1.1 and 1.2)
 
 Everything here was measured live on the owner's machine, not read from docs.
 
@@ -14,7 +14,7 @@ Everything here was measured live on the owner's machine, not read from docs.
 > `asrun` so an agent session holds the Automation grant. It adds **~250 ms of
 > pure overhead** to every call (see [Cost](#cost)). All numbers below come from
 > `/usr/bin/osascript` invoked as the shim with `ASRUN_BYPASS=1`, which is what
-> trak itself will do (COMPAT rule 7). Never benchmark trak through the shim.
+> Trak itself will do (COMPAT rule 7). Never benchmark Trak through the shim.
 
 ---
 
@@ -57,21 +57,21 @@ Measured with `tell application "Spotify" to return <expr>`, while
 | `player position` | `3.359999895096` | real (f32 widened to f64) | **Seconds**, float. The `f32` widening shows up as noise digits — parse as `f64` and **never** compare for equality. shpotify's `pos` must accept floats. |
 | `sound volume` | `100` | integer | 0–100. See [Volume](#volume-the-r2-claim-is-false). |
 | `shuffling` | `false` | boolean | The **mode**. |
-| `shuffling enabled` | `true` | boolean (r) | The **live state**. These can differ: while a shuffled context is playing, `shuffling` may be `false` and `shuffling enabled` `true`. trak should show `shuffling` (what the user toggles) and may use `enabled` for the "context is shuffled" hint. |
+| `shuffling enabled` | `true` | boolean (r) | The **live state**. These can differ: while a shuffled context is playing, `shuffling` may be `false` and `shuffling enabled` `true`. Trak should show `shuffling` (what the user toggles) and may use `enabled` for the "context is shuffled" hint. |
 | `repeating` | `true` | boolean | Mode, as above. |
 | `repeating enabled` | `true` | boolean (r) | Live state. |
 | `name` | `Census Designated` | text | Empty string when nothing is loaded. |
 | `artist` | `Jane Remover` | text | Empty string for an ad. |
 | `album` | `Census Designated` | text | Empty string for an ad. |
 | `album artist` | `Jane Remover` | text | |
-| `duration` | `360511` | integer | **Milliseconds**, despite the sdef description saying "in seconds". 360511 ms = 6:00.5, which matches. trak must divide by 1000. |
+| `duration` | `360511` | integer | **Milliseconds**, despite the sdef description saying "in seconds". 360511 ms = 6:00.5, which matches. Trak must divide by 1000. |
 | `disc number` | `1` | integer | `0` for an ad. |
 | `track number` | `8` | integer | `0` for an ad. |
 | `popularity` | `48` | integer | 0–100. `0` for an ad. |
 | `played count` | `0` | integer | Local play count, not scrobbles. |
 | `artwork url` | `https://i.scdn.co/image/ab67616d0000b2738a821784ac3e69e691d4945f` | text | The `640`-size variant. No size parameter is exposed; fetch the larger `ab67616d00001e02…` form by string surgery if a bigger image is wanted (TODO 4.1). For an ad this is the **literal string** `missing value`. |
 | `spotify url` | `spotify:track:6HacgXCExkzS552ILfJTXu` | text | A **URI**, not an `https://` URL. |
-| `id` | `spotify:track:6HacgXCExkzS552ILfJTXu` | text | **Identical to `spotify url`** on every track observed. The sdef calls it "The ID of the item" but the value is the full URI. trak needs only one of the two; `id` is the cheaper, more honest name. |
+| `id` | `spotify:track:6HacgXCExkzS552ILfJTXu` | text | **Identical to `spotify url`** on every track observed. The sdef calls it "The ID of the item" but the value is the full URI. Trak needs only one of the two; `id` is the cheaper, more honest name. |
 | `starred` | *error* `-10000 AppleEvent handler failed` | — | **Broken.** Not in the standard suite, and the handler fails even with a valid track. Liking needs the Web API (Version A, `f` key). Do not surface `starred`. |
 | `artwork` (image data) | *error* `-1700` | — | Deprecated by the app itself. Ignore. |
 | `version` | `1.3.1.234` | text | From the Standard Suite. Useful in the Info tab and in bug reports. |
@@ -210,7 +210,7 @@ AppleScript interpretation:
 | Spotify, 30 Apple Events | 618 ms → **~19 ms marginal** |
 
 Finder answers 30 events in 2 ms of Apple Event time. Spotify takes 600 ms. So
-the cost is **inside Spotify's Apple Event handler**, and trak cannot get it back
+the cost is **inside Spotify's Apple Event handler**, and Trak cannot get it back
 by restructuring AppleScript. Confirmed dead ends:
 
 - **JXA** (`osascript -l JavaScript`, same bridge) — 415 ms, no better.
@@ -226,7 +226,7 @@ by restructuring AppleScript. Confirmed dead ends:
 ### Consequences for the design
 
 1. **A 1 s poll cannot be a 17-field read.** At 431 ms of mostly-idle waiting
-   per second, trak would sit at ~43 % of a core just reading state, and the
+   per second, Trak would sit at ~43 % of a core just reading state, and the
    progress bar would visibly stutter. Split the read:
    - **Fast read** (the 1 s / 3 s poll): `player state`, `player position`,
      `sound volume`, `shuffling`, `repeating`, `id` — 6 events, **~300 ms**.
@@ -250,8 +250,8 @@ by restructuring AppleScript. Confirmed dead ends:
 5. **The 5 s timeout in TODO 2.3 stays.** Worst observed was 1.3 s through the
    shim; 5 s is a comfortable multiple, not a guess about the typical case.
 
-Batched read script (the one trak should ship) is in
-[`trak-read.applescript`](../../spikes/applescript/trak-read.applescript) and its
+Batched read script (the one Trak should ship) is in
+[`trak-read.applescript`](../../spikes/applescript/Trak-read.applescript) and its
 output is `tests/fixtures/applescript/*.txt`.
 
 ---
@@ -288,15 +288,15 @@ the time. The value is **stable** afterwards — sampling every 250 ms for 3 s
 after setting 70 read `69` every time, not a ramp — and it survives a
 pause/play cycle. So this is a quantisation artefact, not a delayed apply.
 
-**What this means for trak (TODO 2.4, 3.10, 4.4):**
+**What this means for Trak (TODO 2.4, 3.10, 4.4):**
 
 - The read-back check in COMPAT rule 5 must use a **tolerance of ±1**, or it will
   declare every write a failure and hide the volume meter permanently. This is
   the single most important output of this spike for the volume feature.
-- The failure mode trak should still detect is *Spotify ignoring the write
+- The failure mode Trak should still detect is *Spotify ignoring the write
   entirely* — the read staying at the pre-write value (e.g. set 70, still 100).
   Distinguish "unchanged" from "off by one", not "changed at all".
-- trak must show the **value trak last successfully set**, not the raw read,
+- Trak must show the **value Trak last successfully set**, not the raw read,
   otherwise the meter visibly jitters by 1 % after every keypress.
 - The system-volume fallback (`set volume output volume N`, verified working:
   sets 50, reads back 50) is still worth keeping as a config option, but it
@@ -314,7 +314,7 @@ implemented as "if playing then `playpause`", and its `quit` uses the Standard
 Suite's `quit`.
 
 - `osascript -e 'tell application "Spotify" to stop'` returns `stop` and does
-  **not** pause playback — an unhandled command that silently no-ops. trak's
+  **not** pause playback — an unhandled command that silently no-ops. Trak's
   `stop` must use shpotify's semantics (`playpause` when playing), and must not
   pretend the command exists.
 - `quit` works via the Standard Suite (`NSApplication`), but quitting Spotify is
@@ -398,7 +398,7 @@ NSDistributedNotificationCenter::defaultCenter().addObserver_selector_name_objec
 NSRunLoop::currentRunLoop().runUntilDate(&until);
 ```
 
-Note the cost of this choice: trak's TUI already runs a main run loop, so
+Note the cost of this choice: Trak's TUI already runs a main run loop, so
 registering a selector is workable, but it means `player/notify.rs` must own an
 `NSObject` subclass and keep it alive. It also means the callback is delivered on
 the **main thread**, so it must do nothing but hand the data to a channel.
@@ -429,7 +429,7 @@ Two gaps worth noting:
 
 - **There is no `artwork url` in the notification.** Only the boolean
   `Has Artwork`. Album art still requires an AppleScript read (TODO 4.1) — the
-  notification can tell trak *whether* to bother, not *what* to show. This is
+  notification can tell Trak *whether* to bother, not *what* to show. This is
   the single best reason to keep the slow AppleScript read in the loop.
 - `Play Count` (notification) vs `played count` (AppleScript) — different
   spellings for what appears to be the same value. Treat the notification as
@@ -453,10 +453,10 @@ This is the finding that shapes the architecture. Each row was an isolated
 | `set repeating` | **no** |
 
 The notification therefore covers *playback state and track changes* — precisely
-the events trak must not miss, and precisely the ones Sonar's buttons, the media
+the events Trak must not miss, and precisely the ones Sonar's buttons, the media
 keys and the Spotify window all produce. It does **not** cover the four things
-trak's own keys write. trak applies its own writes locally, so it does not need
-an event for them, but a volume or shuffle changed *outside* trak (Sonar's fade,
+Trak's own keys write. Trak applies its own writes locally, so it does not need
+an event for them, but a volume or shuffle changed *outside* Trak (Sonar's fade,
 the Spotify window) will only be seen by a poll.
 
 ### Latency
@@ -477,7 +477,7 @@ Measured from a second process issuing the write to the callback firing, using
 Subscribe via `objc2-foundation` + a `define_class!` observer, and keep the
 AppleScript poll as a **slow safety net**, not as the primary path. Concretely,
 this revises the poll cost problem in §4: the 300 ms fast read no longer has to
-happen every second, because the notification tells trak immediately when
+happen every second, because the notification tells Trak immediately when
 something changed. The poll becomes 3–5 s (or slower) and only has to cover
 volume, shuffle, repeat and artwork — the things the notification is silent
 about. Recorded in `docs/ARCHITECTURE.md`.

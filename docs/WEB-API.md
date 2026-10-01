@@ -1,4 +1,4 @@
-# trak — Spotify Web API reality check (TODO 1.7 / 7.1)
+# Trak — Spotify Web API reality check (TODO 1.7 / 7.1)
 
 **Researched 2026-09-29 against `developer.spotify.com`.** Every claim below cites
 the page it came from; where the docs are ambiguous or self-contradictory, that is
@@ -25,7 +25,7 @@ of `TODO.md` were updated to match it in the same commit.
    library/follow/contains endpoints were consolidated into `PUT`/`DELETE
    /me/library` and `GET /me/library/contains`.
 4. **`Track.popularity` and `Album.popularity` are removed in dev mode.** This one
-   cuts the other way: trak already gets a real popularity from AppleScript
+   cuts the other way: Trak already gets a real popularity from AppleScript
    (`docs/APPLESCRIPT.md` §2), so the Info tab keeps working without the API.
 
 Not stale: PKCE is still the recommended flow, and access tokens still last one
@@ -48,7 +48,7 @@ Enforcement: "Beginning on the 9th of April 2025 we will enforce the subsequent
 validations to all newly created apps… all clients to migrate by **November
 2025**." Both dates are past, so this is live.
 
-**Dynamic ports are explicitly supported**, and this is the answer for trak:
+**Dynamic ports are explicitly supported**, and this is the answer for Trak:
 
 > "If you don't know the port number in advance, register your redirect URI with a
 > loopback IP literal, **but without any port number**. You can add the
@@ -62,7 +62,7 @@ exactly:
 http://127.0.0.1
 ```
 
-with no port and no path, and trak then binds a free ephemeral port per login and
+with no port and no path, and Trak then binds a free ephemeral port per login and
 sends the matching `redirect_uri` in the authorization request. The alternative
 (a fixed port) means `trak` fails to log in whenever that port is taken, which on a
 laptop is a real occurrence. Prefer the dynamic port.
@@ -94,7 +94,7 @@ Sources: <https://developer.spotify.com/documentation/web-api/concepts/quota-mod
 > "If the owner's Premium subscription lapses, the app will stop working. It will
 > resume functioning once the owner resubscribes." — migration guide
 
-For trak this is fine — the owner is the app owner and is the only user.
+For Trak this is fine — the owner is the app owner and is the only user.
 
 **User cap is 5, down from 25:**
 
@@ -107,7 +107,7 @@ without having been allowlisted… However, API requests with an access token
 associated to that user and app will receive a **403** status code error."
 
 This is what TODO 7.5's "403 → friendly typed error" must actually handle in
-practice, so the message should say *"this Spotify account is not on trak's
+practice, so the message should say *"this Spotify account is not on Trak's
 allowlist"* rather than a generic "permission denied".
 
 **Client IDs per developer: 25** (raised from 1 in July 2026).
@@ -122,14 +122,14 @@ exhaustion has its own error body, distinct from a rate limit:
 **Extended quota mode** (unlimited users, no allowlist) requires all six of:
 established business entity, launched service, ≥250k MAUs, key-market
 availability, commercial viability, ToS compliance. Since 2025-05-15 it is
-organisations only, not individuals. **trak is not eligible and should never
+organisations only, not individuals. **Trak is not eligible and should never
 promise this path.**
 
 **One postponement to be aware of:** the 6 Feb 2026 blog carries a dated update
 saying the *endpoint access* changes for **pre-existing** integrations were
 postponed, while the Premium requirement, the 5-user cap and the Client ID limit
-proceeded on 2026-03-09. Since trak's Client ID will be created *after* that, the
-full restricted endpoint set applies to trak.
+proceeded on 2026-03-09. Since Trak's Client ID will be created *after* that, the
+full restricted endpoint set applies to Trak.
 
 ## 3. Endpoint availability
 
@@ -137,7 +137,7 @@ Authoritative source: the "Endpoints still available" list in
 <https://developer.spotify.com/documentation/web-api/references/changes/february-2026>
 (accessed 2026-09-29). Scopes from each endpoint's reference page.
 
-| trak feature (SPEC §6) | Endpoint | In dev mode? | Scope | Premium-only? |
+| Trak feature (SPEC §6) | Endpoint | In dev mode? | Scope | Premium-only? |
 | --- | --- | --- | --- | --- |
 | Grouped search | `GET /search` | ✅ | none | No |
 | My playlists (list) | `GET /me/playlists` | ✅ | `playlist-read-private` | No |
@@ -303,7 +303,7 @@ re-signed binary blocks on read *and* on store, and because
 first launch after every `brew upgrade`. Full experiment in
 `docs/KEYCHAIN.md`.
 
-So the refresh token lives in a `0600` file at `~/.config/trak/token.json`
+So the refresh token lives in a `0600` file at `~/.config/Trak/token.json`
 (respecting `XDG_CONFIG_HOME`), written atomically, and trak refuses to read it
 if the mode is looser than `0600`. The `Store` trait still exists (TODO 7.4) so
 tests can fake it, but there is one real backend.

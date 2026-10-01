@@ -1,4 +1,4 @@
-# trak — product spec
+# Trak — product spec
 
 Every decision here was made by the owner (Kathir-D) in the design interview. **Do not re-ask
 these questions.** If something is missing or contradicts reality, add it to the "Open questions"
@@ -8,7 +8,7 @@ Legend: **A** = Version A (a Spotify Client ID is configured). **B** = Version B
 "Verify" marks a claim that is believed but not yet confirmed on this machine; the matching task in
 `TODO.md` says how to verify it.
 
-## 1. What trak is
+## 1. What Trak is
 
 An interactive, good-looking terminal UI for the **official Spotify desktop app on macOS**, plus
 every one-shot command from [shpotify](https://github.com/hnarayanan/shpotify). It controls Spotify
@@ -19,9 +19,9 @@ It is one part of the owner's music setup:
 
 1. **headless-spotify** hides Spotify from the Dock and Cmd-Tab.
 2. **Sonar** is a menu-bar item: skip / previous, plus auto-pause and resume when other audio plays.
-3. **trak** is the terminal display and controller.
+3. **Trak** is the terminal display and controller.
 
-See `docs/COMPAT.md` for how the three coexist. trak's look and feel is intentionally different from
+See `docs/COMPAT.md` for how the three coexist. Trak's look and feel is intentionally different from
 [spotify-tui](https://github.com/Rigellute/spotify-tui) even though the feature set is similar.
 
 ## 2. Decisions
@@ -30,9 +30,9 @@ See `docs/COMPAT.md` for how the three coexist. trak's look and feel is intentio
 | --- | --- |
 | Name / binary | `trak` (free on Homebrew and no notable GitHub repo of that name at the time of checking) |
 | Language / UI | Rust + [ratatui](https://github.com/ratatui/ratatui) |
-| License | MIT. `LICENSE` carries both the trak and the shpotify copyright lines |
+| License | MIT. `LICENSE` carries both the Trak and the shpotify copyright lines |
 | Platform | **macOS 14.2+ only** (Core Audio process taps need 14.2). arm64 + x86_64 |
-| Repo | Public `Kathir-D/trak`, from day one |
+| Repo | Public `Kathir-D/Trak`, from day one |
 | Distribution | Homebrew **formula** in `Kathir-D/homebrew-tap`: `brew install kathir-d/tap/trak`. Prebuilt binary from a GitHub release tarball. **No paid code signing / notarization** (ad-hoc `codesign -s -` is free and fine) |
 | CLI compat | Every shpotify subcommand keeps working. Bare `trak` opens the TUI |
 | CLI output | Redesigned but not extravagant. Plain by default when piped. `--plain` and `--json` flags |
@@ -56,7 +56,7 @@ See `docs/COMPAT.md` for how the three coexist. trak's look and feel is intentio
 Full dashboard: rounded panes, header, two columns, footer. Left = Now Playing, right = tabs.
 
 ```
-╭─ trak ─────────────────────────────────────────────────────────────────── ● playing   19:42 ─╮
+╭─ Trak ─────────────────────────────────────────────────────────────────── ● playing   19:42 ─╮
 │╭─ Now Playing ─────────────────────────────────╮╭─ [1]Search [2]Playlists [3]Queue [4]Liked ─╮│
 ││  <album art OR visualizer, ~20x10 cells>      ││ Up next                                    ││
 ││                        Nights                 ││  ▶ Nights               Frank Ocean   5:07 ││
@@ -135,12 +135,12 @@ invalidates a decision this section previously made.
 
 - Auth: Authorization Code + PKCE, **loopback redirect on an explicit IP literal**.
   The redirect URI registered in the dashboard is exactly `http://127.0.0.1` —
-  **no port, no path** — and trak binds an ephemeral port per login and sends the
+  **no port, no path** — and Trak binds an ephemeral port per login and sends the
   matching `redirect_uri` in the authorization request. `localhost` is **banned**
   by Spotify and must never appear in a request. Registering a fixed port is the
   fallback if the dashboard rejects the no-path form.
 - Developer mode is assumed, not requested: it **requires the app owner to hold
-  Spotify Premium** and **caps the app at 5 allowlisted users**. trak is a
+  Spotify Premium** and **caps the app at 5 allowlisted users**. Trak is a
   personal tool so this is fine, but an un-allowlisted account gets a 403 and the
   message must say so.
 - Features, adjusted to what dev mode still serves:
@@ -168,9 +168,9 @@ invalidates a decision this section previously made.
   playback endpoints are unavailable in dev mode.
 - Client ID lives in config; the refresh token lives in a `0600` file, **not** the Keychain: a
   keychain item is bound to the exact binary that created it, so every `brew upgrade` would
-  leave trak blocked on an undismissable authorization panel (`docs/KEYCHAIN.md`). Never log
+  leave Trak blocked on an undismissable authorization panel (`docs/KEYCHAIN.md`). Never log
   tokens.
-  **A refresh token lasts 6 months**, not indefinitely, so trak must show a
+  **A refresh token lasts 6 months**, not indefinitely, so Trak must show a
   "reconnect Spotify" state rather than failing silently.
 
 ## 7. Visualizer

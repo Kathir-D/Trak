@@ -100,7 +100,7 @@ const MAX_HEAD: usize = 8 * 1024;
 const USER_AGENT: &str = concat!(
     "trak/",
     env!("CARGO_PKG_VERSION"),
-    " (https://github.com/Kathir-D/trak)"
+    " (https://github.com/Kathir-D/Trak)"
 );
 
 /// Bytes of randomness behind a verifier or a `state`.

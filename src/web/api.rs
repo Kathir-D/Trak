@@ -106,7 +106,7 @@ const MAX_BYTES: u64 = 4 * 1024 * 1024;
 const USER_AGENT: &str = concat!(
     "trak/",
     env!("CARGO_PKG_VERSION"),
-    " (https://github.com/Kathir-D/trak)"
+    " (https://github.com/Kathir-D/Trak)"
 );
 
 /// One image of a cover, from Spotify's `images` array.

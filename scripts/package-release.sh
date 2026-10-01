@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# MIT License — Copyright (c) 2026 trak contributors (see LICENSE). trak descends
+# MIT License — Copyright (c) 2026 Trak contributors (see LICENSE). Trak descends
 # from shpotify by Harish Narayanan; see THIRD-PARTY-NOTICES.md.
 #
 # package-release.sh — build the universal release tarball and its checksum.
@@ -91,7 +91,7 @@ else
   # Same hint the sibling projects print, because forgetting the tag is the
   # common way a release ends up untagged.
   step "tag v$VERSION does not exist yet — create it once this passes:"
-  printf '  git tag -a v%s -m "trak v%s" && git push origin v%s\n' "$VERSION" "$VERSION" "$VERSION"
+  printf '  git tag -a v%s -m "Trak v%s" && git push origin v%s\n' "$VERSION" "$VERSION" "$VERSION"
 fi
 
 # A tarball built from a dirty tree does not match its tag, and nobody notices

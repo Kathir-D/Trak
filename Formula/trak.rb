@@ -1,11 +1,11 @@
-# MIT License — Copyright (c) 2026 trak contributors (see LICENSE). trak descends
+# MIT License — Copyright (c) 2026 Trak contributors (see LICENSE). Trak descends
 # from shpotify by Harish Narayanan; see THIRD-PARTY-NOTICES.md.
 #
-# Homebrew formula for trak. It ships the prebuilt universal binary from the GitHub
+# Homebrew formula for Trak. It ships the prebuilt universal binary from the GitHub
 # release tarball, which scripts/package-release.sh builds, lipo'd and ad-hoc
 # signed. Nothing here re-signs it: a Homebrew download is not quarantined, and a
 # bottle re-signs with the same free ad-hoc identity anyway, which is harmless
-# because trak keeps its token in a 0600 file rather than the Keychain
+# because Trak keeps its token in a 0600 file rather than the Keychain
 # (docs/KEYCHAIN.md).
 #
 # version, url and sha256 are placeholders until a release exists. The release
@@ -15,13 +15,13 @@
 # entry fails to install rather than installing something nobody verified.
 class Trak < Formula
   desc "Terminal UI and CLI for the Spotify desktop app on macOS"
-  homepage "https://github.com/Kathir-D/trak"
-  url "https://github.com/Kathir-D/trak/releases/download/v0.0.0-UNRELEASED/trak-0.0.0-UNRELEASED-macos.tar.gz"
+  homepage "https://github.com/Kathir-D/Trak"
+  url "https://github.com/Kathir-D/Trak/releases/download/v0.0.0-UNRELEASED/trak-0.0.0-UNRELEASED-macos.tar.gz"
   version "0.0.0-UNRELEASED"
   sha256 "0000000000000000000000000000000000000000000000000000000000000000"
   license "MIT"
 
-  head "https://github.com/Kathir-D/trak.git", branch: "main"
+  head "https://github.com/Kathir-D/Trak.git", branch: "main"
 
   # The audio tap needs 14.2, which Homebrew cannot express; the caveat below
   # says so rather than pretending the floor is 14.0.
@@ -36,7 +36,7 @@ class Trak < Formula
 
   def caveats
     <<~EOS
-      trak drives the official Spotify app through AppleScript, so install that
+      Trak drives the official Spotify app through AppleScript, so install that
       first if you have not:
         brew install --cask spotify
 
@@ -44,7 +44,7 @@ class Trak < Formula
       last minor version is the one thing this formula cannot state for you.
 
       The first trak command asks your terminal for permission to control
-      Spotify. If it is denied, trak says so and points at:
+      Spotify. If it is denied, Trak says so and points at:
         System Settings > Privacy & Security > Automation
       that prompt belongs to your terminal, not to trak, so it happens once per
       terminal.

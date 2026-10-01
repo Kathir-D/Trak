@@ -1,4 +1,4 @@
-# trak — releasing (TODO 9.1, 9.2, 9.3, 9.7)
+# Trak — releasing (TODO 9.1, 9.2, 9.3, 9.7)
 
 A release is **one tag** and **two CI jobs**. Everything else in this file is what
 you do before and after that tag, in order, so that a half-finished release at 1am
@@ -77,7 +77,7 @@ Then, in this order:
    git restore Formula/trak.rb      # the committed formula must keep the release URL
    ```
 
-5. **Commit and push.** Then watch CI: <https://github.com/Kathir-D/trak/actions>.
+5. **Commit and push.** Then watch CI: <https://github.com/Kathir-D/Trak/actions>.
 
 ## 2. Tag
 
@@ -137,7 +137,7 @@ proves the artifact a user downloads is the one you built.
 
 ```sh
 V="$(cat VERSION)"
-base="https://github.com/Kathir-D/trak/releases/download/v$V"
+base="https://github.com/Kathir-D/Trak/releases/download/v$V"
 curl -LO "$base/trak-$V-macos.tar.gz"
 curl -LO "$base/SHA256SUMS.txt"
 
@@ -192,21 +192,21 @@ because there is nothing to fix:
   quarantine flag into a cellar either.
 - **Bottling does not change the signature.** Homebrew re-signs a Mach-O file only
   when it has itself modified one — stripping it, rewriting a dylib path, or a
-  `codesign` install step. trak is one self-contained executable with no dylib
+  `codesign` install step. Trak is one self-contained executable with no dylib
   references to rewrite, so it is installed exactly as it was signed. If a future
   change ever did make Homebrew re-sign it, the re-sign would be ad-hoc
   (`codesign -s -`) and therefore still free.
-- **A changing code identity is the one thing that does matter, and trak is immune
+- **A changing code identity is the one thing that does matter, and Trak is immune
   to it.** Every release is a new ad-hoc identity, so every `brew upgrade` is a new
   identity too — which is the exact case TODO 1.8 measured as a *hang* for a
   Keychain item, because a keychain item is readable only by the binary that
-  created it. trak keeps its token in a `0600` file (`docs/KEYCHAIN.md`), which
+  created it. Trak keeps its token in a `0600` file (`docs/KEYCHAIN.md`), which
   survives a re-sign, a re-link and an upgrade. That decision is what makes the
   no-paid-signing distribution safe, and it is the reason the formula does not
   need to sign anything itself.
 - **The ad-hoc signature is not optional.** An unsigned arm64 slice is killed by
   the kernel, so `codesign -s -` runs on the merged binary every time. It is free,
-  and it is the only signing trak does or will do.
+  and it is the only signing Trak does or will do.
 
 If a bottle ever becomes the distribution path rather than the release tarball,
 nothing above changes; the ad-hoc re-sign is already accounted for.

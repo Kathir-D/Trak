@@ -47,7 +47,7 @@ const MAX_DEPTH: usize = 32;
 const USER_AGENT: &str = concat!(
     "trak/",
     env!("CARGO_PKG_VERSION"),
-    " (https://github.com/Kathir-D/trak)"
+    " (https://github.com/Kathir-D/Trak)"
 );
 
 /// How many lookups to keep on disk. The same bound the art cache uses: a
@@ -101,7 +101,7 @@ pub enum LyricsError {
     #[error("LRCLIB answered HTTP {0}")]
     Status(u16),
     /// The status said success and the body was not the JSON it claimed to be.
-    #[error("LRCLIB sent an answer trak could not read")]
+    #[error("LRCLIB sent an answer Trak could not read")]
     Malformed,
     /// No answer within [`TIMEOUT`].
     #[error("LRCLIB did not answer in time")]
@@ -117,7 +117,7 @@ impl LyricsError {
             LyricsError::Unreachable => "lyrics: LRCLIB is unreachable".to_string(),
             LyricsError::Status(code) => format!("lyrics: LRCLIB answered HTTP {code}"),
             LyricsError::Malformed => {
-                "lyrics: LRCLIB sent an answer trak could not read".to_string()
+                "lyrics: LRCLIB sent an answer Trak could not read".to_string()
             }
             LyricsError::Timeout => "lyrics: LRCLIB did not answer in time".to_string(),
         }
@@ -1246,7 +1246,7 @@ mod tests {
         fetch_from(server.base(), "Creep", "Radiohead", None, None).expect("synced");
         let head = server.head(0);
         assert!(head.contains("user-agent: trak/"), "{head}");
-        assert!(head.contains("github.com/Kathir-D/trak"), "{head}");
+        assert!(head.contains("github.com/Kathir-D/Trak"), "{head}");
     }
 
     #[test]

@@ -1,4 +1,4 @@
-# AGENTS.md — trak
+# AGENTS.md — Trak
 
 Instructions for any coding agent (Claude Code, opencode, Codex, ...) working in this repo. You are
 assumed to have **no prior context**. Read this file fully, then follow "Start here".
@@ -14,7 +14,7 @@ formula** with **no paid code signing**.
 
 It is one piece of the owner's music setup, alongside two sibling projects in `../`:
 **headless-spotify** (hides Spotify from the Dock) and **Sonar** (menu-bar skip/prev + auto-pause).
-trak must coexist with both. That contract is `docs/COMPAT.md` and is non-negotiable.
+Trak must coexist with both. That contract is `docs/COMPAT.md` and is non-negotiable.
 
 **Status:** pre-alpha. Only a scaffold exists (`src/main.rs` prints `--version`). Everything else is
 planned in `TODO.md`.
@@ -23,7 +23,7 @@ planned in `TODO.md`.
 
 1. `docs/SPEC.md` — every product decision, the layout, keys, config schema, CLI. Already decided
    by the owner in a long design interview. **Do not re-ask; do not redesign.**
-2. `docs/COMPAT.md` — how trak must behave next to Sonar and headless-spotify.
+2. `docs/COMPAT.md` — how Trak must behave next to Sonar and headless-spotify.
 3. `docs/ARCHITECTURE.md` — module map, principles, testing strategy.
 4. `TODO.md` — the ordered task list. Pick the first unchecked task whose `Needs` are met.
 5. `THIRD-PARTY-NOTICES.md` — update whenever you add a dependency or borrow an idea.
@@ -37,7 +37,7 @@ Then read the code for the task you picked. Do not start coding from this file a
   `projects/trak`. Never create repos or write code outside `projects/`.
 - Clone with `gh repo clone <owner/repo>` or `git clone <url>` with **no target dir** (shell
   wrappers redirect it into `projects/`). Never pass a target outside `projects/`.
-- Sibling repos (`../Sonar`, `../headless-spotify`, `../homebrew-tap`) are **read-only for trak
+- Sibling repos (`../Sonar`, `../headless-spotify`, `../homebrew-tap`) are **read-only for Trak
   tasks**. Do not edit them. If they need a change, add or update a prompt in
   `docs/AGENT-PROMPTS.md` and tell the owner. (`../shpotify-tui` is a local clone of the upstream
   shpotify for reference; also read-only.)
@@ -94,10 +94,10 @@ All four of fmt / clippy / test / release-build must pass before you commit. CI
   clicking a macOS permission prompt, adding a GitHub secret, approving a release). List those in
   your final message.
 - `sudo -n` works without a password (use `-n` so it fails instead of hanging). You should almost
-  never need it for trak.
+  never need it for Trak.
 - **AppleScript from an agent session**: plain `osascript` in `~/.local/bin` is a shim routed
   through `asrun` (which holds the Automation/Accessibility grants). Plain calls to
-  `/usr/bin/osascript` from the agent process are silently denied (error -1743). trak calls
+  `/usr/bin/osascript` from the agent process are silently denied (error -1743). Trak calls
   `$TRAK_OSASCRIPT` (default `/usr/bin/osascript`), so when testing against a real Spotify from an
   agent session run with `TRAK_OSASCRIPT="$HOME/.local/bin/osascript"`, or `ASRUN_BYPASS=1` to call
   the real binary. If an app returns -1743, its one-time Automation prompt is pending on screen and
@@ -175,7 +175,7 @@ fixtures under `tests/fixtures/` so future tests are hermetic.
 - A decision is genuinely missing → add it to `docs/SPEC.md` §10 "Open questions" and ask the
   owner only that question, with a recommended default.
 - Spotify, Sonar, or headless-spotify behave differently than `docs/COMPAT.md` says → stop, record
-  the observation with real output in `docs/COMPAT.md`, and adapt trak (not the siblings).
+  the observation with real output in `docs/COMPAT.md`, and adapt Trak (not the siblings).
 
 ## Repo map
 

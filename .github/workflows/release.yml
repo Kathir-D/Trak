@@ -102,7 +102,7 @@ jobs:
 
           source = sub(r'^  version ".*"$', f'  version "{version}"', "version")
           source = sub(r'^  url ".*"$',
-                       f'  url "https://github.com/Kathir-D/trak/releases/download/v{version}'
+                       f'  url "https://github.com/Kathir-D/Trak/releases/download/v{version}'
                        f'/trak-{version}-macos.tar.gz"',
                        "url")
           source = sub(r'^  sha256 ".*"$', f'  sha256 "{sha}"', "sha256")

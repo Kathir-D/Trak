@@ -757,7 +757,7 @@ fn draw_idle_card(f: &mut Frame, area: Rect, theme: &Theme) {
             )),
             Line::from(""),
             Line::from(Span::styled(
-                "trak never starts Spotify on its own.",
+                "Trak never starts Spotify on its own.",
                 Theme::dim(),
             )),
             Line::from(Span::styled("q  quit            ?  keys", Theme::dim())),
@@ -765,7 +765,7 @@ fn draw_idle_card(f: &mut Frame, area: Rect, theme: &Theme) {
         .alignment(Alignment::Center)
         .block(
             Block::bordered()
-                .title(" trak ")
+                .title(" Trak ")
                 .border_type(
                     theme
                         .border
@@ -841,7 +841,7 @@ fn draw_too_small(f: &mut Frame, area: Rect, app: &App) {
 fn draw_header(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let state = app.state.as_ref().map(|s| s.playback);
     let mut left = vec![Span::styled(
-        " trak ",
+        " Trak ",
         Style::default()
             .fg(theme.palette.end())
             .add_modifier(Modifier::BOLD),
@@ -2227,7 +2227,7 @@ mod tests {
         // The app is still visible above the overlay, so it is a panel not a page.
         let first_row: String = (0..100).map(|x| buf[(x, 0)].symbol().to_string()).collect();
         assert!(
-            first_row.contains("trak"),
+            first_row.contains("Trak"),
             "the app is still drawn: {first_row:?}"
         );
     }
