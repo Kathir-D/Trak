@@ -5,6 +5,7 @@
 //! (SPEC §9).
 
 use crate::player::{Player, PlayerError, PlayerState};
+use crate::web::api::{Album, Artist, Playlist, SearchResults, Track, best_match};
 
 /// SPEC §9: 0 ok, 1 runtime failure, 2 usage / missing setup.
 pub const EXIT_OK: i32 = 0;
@@ -300,12 +301,151 @@ pub fn run_seek<P: Player + ?Sized>(player: &mut P, secs: f64) -> i32 {
     }
 }
 
+/// The one group a `trak play` spelling searches (SPEC §9): the bare spelling
+/// is a song, and `album|artist|list` name the others.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlayGroup {
+    Song,
+    Album,
+    Artist,
+    List,
+}
+
+impl PlayGroup {
+    /// The subcommand words, so a message can quote the command the user
+    /// actually typed. Telling someone who ran `trak play album x` that
+    /// `trak play "x"` needs a Client ID reads as though the group were dropped.
+    pub fn spelling(self) -> &'static str {
+        match self {
+            PlayGroup::Song => "play",
+            PlayGroup::Album => "play album",
+            PlayGroup::Artist => "play artist",
+            PlayGroup::List => "play list",
+        }
+    }
+}
+
+/// What `trak play <name>` decided to play: the URI AppleScript is about to
+/// receive, and the line that says which match that was.
+///
+/// The two are decided in one place because printing one thing and playing
+/// another is exactly the mistake this command could otherwise make silently.
+/// Playback stays on AppleScript (SPEC §6), so the URI is the whole payload.
+pub struct PlayChoice {
+    pub uri: String,
+    pub line: String,
+}
+
+/// The best match in one group of a search, as a [`PlayChoice`], or `None` when
+/// there was nothing that could be played.
+///
+/// A row whose `uri` is empty is not a match. The models default `uri` to an
+/// empty string rather than `Option`, so a response that omitted it — malformed
+/// rather than hostile — would otherwise hand `play track ""` to AppleScript
+/// after a line claiming something else was playing.
+pub fn choose(
+    group: PlayGroup,
+    query: &str,
+    results: &SearchResults,
+    style: Style,
+) -> Option<PlayChoice> {
+    match group {
+        PlayGroup::Song => {
+            let playable: Vec<&Track> = results
+                .tracks
+                .iter()
+                .filter(|track| !track.uri.is_empty())
+                .collect();
+            best_match(&playable, query, |track| &track.name).map(|track| PlayChoice {
+                uri: track.uri.clone(),
+                line: song_line(track, style),
+            })
+        }
+        PlayGroup::Album => {
+            let playable: Vec<&Album> = results
+                .albums
+                .iter()
+                .filter(|album| !album.uri.is_empty())
+                .collect();
+            best_match(&playable, query, |album| &album.name).map(|album| PlayChoice {
+                uri: album.uri.clone(),
+                // The row's own one-line form: name, artist, year — the three
+                // things that tell two albums apart.
+                line: styled(&album.to_string(), style),
+            })
+        }
+        PlayGroup::Artist => {
+            let playable: Vec<&Artist> = results
+                .artists
+                .iter()
+                .filter(|artist| !artist.uri.is_empty())
+                .collect();
+            best_match(&playable, query, |artist| &artist.name).map(|artist| PlayChoice {
+                uri: artist.uri.clone(),
+                // An artist has nothing to add beyond the name the API removed
+                // the follower count from (docs/WEB-API.md §3).
+                line: styled(&artist.to_string(), style),
+            })
+        }
+        PlayGroup::List => {
+            let playable: Vec<&Playlist> = results
+                .playlists
+                .iter()
+                .filter(|playlist| !playlist.uri.is_empty())
+                .collect();
+            best_match(&playable, query, |playlist| &playlist.name).map(|playlist| PlayChoice {
+                uri: playlist.uri.clone(),
+                // The row's own form, which carries the track count when
+                // Spotify sent one — the thing that tells two same-named lists
+                // apart.
+                line: styled(&playlist.to_string(), style),
+            })
+        }
+    }
+}
+
+/// `Playing <title> — <artist> (<album>)`.
+///
+/// Title first, where [`Track`]'s own one-line form puts the artist first: a
+/// list row is scanned for the artist, but this line answers "which one did you
+/// pick for me", and the title is the thing that was typed. Each part is dropped
+/// rather than printed empty — an artist-less track is ordinary (a promo, a local
+/// file) and `Playing —  ()` would misstate all three.
+fn song_line(track: &Track, style: Style) -> String {
+    let mut line = track.name.clone();
+    let artists: Vec<&str> = track
+        .artists
+        .iter()
+        .map(|artist| artist.name.as_str())
+        .collect();
+    if !artists.is_empty() {
+        line.push_str(&format!(" — {}", artists.join(", ")));
+    }
+    if let Some(album) = track.album.as_ref().filter(|album| !album.name.is_empty()) {
+        line.push_str(&format!(" ({})", album.name));
+    }
+    styled(&line, style)
+}
+
+/// `Playing <what>`, with the match emphasised as a whole.
+///
+/// One rule for all four groups, which is why a song is not bolded by title and
+/// an album by row: this is a single line with no hierarchy to express. The
+/// status card can dim a sub-line because it has a card; here the match *is* the
+/// message, and `Playing` itself stays unbolded so the eye lands on what was
+/// picked.
+fn styled(what: &str, style: Style) -> String {
+    let Palette { bold, reset, .. } = Palette::for_style(style);
+    format!("Playing {bold}{what}{reset}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::player::parse::parse;
     use crate::player::{PlaybackState, TrackInfo};
     use crate::testutil::fixture;
+    use crate::web::api::{Playlist, PlaylistContents};
 
     fn sample() -> PlayerState {
         parse(&fixture("playing_track.txt")).unwrap()
@@ -433,5 +573,217 @@ mod tests {
             );
             assert!(m.ends_with(&format!("{v}%")), "{m}");
         }
+    }
+
+    // --- `trak play <name>`: the pick and the line -------------------------
+
+    /// The setup message quotes the command back, so every group has to spell
+    /// itself the way the user typed it.
+    #[test]
+    fn every_group_spells_the_command_it_was_typed_as() {
+        assert_eq!(PlayGroup::Song.spelling(), "play");
+        assert_eq!(PlayGroup::Album.spelling(), "play album");
+        assert_eq!(PlayGroup::Artist.spelling(), "play artist");
+        assert_eq!(PlayGroup::List.spelling(), "play list");
+    }
+
+    /// A track with the parts the line shows. Written out by hand rather than
+    /// shared with `web::api`'s fixtures, so the two cannot agree by mistake.
+    fn song(name: &str, artist: &str, album: &str, uri: &str) -> Track {
+        Track {
+            id: String::new(),
+            name: name.to_string(),
+            uri: uri.to_string(),
+            duration_ms: 0,
+            track_number: None,
+            disc_number: None,
+            artists: vec![Artist {
+                id: String::new(),
+                name: artist.to_string(),
+                uri: String::new(),
+                images: Vec::new(),
+            }],
+            album: Some(Album {
+                id: String::new(),
+                name: album.to_string(),
+                uri: String::new(),
+                release_date: None,
+                artists: Vec::new(),
+                images: Vec::new(),
+                total_tracks: None,
+            }),
+        }
+    }
+
+    fn search_of(tracks: Vec<Track>) -> SearchResults {
+        SearchResults {
+            tracks,
+            ..SearchResults::default()
+        }
+    }
+
+    #[test]
+    fn a_song_choice_names_the_title_the_artist_and_the_album() {
+        let results = search_of(vec![song(
+            "Teardrop",
+            "Massive Attack",
+            "Mezzanine",
+            "spotify:track:t1",
+        )]);
+        let choice = choose(PlayGroup::Song, "teardrop", &results, Style::Plain).expect("a pick");
+        assert_eq!(choice.line, "Playing Teardrop — Massive Attack (Mezzanine)");
+        assert_eq!(choice.uri, "spotify:track:t1");
+    }
+
+    /// The exact-name row wins even when the first result came from the same
+    /// album — the tiebreak `best_match` exists for, seen through the CLI's own
+    /// formatter.
+    #[test]
+    fn a_song_choice_prefers_the_row_named_after_the_query() {
+        let results = search_of(vec![
+            song("Angel", "Massive Attack", "Mezzanine", "spotify:track:a"),
+            song(
+                "Mezzanine",
+                "Massive Attack",
+                "Mezzanine",
+                "spotify:track:m",
+            ),
+        ]);
+        let choice = choose(PlayGroup::Song, "mezzanine", &results, Style::Plain).expect("a pick");
+        assert_eq!(
+            choice.line,
+            "Playing Mezzanine — Massive Attack (Mezzanine)"
+        );
+        assert_eq!(choice.uri, "spotify:track:m");
+    }
+
+    #[test]
+    fn a_song_choice_drops_the_parts_it_does_not_have() {
+        let no_album = song("Promo", "Someone", "", "spotify:track:p1");
+        let results = search_of(vec![no_album]);
+        let choice = choose(PlayGroup::Song, "promo", &results, Style::Plain).expect("a pick");
+        assert_eq!(choice.line, "Playing Promo — Someone");
+
+        let bare = Track {
+            album: None,
+            artists: Vec::new(),
+            ..song("Bare", "x", "y", "spotify:track:b1")
+        };
+        let results = search_of(vec![bare]);
+        let choice = choose(PlayGroup::Song, "bare", &results, Style::Plain).expect("a pick");
+        assert_eq!(choice.line, "Playing Bare");
+    }
+
+    #[test]
+    fn a_choice_is_bold_on_a_tty_and_plain_when_piped() {
+        let results = search_of(vec![song("Teardrop", "Massive Attack", "Mezzanine", "u")]);
+        let tidy = choose(PlayGroup::Song, "teardrop", &results, Style::Tidy).expect("a pick");
+        // The whole match is bolded, and `Playing` is not, in every group — the
+        // rule is one rule.
+        assert_eq!(
+            tidy.line,
+            "Playing \x1b[1mTeardrop — Massive Attack (Mezzanine)\x1b[0m"
+        );
+        let plain = choose(PlayGroup::Song, "teardrop", &results, Style::Plain).expect("a pick");
+        assert!(!plain.line.contains('\x1b'));
+    }
+
+    /// The album, artist and list lines are the rows' own one-line forms, so
+    /// the play command and the tabs cannot disagree about what a row is
+    /// called.
+    #[test]
+    fn the_other_groups_use_the_rows_one_line_forms() {
+        let album_row = Album {
+            id: String::new(),
+            name: "Mezzanine".to_string(),
+            uri: "spotify:album:m".to_string(),
+            release_date: Some("1998-04-20".to_string()),
+            artists: vec![Artist {
+                id: String::new(),
+                name: "Massive Attack".to_string(),
+                uri: String::new(),
+                images: Vec::new(),
+            }],
+            images: Vec::new(),
+            total_tracks: None,
+        };
+        let artist_row = Artist {
+            id: String::new(),
+            name: "Massive Attack".to_string(),
+            uri: "spotify:artist:m".to_string(),
+            images: Vec::new(),
+        };
+        let list_row = Playlist {
+            id: String::new(),
+            name: "Massive Attack on Repeat".to_string(),
+            uri: "spotify:playlist:m".to_string(),
+            description: None,
+            images: Vec::new(),
+            contents: Some(PlaylistContents {
+                total: Some(3),
+                items: Vec::new(),
+            }),
+        };
+
+        let albums = SearchResults {
+            albums: vec![album_row],
+            ..SearchResults::default()
+        };
+        let choice = choose(PlayGroup::Album, "mezzanine", &albums, Style::Plain).expect("a pick");
+        assert_eq!(choice.line, "Playing Mezzanine — Massive Attack (1998)");
+        assert_eq!(choice.uri, "spotify:album:m");
+
+        let artists = SearchResults {
+            artists: vec![artist_row],
+            ..SearchResults::default()
+        };
+        let choice = choose(PlayGroup::Artist, "mass", &artists, Style::Plain).expect("a pick");
+        assert_eq!(choice.line, "Playing Massive Attack");
+
+        let lists = SearchResults {
+            playlists: vec![list_row],
+            ..SearchResults::default()
+        };
+        let choice = choose(PlayGroup::List, "mass", &lists, Style::Plain).expect("a pick");
+        assert_eq!(choice.line, "Playing Massive Attack on Repeat · 3 tracks");
+    }
+
+    /// A row with no URI is skipped even when its name is the query, because
+    /// `play track ""` is not a play. The next-best row wins instead.
+    #[test]
+    fn a_row_with_no_uri_is_not_a_match() {
+        let results = search_of(vec![
+            song("Teardrop", "Massive Attack", "Mezzanine", ""),
+            song(
+                "Teardrop",
+                "Massive Attack",
+                "Mezzanine",
+                "spotify:track:t2",
+            ),
+        ]);
+        let choice = choose(PlayGroup::Song, "teardrop", &results, Style::Plain).expect("a pick");
+        assert_eq!(choice.uri, "spotify:track:t2");
+    }
+
+    #[test]
+    fn an_empty_group_is_no_choice_at_all() {
+        assert!(
+            choose(
+                PlayGroup::Song,
+                "anything",
+                &SearchResults::default(),
+                Style::Plain
+            )
+            .is_none()
+        );
+        assert!(
+            choose(
+                PlayGroup::List,
+                "anything",
+                &SearchResults::default(),
+                Style::Plain
+            )
+            .is_none()
+        );
     }
 }
