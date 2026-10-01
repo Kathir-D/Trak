@@ -537,13 +537,39 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
       > JSON *object* (`TrackNotFound`), so without a status check in `search` a double miss came
       > out as "LRCLIB sent an answer trak could not read" — a message that blames the service for
       > the song not being there.
-- [ ] 6.2 **LRC parser + "current line for position"** (handles `[mm:ss.xx]`, multiple stamps per line,
+- [x] 6.2 **LRC parser + "current line for position"** (handles `[mm:ss.xx]`, multiple stamps per line,
       offset tag, plain-text lyrics without stamps). Done when: unit tests incl. malformed input.
-- [ ] 6.3 **Lyrics tab**: current line highlighted and auto-scrolling, manual scroll pauses
+      > All four shapes live in `src/lyrics.rs`: multi-tag lines yield one line per tag, a bare tag
+      > is a musical rest, unsynced lyrics get NaN times that `index_at` can never select, and
+      > malformed lines are dropped rather than guessed at. **The `[offset:±ms]` tag is applied to
+      > the whole file** (including lines before it): positive shifts the lyrics *earlier*, per the
+      > LRC convention; a shifted-before-zero line is **clamped to 0.0, not dropped** — it is still
+      > a line of the song; the last offset tag wins; an unparseable offset shifts nothing.
+- [x] 6.3 **Lyrics tab**: current line highlighted and auto-scrolling, manual scroll pauses
       auto-follow for a few seconds. Done when: snapshot tests; manual sync check on a real song.
-- [ ] 6.4 **Full-screen lyrics (`L`)**: large centered current line, dim neighbours, accent colour,
+      > `j`/`k` and the mouse wheel take the scroll from the song for **4 s** (ticked down by
+      > `Event::Tick`, so the resume is tested by ticking, never by sleeping), and the pane says
+      > "following paused — it resumes on its own" while the hold lasts. `j`/`k` on this tab move
+      > the words, not a history selection the tab cannot show; a click on a lyric row plays
+      > nothing. The sung line keeps its gradient wherever it lands in the window, so scrolling
+      > ahead still shows which line the song is on. **Real-song check (2026-10-01, "Beauty Sleep"
+      > — Jane Remover):** the live lookup returned synced lyrics from `/api/get`, wrote the disk
+      > cache, and the line-at-position resolved correctly at pos 48 s against the playing
+      > Spotify. Screenshots: `docs/images/tui-6.3-tab.png`.
+- [x] 6.4 **Full-screen lyrics (`L`)**: large centered current line, dim neighbours, accent colour,
       `esc` returns. Done when: works at several sizes, no wrapping glitches (wrap long lines by
       display width, mind wide/CJK characters).
+      > `wrap_by_width` wraps by display width (`unicode-width`, moved from dev-deps to deps and
+      > re-recorded in THIRD-PARTY-NOTICES), so 40 CJK glyphs fill an 80-column row instead of
+      > tearing — and a TestBackend test had to learn to walk skip cells to *measure* that, since
+      > every wide glyph is followed by a pad cell that naïve counting reads as a third column.
+      > The anchor line is centred, bold, in the accent colour; `L`/`esc` leave; transport keys
+      > still answer while the page is up (the song does not stop being controllable because its
+      > words fill the screen). Renders at every size from 100×30 down to 10×1 without panicking.
+      > NOT_YET is now **empty** — every key SPEC §4 promises to both versions is bound — and the
+      > 3.8 test that asserted the excuse list was non-empty was updated: empty is the finished
+      > state, and the two render-side tests on the same list are what stop it meaning "the help
+      > and the SPEC diverged". Screenshot: `docs/images/tui-6.4-fullscreen.png`.
 
 ---
 

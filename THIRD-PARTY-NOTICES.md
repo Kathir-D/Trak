@@ -49,7 +49,7 @@ All MIT or MIT/Apache-2.0, checked against the crate metadata in `Cargo.lock`.
 | [ureq](https://github.com/algesten/ureq) | 3 | MIT/Apache-2.0 | fetching cover art | blocking, on the worker thread; default features are rustls + webpki-roots, so there is no OpenSSL and no system trust store to go stale |
 | [assert_cmd](https://github.com/assert-rs/assert_cmd) | 2 | MIT/Apache-2.0 | CLI tests (dev only) | |
 | [predicates](https://github.com/assert-rs/predicates) | 3 | MIT/Apache-2.0 | CLI test assertions (dev only) | |
-| [unicode-width](https://github.com/unicode-rs/unicode-width) | 0.2 | MIT/Apache-2.0 | asserting bars are one cell per character (dev only) | |
+| [unicode-width](https://github.com/unicode-rs/unicode-width) | 0.2 | MIT/Apache-2.0 | wrapping lyric lines by display width; asserting bars are one cell per character | |
 | [filetime](https://github.com/alsdy/filetime) | 0.2 | MIT/Apache-2.0 | setting file times in the cache-pruning test (dev only) | |
 
 ## Verified during the Phase 1 spikes

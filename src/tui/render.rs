@@ -38,7 +38,10 @@ use crate::tui::theme::{Theme, format_time, progress_bar};
 /// The Version A rows (`/`, `f`, `A`, `o`) are filtered out by the version
 /// column, so they are not excused here: a key only needs an excuse if the
 /// SPEC promises it to this build.
-pub(crate) const NOT_YET: &[(&str, &str)] = &[("L", "the full-screen lyrics page is TODO 6.4")];
+/// Keys SPEC §4 lists that this build does not bind yet, each with the honest
+/// reason. A key that *is* bound must never appear here; a test presses every
+/// excuse through `update` and fails the build if the excuse has become false.
+pub(crate) const NOT_YET: &[(&str, &str)] = &[];
 
 /// Which layout the terminal is wide enough for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -447,6 +450,20 @@ pub fn draw_with(
         return;
     }
 
+    // The full-screen lyrics page replaces the dashboard (TODO 6.4). It is
+    // drawn before the layout so a two-column dashboard is never built behind
+    // a page that covers it.
+    if app.lyrics_full {
+        draw_lyrics_page(f, area, app, theme);
+        if app.show_help {
+            draw_help(f, area);
+        }
+        if let Some(t) = &app.toast {
+            draw_toast(f, area, &t.text, theme);
+        }
+        return;
+    }
+
     match layout_for(w, h) {
         Layout_::TooSmall => draw_too_small(f, area, app),
         Layout_::Compact => draw_compact(f, area, app, theme, regions, images),
@@ -459,6 +476,159 @@ pub fn draw_with(
     }
     if let Some(t) = &app.toast {
         draw_toast(f, area, &t.text, theme);
+    }
+}
+
+/// Wrap text to a display width, not a character count (TODO 6.4).
+///
+/// A CJK character is two cells wide, so wrapping by characters puts a wide
+/// glyph past the edge of the screen and the line tears. Widths are measured
+/// with `unicode-width`, the same library that pins the bars and meters, and a
+/// character wider than the whole row (only possible at width 1) is let through
+/// rather than dropped: losing a word is worse than one ragged column.
+pub(crate) fn wrap_by_width(text: &str, width: usize) -> Vec<String> {
+    use unicode_width::UnicodeWidthChar;
+
+    let width = width.max(1);
+    let mut rows = Vec::new();
+    let mut row = String::new();
+    let mut used = 0;
+    for ch in text.chars() {
+        let cw = ch.width().unwrap_or(0);
+        // A zero-width character never starts a row; everything else starts
+        // one when it no longer fits.
+        if used + cw > width && !row.is_empty() {
+            rows.push(std::mem::take(&mut row));
+            used = 0;
+        }
+        row.push(ch);
+        used += cw;
+    }
+    if !row.is_empty() || rows.is_empty() {
+        rows.push(row);
+    }
+    rows
+}
+
+/// The full-screen lyrics page (TODO 6.4): the line being sung, large and
+/// centred, its neighbours receding above and below. `L` and `esc` leave (the
+/// key handling is in `app.rs`); the bottom line says so, because a page that
+/// covers every hint the dashboard carries owes one of its own.
+fn draw_lyrics_page(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+    use crate::tui::app::LyricsStatus;
+    let dim = Theme::dim();
+    let (w, h) = (area.width as usize, area.height as usize);
+
+    let lyrics = match (&app.lyrics.status, app.lyrics.lyrics.as_ref()) {
+        (LyricsStatus::Ready, Some(l)) if !l.lines.is_empty() && !l.instrumental => l,
+        _ => {
+            // The same words the tab would say, centred, so the page is never
+            // a blank screen with no way to know why.
+            let title = app.track().map(|t| t.title.clone()).unwrap_or_default();
+            let msg = match &app.lyrics.status {
+                LyricsStatus::Ready => "this one is instrumental",
+                LyricsStatus::NotFound => "no lyrics for this one",
+                LyricsStatus::Failed(why) => why.as_str(),
+                LyricsStatus::Idle | LyricsStatus::Loading => "looking for lyrics…",
+            };
+            let rows = vec![
+                Line::from(Span::styled(
+                    title,
+                    Style::default().add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+                Line::from(Span::styled(
+                    msg.to_string(),
+                    dim.add_modifier(Modifier::ITALIC),
+                )),
+            ];
+            f.render_widget(Paragraph::new(rows).alignment(Alignment::Center), area);
+            return;
+        }
+    };
+
+    let pos = app.interpolated_position();
+    let active = lyrics
+        .lines
+        .iter()
+        .rposition(|l| !l.time_secs.is_nan() && l.time_secs <= pos)
+        .unwrap_or(0);
+    let anchor = app.lyrics.anchor(pos).unwrap_or(active);
+    let synced = lyrics.synced && !lyrics.lines[active].time_secs.is_nan();
+
+    // The anchor's rows, centred on the middle of the screen. "Large" is all a
+    // terminal can do: bold, in the accent colour, alone in that colour.
+    let centre_style = Style::default()
+        .fg(theme.accent_colour())
+        .add_modifier(Modifier::BOLD);
+    let cur_rows = wrap_by_width(&lyrics.lines[anchor].text, w);
+    let top_of_centre = (h / 2).saturating_sub(cur_rows.len() / 2);
+
+    let mut draw = |y: usize, text: &str, style: Style| {
+        if y < h {
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(text.to_string(), style)))
+                    .alignment(Alignment::Center),
+                Rect {
+                    x: area.x,
+                    y: area.y + y as u16,
+                    width: area.width,
+                    height: 1,
+                },
+            );
+        }
+    };
+
+    for (i, row) in cur_rows.iter().enumerate() {
+        draw(top_of_centre + i, row, centre_style);
+    }
+
+    // The neighbours, receding. The sung line keeps its colour when it is not
+    // the anchor, so scrolling ahead still shows where the song is.
+    let mut y = top_of_centre;
+    let mut i = anchor;
+    while y > 0 && i > 0 {
+        i -= 1;
+        for row in wrap_by_width(&lyrics.lines[i].text, w).into_iter().rev() {
+            if y == 0 {
+                break;
+            }
+            y -= 1;
+            let style = if i == active && synced {
+                Style::default()
+            } else {
+                dim.add_modifier(Modifier::DIM)
+            };
+            draw(y, &row, style);
+        }
+    }
+
+    let mut y = top_of_centre + cur_rows.len();
+    let mut i = anchor;
+    // The bottom row is the hint's, once the screen is tall enough to have one.
+    let bottom = h.saturating_sub(if h >= 3 { 1 } else { 0 });
+    while y < bottom && i + 1 < lyrics.lines.len() {
+        i += 1;
+        for row in wrap_by_width(&lyrics.lines[i].text, w) {
+            if y >= bottom {
+                break;
+            }
+            let style = if i == active && synced {
+                Style::default()
+            } else {
+                dim.add_modifier(Modifier::DIM)
+            };
+            draw(y, &row, style);
+            y += 1;
+        }
+    }
+
+    if h >= 3 {
+        draw(
+            h - 1,
+            "L or esc returns to the dashboard",
+            dim.add_modifier(Modifier::ITALIC),
+        );
     }
 }
 
@@ -1121,7 +1291,13 @@ fn draw_tabs(f: &mut Frame, area: Rect, app: &App, theme: &Theme, regions: &mut 
             history_lines(app, theme)
         }
         Tab::Info => info_lines(app, theme),
-        Tab::Lyrics => lyrics_lines(app, theme),
+        // The pane is registered as the list region so the wheel can scroll
+        // the words; `handle_mouse` gives the Lyrics tab its own meaning for
+        // rows and for the wheel.
+        Tab::Lyrics => {
+            regions.history = Some(body);
+            lyrics_lines(app, theme)
+        }
         // TODO 7.6-7.11. A Web tab says why it is empty, which is more use than a
         // blank pane: the pane existing is what tells a person the feature is
         // there to be unlocked.
@@ -1135,10 +1311,15 @@ fn draw_tabs(f: &mut Frame, area: Rect, app: &App, theme: &Theme, regions: &mut 
 
 /// The Lyrics tab: the line being sung, the ones coming, and the ones just gone.
 ///
-/// Synced lyrics are the whole reason this tab exists, so the current line is set
+/// Synced lyrics are the whole reason this tab exists, so the line being sung is set
 /// in the album's own gradient and everything else recedes -- dimmer, and further
 /// back. Four lines above and a dozen below is what fits a pane without turning
 /// it into a wall of text.
+///
+/// The window follows the anchor ([`LyricsState::anchor`]): the sung line while
+/// the view follows, the user's line while their scroll hold lasts. The sung
+/// line keeps its gradient wherever it lands, so a scroll-ahead still shows
+/// which line is being sung when it comes back into view.
 fn lyrics_lines<'a>(app: &App, theme: &'a Theme) -> Vec<Line<'a>> {
     use crate::tui::app::LyricsStatus;
 
@@ -1203,28 +1384,29 @@ fn lyrics_lines<'a>(app: &App, theme: &'a Theme) -> Vec<Line<'a>> {
                 .iter()
                 .rposition(|l| !l.time_secs.is_nan() && l.time_secs <= pos)
                 .unwrap_or(0);
+            let anchor = app.lyrics.anchor(pos).unwrap_or(active);
             // Only synced lyrics have a position; unsynced ones are shown from
             // the top, which is all that can honestly be done with them.
             let synced = lyrics.synced && !lyrics.lines[active].time_secs.is_nan();
 
             let mut out: Vec<Line> = Vec::new();
             // A few lines of lead-in, dimmer the further back they are.
-            let from = active.saturating_sub(4);
-            for (i, line) in lyrics.lines[from..=active].iter().enumerate() {
-                let back = active - (from + i);
-                let style = if back == 0 && synced {
+            let from = anchor.saturating_sub(4);
+            for (i, line) in lyrics.lines[from..=anchor].iter().enumerate() {
+                let idx = from + i;
+                let style = if idx == active && synced {
                     Style::default()
                 } else {
                     dim.add_modifier(Modifier::DIM)
                 };
-                out.push(if back == 0 && synced {
+                out.push(if idx == active && synced {
                     crate::tui::theme::gradient_line(&line.text, &theme.palette)
                 } else {
                     Line::from(Span::styled(line.text.clone(), style))
                 });
             }
             // And the ones coming.
-            for line in lyrics.lines.iter().skip(active + 1).take(14) {
+            for line in lyrics.lines.iter().skip(anchor + 1).take(14) {
                 out.push(Line::from(Span::styled(
                     line.text.clone(),
                     dim.add_modifier(Modifier::DIM),
@@ -1233,6 +1415,15 @@ fn lyrics_lines<'a>(app: &App, theme: &'a Theme) -> Vec<Line<'a>> {
             if !lyrics.synced {
                 out.push(Line::from(""));
                 out.push(Line::from(Span::styled("unsynced lyrics", dim)));
+            }
+            // While the user holds the scroll, say so: a view that stopped
+            // following the song for no visible reason looks like a bug.
+            if !app.lyrics.following() {
+                out.push(Line::from(""));
+                out.push(Line::from(Span::styled(
+                    "following paused — it resumes on its own",
+                    dim.add_modifier(Modifier::ITALIC),
+                )));
             }
             out
         }
@@ -1605,6 +1796,7 @@ const HELP_ROWS: &[(&str, &str)] = &[
     ("enter", "play the selected item"),
     ("a", "album art, or the visualizer"),
     ("v", "next visualizer style"),
+    ("L", "full-screen lyrics"),
     ("tab", "next tab    shift-tab  back"),
     ("1 .. 6", "jump to a tab"),
     ("/", "search (Version A)"),
@@ -2989,6 +3181,252 @@ mod tests {
                 height: 0
             }),
             Rect::ZERO
+        );
+    }
+    // -- Lyrics scroll and the full-screen page (TODO 6.3, 6.4) -------------------
+
+    /// An app with Ready lyrics and a scroll the user has taken, so the anchor
+    /// is a known line wherever the interpolator happens to be.
+    fn lyrics_app(lines: usize, scrolled_to: Option<usize>) -> App {
+        let app = app_at(100, 30);
+        let uri = app.track().unwrap().uri.clone();
+        let lyrics = crate::lyrics::Lyrics {
+            lines: (0..lines)
+                .map(|i| crate::lyrics::LyricLine {
+                    time_secs: i as f64 * 10.0,
+                    text: format!("line {i}"),
+                })
+                .collect(),
+            synced: true,
+            source: "test".into(),
+            instrumental: false,
+        };
+        let mut app = update(
+            app,
+            Event::Lyrics {
+                uri,
+                result: Ok(lyrics),
+            },
+        )
+        .app;
+        app.lyrics.scrolled_to = scrolled_to;
+        app
+    }
+
+    fn page_term(app: &App, w: u16, h: u16) -> ratatui::Terminal<ratatui::backend::TestBackend> {
+        let backend = ratatui::backend::TestBackend::new(w, h);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| draw(f, app, &Theme::default())).unwrap();
+        term
+    }
+
+    /// One row of the buffer as (text, per-cell fg colours).
+    fn row_at(
+        term: &ratatui::Terminal<ratatui::backend::TestBackend>,
+        y: u16,
+    ) -> (String, Vec<ratatui::style::Color>) {
+        let buf = term.backend().buffer();
+        let mut text = String::new();
+        let mut fgs = Vec::new();
+        for x in 0..buf.area.width {
+            let cell = &buf[(x, y)];
+            text.push_str(cell.symbol());
+            fgs.push(cell.fg);
+        }
+        (text, fgs)
+    }
+
+    #[test]
+    fn wrapping_happens_by_display_width_not_characters() {
+        use unicode_width::UnicodeWidthStr;
+        // ASCII: the character count is the width.
+        assert_eq!(wrap_by_width("abcdefgh", 3), vec!["abc", "def", "gh"]);
+        assert_eq!(wrap_by_width("exact", 5), vec!["exact"]);
+        assert_eq!(wrap_by_width("", 5), vec![""]);
+        // A CJK character is two cells: four of them is a full row of eight.
+        assert_eq!(wrap_by_width("日本語日", 8), vec!["日本語日"]);
+        assert_eq!(wrap_by_width("日本語日本", 6), vec!["日本語", "日本"]);
+        // A zero-width character rides along rather than starting a row.
+        assert_eq!(wrap_by_width("a\u{301}bc", 2), vec!["a\u{301}b", "c"]);
+        // Every row must fit its width; a row of one is the degenerate case.
+        for (text, width) in [("word word word", 1), ("日本語", 1)] {
+            for row in wrap_by_width(text, width) {
+                assert!(
+                    row.width() <= width.max(1) || row.chars().count() == 1,
+                    "{text:?} at {width}: {row:?} is wider than the row"
+                );
+            }
+        }
+    }
+
+    /// TODO 6.4: the page centres the anchor line, in the accent colour and
+    /// bold, with its neighbours dim above and below and the way out named.
+    #[test]
+    fn the_full_screen_page_centres_the_anchor_and_dims_the_rest() {
+        let mut app = lyrics_app(12, Some(5));
+        app.lyrics_full = true;
+        let theme = Theme::default();
+        let term = page_term(&app, 80, 24);
+
+        let (mid, mid_fg) = row_at(&term, 12);
+        assert!(
+            mid.contains("line 5"),
+            "the anchor is on the middle row: {mid:?}"
+        );
+        // 80 columns, "line 5" centred: the text starts at column 37.
+        assert_eq!(mid_fg[37], theme.accent_colour(), "in the accent colour");
+
+        let (above, above_fg) = row_at(&term, 11);
+        assert!(
+            above.contains("line 4"),
+            "the line before it, above: {above:?}"
+        );
+        assert_ne!(above_fg[37], theme.accent_colour(), "and not in the accent");
+
+        let (below, _) = row_at(&term, 13);
+        assert!(
+            below.contains("line 6"),
+            "the line after it, below: {below:?}"
+        );
+
+        let (hint, _) = row_at(&term, 23);
+        assert!(
+            hint.contains("L or esc returns"),
+            "the page names its own way out: {hint:?}"
+        );
+
+        // The dashboard is gone: the tab strip is not drawn behind the page.
+        for y in 0..24 {
+            let (text, _) = row_at(&term, y);
+            assert!(
+                !text.contains("History"),
+                "row {y} still draws the dashboard"
+            );
+        }
+    }
+
+    /// A long line wraps onto several rows rather than tearing off the edge,
+    /// and a CJK line wraps at half the characters, because each one is two
+    /// cells wide (TODO 6.4's "no wrapping glitches").
+    /// A row's display width, walking the buffer the way the terminal does: a
+    /// two-cell glyph is followed by a skip cell that must not be counted, or
+    /// every wide character reads as three columns.
+    fn row_display_width(term: &ratatui::Terminal<ratatui::backend::TestBackend>, y: u16) -> usize {
+        use unicode_width::UnicodeWidthStr;
+        let buf = term.backend().buffer();
+        let mut width = 0;
+        let mut skip_next = false;
+        for x in 0..buf.area.width {
+            if skip_next {
+                skip_next = false;
+                continue;
+            }
+            let w = buf[(x, y)].symbol().width();
+            if w == 0 {
+                continue;
+            }
+            width += w;
+            skip_next = w >= 2;
+        }
+        width
+    }
+
+    #[test]
+    fn the_page_wraps_long_and_wide_lines_without_tearing() {
+        let mut app = lyrics_app(3, None);
+        app.lyrics_full = true;
+        if let Some(l) = app.lyrics.lyrics.as_mut() {
+            l.lines[0].text = "w".repeat(200);
+            l.lines[1].text = "日".repeat(50);
+        }
+        let term = page_term(&app, 80, 24);
+
+        for y in 0..24 {
+            let (text, _) = row_at(&term, y);
+            let width = row_display_width(&term, y);
+            assert!(
+                width <= 80,
+                "row {y} is {text:?} and {width} columns wide, wider than the screen"
+            );
+        }
+        // 200 w's on an 80-wide screen: three rows, 80 + 80 + 40. Counted by
+        // glyph rather than `trim_end().len()`, because a centred short row
+        // keeps its leading padding.
+        let (r0, r0_fg) = row_at(&term, 11);
+        let (r1, _) = row_at(&term, 12);
+        let (r2, _) = row_at(&term, 13);
+        assert_eq!(r0.matches('w').count(), 80, "{r0:?}");
+        assert_eq!(r1.matches('w').count(), 80, "{r1:?}");
+        assert_eq!(r2.matches('w').count(), 40, "{r2:?}");
+        assert_eq!(
+            r0_fg[0],
+            Theme::default().accent_colour(),
+            "wrapped rows keep the accent"
+        );
+
+        // 50 CJK characters is 100 cells: 40 of them fit, then the last 10.
+        let (cjk0, _) = row_at(&term, 14);
+        let (cjk1, _) = row_at(&term, 15);
+        assert_eq!(cjk0.matches('日').count(), 40, "{cjk0:?}");
+        assert_eq!(
+            row_display_width(&term, 14),
+            80,
+            "40 wide glyphs fill the row"
+        );
+        assert_eq!(cjk1.matches('日').count(), 10, "{cjk1:?}");
+    }
+
+    /// The page draws at every size the dashboard has a breakpoint for, and at
+    /// sizes below them, without panicking — including one row tall.
+    #[test]
+    fn the_page_renders_at_every_size_without_panicking() {
+        let mut app = lyrics_app(20, Some(10));
+        app.lyrics_full = true;
+        for (w, h) in [
+            (100, 30),
+            (80, 24),
+            (76, 16),
+            (46, 12),
+            (30, 8),
+            (20, 4),
+            (10, 1),
+        ] {
+            let term = page_term(&app, w, h);
+            let (text, _) = row_at(&term, h / 2);
+            assert!(
+                text.trim().contains("line 10"),
+                "{w}x{h}: the anchor should be somewhere on screen: {text:?}"
+            );
+        }
+    }
+
+    /// TODO 6.3: while the user holds the scroll, the tab says so — a view that
+    /// quietly stopped following the song looks like a bug.
+    #[test]
+    fn the_lyrics_tab_says_when_the_follow_is_paused() {
+        let mut app = lyrics_app(20, Some(9));
+        app.tab = Tab::Lyrics;
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| draw(f, &app, &Theme::default())).unwrap();
+        let text = {
+            let buf = term.backend().buffer().clone();
+            (0..buf.area.height)
+                .map(|y| {
+                    (0..buf.area.width)
+                        .map(|x| buf[(x, y)].symbol().to_string())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        assert!(
+            text.contains("following paused"),
+            "the pane must say the follow is paused:\n{text}"
+        );
+        assert!(
+            text.contains("line 9"),
+            "the scrolled-to line is the one on show"
         );
     }
 }

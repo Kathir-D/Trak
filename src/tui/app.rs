@@ -752,7 +752,19 @@ pub struct LyricsState {
     /// The URI the lyrics belong to, so a lookup for a track the user has left is
     /// dropped rather than shown under a new title.
     pub uri: Option<String>,
+    /// The line the user has scrolled to, while they have the scroll. `None`
+    /// means the song holds it and the view follows the line being sung.
+    pub scrolled_to: Option<usize>,
+    /// Seconds of manual scroll left before the song takes the view back
+    /// (TODO 6.3). Counted down by [`LyricsState::tick`], not by a wall clock,
+    /// so a test resumes the follow by ticking rather than by sleeping.
+    pub follow_hold: f64,
 }
+
+/// How long a manual scroll holds the auto-follow (TODO 6.3). Long enough to
+/// read ahead to the next chorus, short enough that leaving the tab scrolled
+/// up for half a song cannot happen by accident.
+const FOLLOW_HOLD_SECS: f64 = 4.0;
 
 impl Default for LyricsState {
     fn default() -> Self {
@@ -760,6 +772,8 @@ impl Default for LyricsState {
             status: LyricsStatus::Idle,
             lyrics: None,
             uri: None,
+            scrolled_to: None,
+            follow_hold: 0.0,
         }
     }
 }
@@ -769,6 +783,53 @@ impl LyricsState {
     /// there is nothing to show.
     pub fn active(&self, position_secs: f64) -> Option<usize> {
         crate::lyrics::index_at(self.lyrics.as_ref()?, position_secs)
+    }
+
+    /// The line the view is centred on: the one the user scrolled to while their
+    /// hold lasts, else the one being sung. `None` only when there are no lines
+    /// at all, which is a state the renderer already knows how to show.
+    pub fn anchor(&self, position_secs: f64) -> Option<usize> {
+        if self.scrolled_to.is_some() {
+            return self.scrolled_to;
+        }
+        self.active(position_secs)
+            .or(Some(0))
+            .filter(|_| self.lyrics.as_ref().is_some_and(|l| !l.lines.is_empty()))
+    }
+
+    /// Whether the view is following the song rather than the user's scroll.
+    pub fn following(&self) -> bool {
+        self.scrolled_to.is_none()
+    }
+
+    /// Take the scroll for the user and move it `n` lines (`n` may be negative).
+    ///
+    /// Scrolling from a follow starts at the line being sung, so the first `j`
+    /// steps ahead of the music rather than jumping to the top of the song.
+    pub fn scroll_by(&mut self, n: i64, position_secs: f64) {
+        let Some(lyrics) = &self.lyrics else { return };
+        if lyrics.lines.is_empty() {
+            return;
+        }
+        let base = self
+            .scrolled_to
+            .unwrap_or_else(|| self.active(position_secs).unwrap_or(0));
+        let next = (base as i64)
+            .saturating_add(n)
+            .clamp(0, (lyrics.lines.len() - 1) as i64);
+        self.scrolled_to = Some(next as usize);
+        self.follow_hold = FOLLOW_HOLD_SECS;
+    }
+
+    /// Count the follow hold down. Called from `Event::Tick`, so the resume is
+    /// as testable as everything else that expires.
+    pub fn tick(&mut self, dt: f64) {
+        if self.scrolled_to.is_some() {
+            self.follow_hold -= dt;
+            if self.follow_hold <= 0.0 {
+                self.scrolled_to = None;
+            }
+        }
     }
 }
 
@@ -996,6 +1057,10 @@ pub struct App {
     pub art: ArtState,
     /// The lyrics tab (TODO 6.1).
     pub lyrics: LyricsState,
+    /// The full-screen lyrics page is up (TODO 6.4). `L` and `esc` leave it;
+    /// every other key keeps working, because the song does not stop being
+    /// controllable just because its words fill the screen.
+    pub lyrics_full: bool,
     /// The Web API tabs (TODO 7.6-7.11).
     pub web: WebState,
     /// What Sonar is doing right now (TODO 4.6).
@@ -1057,6 +1122,7 @@ impl App {
             // What headless-spotify is doing right now (TODO 4.7).
             headless: crate::headless::Headless::unknown(),
             lyrics: LyricsState::default(),
+            lyrics_full: false,
             web: WebState::default(),
             should_quit: false,
             clock: String::new(),
@@ -1218,6 +1284,10 @@ pub fn update(mut app: App, event: Event) -> Updated {
         Event::Tick => {
             app.tick_secs += 0.1;
             app.expire_toast();
+            // The lyrics follow hold runs on the same tick as the toast, and
+            // for the same reason: expiry that only a real clock could test is
+            // expiry that cannot be tested.
+            app.lyrics.tick(0.1);
             // A command in flight is still running. Do not stack a poll behind it
             // or the queue grows without bound.
             app.poll_due = app.busy.is_none();
@@ -1751,12 +1821,37 @@ fn handle_key(app: &mut App, c: char, commands: &mut Vec<PlayerCommand>, web: &m
         return;
     }
 
+    // The full-screen lyrics page (TODO 6.4). Scroll keys belong to the song
+    // there, and `L`/`esc` leave; everything else falls through, so the
+    // transport keys still answer while the words fill the screen.
+    if app.lyrics_full && matches!(c, 'j' | 'k' | 'L' | '\x1b') {
+        match c {
+            'L' | '\x1b' => app.lyrics_full = false,
+            _ => app
+                .lyrics
+                .scroll_by(if c == 'j' { 1 } else { -1 }, app.interpolated_position()),
+        }
+        return;
+    }
+
+    // On the Lyrics tab the list is the song itself: `j`/`k` scroll the words
+    // and pause the auto-follow (TODO 6.3) rather than moving a history
+    // selection the tab cannot even show.
+    if app.tab == Tab::Lyrics && matches!(c, 'j' | 'k') {
+        app.lyrics
+            .scroll_by(if c == 'j' { 1 } else { -1 }, app.interpolated_position());
+        return;
+    }
+
     // A command is already running; queue nothing behind it.
     let busy = app.busy.is_some();
 
     match c {
         'q' | 'Q' => app.should_quit = true,
         '?' => app.show_help = true,
+        // Full-screen lyrics (SPEC §4). Any tab: the words are about the song,
+        // not about whichever list happens to be behind them.
+        'L' => app.lyrics_full = true,
         // The art pane and the visualizer share one rectangle, so this swaps
         // what is drawn rather than what is laid out (TODO 4.3).
         'a' => {
@@ -1895,12 +1990,26 @@ fn handle_mouse(app: &mut App, m: Mouse, commands: &mut Vec<PlayerCommand>) {
             }
         }
         Hit::HistoryRow(i) => {
+            // On the Lyrics tab the rows are lines of a song, not tracks: a
+            // click that "played row 3" behind the words would be a click
+            // that lied.
+            if app.tab == Tab::Lyrics {
+                return;
+            }
             if m.action == MouseAction::Press {
                 app.select(app.history_scroll + i);
             }
         }
         Hit::HistoryPane => {
             let down = matches!(m.action, MouseAction::ScrollDown);
+            if app.tab == Tab::Lyrics {
+                // The wheel scrolls the words and pauses the follow, exactly
+                // like `j`/`k` (TODO 6.3).
+                let n = WHEEL_LINES as i64;
+                app.lyrics
+                    .scroll_by(if down { n } else { -n }, app.interpolated_position());
+                return;
+            }
             let row = if down {
                 app.history_cursor + WHEEL_LINES
             } else {
@@ -2924,13 +3033,17 @@ mod tests {
     /// Every key the help overlay excuses as "not built yet" must genuinely do
     /// nothing at all. An excuse that has quietly become false would let a key
     /// fall out of the help without anything failing.
+    ///
+    /// The list being empty is the finished state — every key SPEC §4 promises
+    /// to both versions is bound — not a reason to fail: the two `render`
+    /// tests on the same list are what stop an empty list from meaning "the
+    /// help and the SPEC have quietly diverged".
     #[test]
     fn every_excused_key_really_is_inert() {
         let excused: Vec<String> = crate::tui::render::NOT_YET
             .iter()
             .map(|(k, _)| k.to_string())
             .collect();
-        assert!(!excused.is_empty(), "the excuse list should not be empty");
         for key in excused {
             let want = fingerprint(&with_track());
             let (app, cmds) = press(with_track(), key.chars().next().unwrap());
@@ -3911,5 +4024,188 @@ mod lyrics_tests {
             Settings::default().lyrics,
             "on by default, per SPEC section 8"
         );
+    }
+
+    /// The lyrics for the scroll tests: three lines, the first at 0:00, so the
+    /// sung line is the first one whatever the interpolator adds.
+    fn scrolled_app() -> App {
+        let mut app = with_track();
+        app.tab = Tab::Lyrics;
+        let uri = app.track().unwrap().uri.clone();
+        update(
+            app,
+            Event::Lyrics {
+                uri,
+                result: Ok(lyrics_for(&[("zero", 0.0), ("one", 10.0), ("two", 20.0)])),
+            },
+        )
+        .app
+    }
+
+    /// TODO 6.3: `j`/`k` on the Lyrics tab take the scroll from the song, and
+    /// they do not move a history selection the tab cannot show. The follow
+    /// resumes on its own after the hold, ticked rather than slept.
+    #[test]
+    fn j_and_k_scroll_the_lyrics_and_pause_the_follow() {
+        let app = scrolled_app();
+        assert!(app.lyrics.following(), "the song holds the scroll at first");
+
+        let before = app.history_cursor;
+        let u = update(app, Event::Key('j'));
+        assert_eq!(
+            u.app.lyrics.scrolled_to,
+            Some(1),
+            "one line ahead of the sung one"
+        );
+        assert!(!u.app.lyrics.following(), "the scroll is the user's now");
+        assert_eq!(
+            u.app.history_cursor, before,
+            "the history selection did not move"
+        );
+        assert!(
+            u.commands.is_empty(),
+            "scrolling lyrics writes nothing to Spotify (COMPAT rule 3)"
+        );
+
+        let u = update(u.app, Event::Key('k'));
+        assert_eq!(u.app.lyrics.scrolled_to, Some(0), "k steps back");
+        // The hold is 4 s and a tick is 100 ms: 39 ticks hold, the 40th hands
+        // the scroll back to the song.
+        let mut u = u;
+        for i in 0..39 {
+            u = update(u.app, Event::Tick);
+            assert!(
+                u.app.lyrics.scrolled_to.is_some(),
+                "tick {i}: the hold must outlast 3.9 s"
+            );
+        }
+        u = update(u.app, Event::Tick);
+        assert_eq!(
+            u.app.lyrics.scrolled_to, None,
+            "the song takes the scroll back after the hold"
+        );
+        assert!(u.app.lyrics.following());
+    }
+
+    /// Scrolling cannot leave the song: the clamp is the number of lines, not
+    /// the length of the pane.
+    #[test]
+    fn scrolling_clamps_to_the_last_line() {
+        let app = scrolled_app();
+        let mut u = update(app, Event::Key('j'));
+        for _ in 0..10 {
+            u = update(u.app, Event::Key('j'));
+        }
+        assert_eq!(
+            u.app.lyrics.scrolled_to,
+            Some(2),
+            "the last line, not one past it"
+        );
+        let mut u = update(u.app, Event::Key('k'));
+        for _ in 0..10 {
+            u = update(u.app, Event::Key('k'));
+        }
+        assert_eq!(u.app.lyrics.scrolled_to, Some(0), "the first line");
+    }
+
+    /// The wheel over the Lyrics pane is the same scroll, and a click on a line
+    /// of the song must not play a history row behind it.
+    #[test]
+    fn the_wheel_scrolls_the_words_and_a_click_plays_nothing() {
+        let app = scrolled_app();
+        let u = update(
+            app,
+            Event::Mouse(Mouse {
+                action: MouseAction::ScrollDown,
+                target: Hit::HistoryPane,
+            }),
+        );
+        assert_eq!(
+            u.app.lyrics.scrolled_to,
+            Some(2),
+            "three lines ahead, clamped to the last line"
+        );
+        let u = update(
+            u.app,
+            Event::Mouse(Mouse {
+                action: MouseAction::ScrollUp,
+                target: Hit::HistoryPane,
+            }),
+        );
+        assert_eq!(
+            u.app.lyrics.scrolled_to,
+            Some(0),
+            "three back, clamped at the top"
+        );
+        let u = update(
+            u.app,
+            Event::Mouse(Mouse {
+                action: MouseAction::Press,
+                target: Hit::HistoryRow(1),
+            }),
+        );
+        assert!(u.commands.is_empty(), "a lyric row is not a track to play");
+        assert_eq!(
+            u.app.history_cursor, 0,
+            "and the history did not move either"
+        );
+    }
+
+    /// TODO 6.4: `L` opens the page, `esc` and `L` both leave it, the scroll
+    /// keys work there from any tab, and the transport still answers while the
+    /// words fill the screen.
+    #[test]
+    fn the_full_screen_page_opens_scrolls_and_leaves() {
+        let mut app = scrolled_app();
+        app.tab = Tab::History;
+
+        let u = update(app, Event::Key('L'));
+        assert!(u.app.lyrics_full, "L opens the page from another tab");
+
+        // `l` is seek, `L` is the page: case matters, and so does the scroll
+        // working on a tab whose own j/k mean something else.
+        let u = update(u.app, Event::Key('j'));
+        assert_eq!(
+            u.app.lyrics.scrolled_to,
+            Some(1),
+            "j scrolls the words even though the History tab owns it"
+        );
+        assert_eq!(
+            u.app.history_cursor, 0,
+            "the history selection stayed put behind the page"
+        );
+
+        let u = update(u.app, Event::Key('n'));
+        assert!(
+            matches!(u.commands.first(), Some(PlayerCommand::Next)),
+            "next still answers from the page: {:?}",
+            u.commands
+        );
+        assert!(u.app.lyrics_full, "and the page stayed up");
+
+        let u = update(u.app, Event::Key('\x1b'));
+        assert!(!u.app.lyrics_full, "esc returns to the dashboard");
+        let u = update(u.app, Event::Key('L'));
+        assert!(u.app.lyrics_full, "L goes back in");
+        let u = update(u.app, Event::Key('L'));
+        assert!(!u.app.lyrics_full, "and L is its own way out");
+    }
+
+    /// A scroll the user made is about the old words; a new track resets it with
+    /// the lyrics it resets anyway.
+    #[test]
+    fn a_new_track_takes_the_user_scroll_with_it() {
+        let mut app = scrolled_app();
+        app = update(app, Event::Key('j')).app;
+        assert!(app.lyrics.scrolled_to.is_some());
+
+        let mut other = playing();
+        other.track.uri = Some("spotify:track:NEXT".into());
+        let app = update(app, Event::PlayerState(Box::new(other))).app;
+        assert_eq!(
+            app.lyrics.scrolled_to, None,
+            "the scroll does not survive into a new song"
+        );
+        assert_eq!(app.lyrics.follow_hold, 0.0);
     }
 }

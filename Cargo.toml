@@ -40,6 +40,10 @@ ureq = "3"
 # not part of any task, and they are small enough that a rewrite would be churn.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Wrapping lyric lines by display width, so a wide CJK glyph cannot tear the
+# full-screen page (TODO 6.4). Also used in tests to assert bars are one cell
+# per character.
+unicode-width = "0.2"
 # PKCE (TODO 7.2). The verifier has to be high-entropy random and its S256
 # challenge hashed, and the token file is base64url JSON.
 sha2 = "0.10"
@@ -65,7 +69,6 @@ name = "accent-probe"
 assert_cmd = "2"
 filetime = "0.2.29"
 predicates = "3"
-unicode-width = "0.2"
 
 [profile.release]
 lto = true

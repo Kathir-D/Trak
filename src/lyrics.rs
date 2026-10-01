@@ -134,16 +134,31 @@ impl LyricsError {
 /// them, but it does not forbid them either, and a line trak cannot explain is a
 /// line it should not show. A tag with nothing after it is kept as an empty line,
 /// which is what an instrumental break looks like.
+///
+/// An `[offset:±ms]` tag shifts every timestamp in the file. The sign convention
+/// is the LRC one: positive shifts the lyrics *earlier*. It applies to lines
+/// before the tag too, because the tag is a statement about the whole file, and
+/// the last one wins, because a file with two has already made a mistake trak
+/// should not amplify by guessing an average.
 pub fn parse_synced(synced: &str) -> Vec<LyricLine> {
     let mut lines = Vec::new();
+    let mut offset_ms: f64 = 0.0;
     for raw in synced.lines() {
         let mut rest = raw.trim();
         let mut times = Vec::new();
         while let Some(after) = rest.strip_prefix('[')
             && let Some((tag, tail)) = after.split_once(']')
-            && let Some(secs) = parse_tag(tag)
         {
-            times.push(secs);
+            if let Some(secs) = parse_tag(tag) {
+                times.push(secs);
+            } else if let Some(ms) = parse_offset_tag(tag) {
+                offset_ms = ms;
+            } else {
+                // Not a tag trak knows, so it is lyric text that happens to
+                // start with a bracket — the scan stops and the line is judged
+                // by the tags it did collect.
+                break;
+            }
             rest = tail.trim();
         }
         if times.is_empty() {
@@ -159,6 +174,14 @@ pub fn parse_synced(synced: &str) -> Vec<LyricLine> {
     // assuming they are. `sort_by` is stable, so two lines at the same timestamp
     // keep the order the file had.
     lines.sort_by(|a, b| a.time_secs.total_cmp(&b.time_secs));
+    // Clamped, not dropped: a line the offset pushes before the start of the
+    // track is still a line of the song, and it becomes current at 0:00 rather
+    // than vanishing.
+    if offset_ms != 0.0 {
+        for line in &mut lines {
+            line.time_secs = (line.time_secs - offset_ms / 1000.0).max(0.0);
+        }
+    }
     lines
 }
 
@@ -176,6 +199,20 @@ fn parse_tag(tag: &str) -> Option<f64> {
     let secs: f64 = rest.split(':').next()?.trim().parse().ok()?;
     let time = mins * 60.0 + secs;
     (time.is_finite() && time >= 0.0).then_some(time)
+}
+
+/// An `[offset:±ms]` tag to milliseconds, or `None` for anything else.
+///
+/// The `+` of `+500` is `f64`'s own, and a value that is not a number is not an
+/// offset: `parse_synced` must not shift a whole song because a stray word
+/// parsed as zero-adjacent junk.
+fn parse_offset_tag(tag: &str) -> Option<f64> {
+    let (name, value) = tag.split_once(':')?;
+    if !name.trim().eq_ignore_ascii_case("offset") {
+        return None;
+    }
+    let ms: f64 = value.trim().parse().ok()?;
+    ms.is_finite().then_some(ms)
 }
 
 /// Split unsynced lyrics into lines with no timing.
@@ -906,6 +943,55 @@ mod tests {
         assert!(close(lines[0].time_secs, 10.0));
         assert!(close(lines[1].time_secs, 20.0));
         assert_eq!(lines[1].text, "repeated chorus");
+    }
+
+    #[test]
+    fn a_positive_offset_shifts_the_lyrics_earlier() {
+        let lines = parse_synced("[offset:+500]\n[00:20.00] shifted");
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(close(lines[0].time_secs, 19.5), "{:?}", lines[0]);
+        assert_eq!(lines[0].text, "shifted");
+    }
+
+    #[test]
+    fn a_negative_offset_shifts_the_lyrics_later() {
+        let lines = parse_synced("[offset:-1500]\n[00:20.00] shifted");
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(close(lines[0].time_secs, 21.5), "{:?}", lines[0]);
+    }
+
+    #[test]
+    fn an_offset_applies_to_lines_before_the_tag_and_clamps_at_zero() {
+        let lines = parse_synced("[00:00.30] intro\n[offset:+1000]\n[01:00.00] chorus");
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        // Clamped, not dropped: the intro is still a line of the song.
+        assert!(close(lines[0].time_secs, 0.0), "{:?}", lines[0]);
+        assert!(close(lines[1].time_secs, 59.0), "{:?}", lines[1]);
+    }
+
+    #[test]
+    fn the_last_offset_tag_wins() {
+        let lines = parse_synced("[offset:+1000]\n[00:20.00] a\n[offset:-1000]\n[00:20.00] b");
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        // −1000ms is the tag in force, so both lines moved later by a second.
+        assert!(close(lines[0].time_secs, 21.0), "{:?}", lines[0]);
+        assert!(close(lines[1].time_secs, 21.0), "{:?}", lines[1]);
+    }
+
+    #[test]
+    fn an_offset_that_is_not_a_number_is_ignored() {
+        let lines = parse_synced("[offset:soon]\n[00:20.00] unchanged");
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(close(lines[0].time_secs, 20.0), "{:?}", lines[0]);
+    }
+
+    #[test]
+    fn an_offset_line_produces_no_lyric_line_of_its_own() {
+        // A bare tag with nothing after it is usually a rest, but an offset tag
+        // is not a musical event and must not render as an empty line.
+        let lines = parse_synced("[00:10.00] one\n[offset:+100]");
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(close(lines[0].time_secs, 9.9), "{:?}", lines[0]);
     }
 
     #[test]
