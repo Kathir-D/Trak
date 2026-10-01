@@ -8,9 +8,11 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
-use trak::cli::{EXIT_FAIL, EXIT_OK, EXIT_USAGE, Style};
+use trak::cli::{EXIT_FAIL, EXIT_OK, EXIT_USAGE, PlayGroup, Style};
 use trak::player::AppleScriptPlayer;
 use trak::player::Player;
+use trak::web::api::Library;
+use trak::web::token::Store as _;
 
 /// Every shpotify-compatible command (SPEC §9).
 #[derive(Parser)]
@@ -35,6 +37,13 @@ struct Cli {
     #[arg(long, global = true, hide = true)]
     fake: bool,
 
+    /// Talk to an in-memory library instead of the Web API. Hidden for the same
+    /// reason as `--fake`. `--fake` on its own still means "no library" — the
+    /// state of a machine that has never connected — so the setup path is
+    /// testable too, not just the happy one.
+    #[arg(long, global = true, hide = true)]
+    fake_library: bool,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -49,9 +58,12 @@ enum Command {
     },
     /// Play, or resume if already playing.
     Play {
-        /// A URI to play, or nothing to resume.
-        #[arg(value_name = "URI")]
-        uri: Option<String>,
+        /// A song to search for, or a Spotify URI to play, or nothing to resume.
+        /// Several words are one search phrase, as they were for shpotify.
+        #[arg(value_name = "NAME|URI", num_args = 0..)]
+        words: Vec<String>,
+        #[command(subcommand)]
+        what: Option<PlayWhat>,
     },
     /// Pause playback. If already paused, resume — as shpotify does.
     Pause,
@@ -119,6 +131,33 @@ enum ShareArg {
     Uri,
 }
 
+/// The qualified `play` spellings (SPEC §9), shpotify's own surface: search one
+/// group and play the best match, or spell a URI out the way shpotify did.
+#[derive(Subcommand)]
+enum PlayWhat {
+    /// Search albums and play the best match.
+    Album {
+        /// The album to look for.
+        name: String,
+    },
+    /// Search artists and play the best match.
+    Artist {
+        /// The artist to look for.
+        name: String,
+    },
+    /// Search playlists and play the best match.
+    List {
+        /// The playlist to look for.
+        name: String,
+    },
+    /// Play a Spotify URI — the same thing the bare positional does, spelt the
+    /// way shpotify did it.
+    Uri {
+        /// The URI to play.
+        uri: String,
+    },
+}
+
 /// The volume step. SPEC §8 makes it a setting; hard-coded until 5.x.
 const VOLUME_STEP: u8 = 10;
 
@@ -156,8 +195,18 @@ fn run(args: Cli) -> ExitCode {
         // Unreachable: `config` returned above, before the player was built.
         Some(Command::Config) => EXIT_OK,
         Some(Command::Status { field }) => status(&player, args.json, style(args.plain), field),
-        Some(Command::Play { uri: Some(uri) }) => play(&player, &uri),
-        Some(Command::Play { uri: None }) => trak::cli::run_action(&mut player, "play"),
+        // The library is built here and nowhere else, so only `play` ever pays
+        // for the token file existing — or not.
+        Some(Command::Play { words, what }) => {
+            let library = play_library(args.fake_library);
+            play(
+                &mut player,
+                library.as_deref(),
+                words,
+                what,
+                style(args.plain),
+            )
+        }
         Some(Command::Pause) => trak::cli::run_action(&mut player, "toggle"),
         Some(Command::Stop) => stop(&mut player),
         Some(Command::Quit) => quit(&mut player),
@@ -204,38 +253,131 @@ fn status(player: &AnyPlayer, json: bool, style: Style, field: Option<Field>) ->
     EXIT_OK
 }
 
-/// `trak play <something>`.
+/// The library a `trak play <name>` searches, or `None` when there is nothing
+/// to search through.
 ///
-/// A Spotify URI plays straight away through AppleScript, which works on the Free
-/// tier. A *name* needs search, which needs a Client ID. Without one this says how
-/// to get a Client ID and exits 2 rather than pretending to have played something
-/// (SPEC §9, TODO 7.12).
-fn play(player: &AnyPlayer, target: &str) -> i32 {
-    let t = target.trim();
-    // A URI is validated here, at the one point a user-supplied string enters
-    // trak, so every backend enforces the same rule and none can be bypassed.
-    if t.starts_with("spotify:") || t.contains("://") {
-        if let Err(e) = trak::player::check_playable_uri(t) {
-            let (msg, code) = trak::cli::report(e);
-            eprintln!("{msg}");
-            return code;
-        }
-        return match player.play_uri(t) {
-            Ok(()) => EXIT_OK,
-            Err(e) => fail(e),
-        };
+/// `None` is the pre-setup state of every machine, not a failure. The real half
+/// makes the same read the TUI's `web_client` does and, like it, does not
+/// refresh: renewing a stale access token is the login flow's job (TODO 7.3),
+/// so the honest outcome is a "log in again" from the search, never a silent
+/// second try.
+fn play_library(fake: bool) -> Option<Box<dyn Library>> {
+    if fake {
+        return Some(Box::new(trak::web::api::FakeLibrary::seeded()));
     }
+    let store = trak::web::token::TokenFile::at(&trak::config::Paths::from_env());
+    let loaded = store.load().ok()?;
+    let now = std::time::SystemTime::now();
+    // The refresh half is what a search is about to spend; if it is past its
+    // six months there is nothing to search with, only a login to redo.
+    if loaded.token.as_ref().is_some_and(|t| t.refresh_stale(now)) {
+        return None;
+    }
+    let token = loaded.token.as_ref()?;
+    Some(Box::new(trak::web::api::SpotifyLibrary::new(token)))
+}
 
-    eprintln!(
-        "`trak play \"{t}\"` needs to search Spotify, which needs a Client ID.\n\n\
-         One-time setup:\n\
-           1. open https://developer.spotify.com/dashboard\n\
-           2. create an app, and add the redirect URI  http://127.0.0.1\n\
-           3. run `trak config` and paste the Client ID\n\n\
-         Until then you can play a URI directly:\n\
-           trak play spotify:track:6HacgXCExkzS552ILfJTXu"
-    );
-    EXIT_USAGE
+/// `trak play`, in every spelling SPEC §9 gives it.
+///
+/// A URI plays straight away through AppleScript, which works on the Free
+/// tier. A *name* needs search, which needs a connected Web API; without one
+/// this says how to get there and exits 2 rather than pretending to have played
+/// something — the message shpotify's users met for the same reason.
+fn play(
+    player: &mut AnyPlayer,
+    library: Option<&dyn Library>,
+    words: Vec<String>,
+    what: Option<PlayWhat>,
+    style: Style,
+) -> i32 {
+    match what {
+        Some(PlayWhat::Uri { uri }) => play_uri(player, &uri),
+        Some(PlayWhat::Album { name }) => {
+            search_and_play(player, library, PlayGroup::Album, &name, style)
+        }
+        Some(PlayWhat::Artist { name }) => {
+            search_and_play(player, library, PlayGroup::Artist, &name, style)
+        }
+        Some(PlayWhat::List { name }) => {
+            search_and_play(player, library, PlayGroup::List, &name, style)
+        }
+        None => {
+            if words.is_empty() {
+                return trak::cli::run_action(player, "play");
+            }
+            // Several words are one phrase, joined the way shpotify joined its
+            // arguments, so a search never needs quoting to be one query.
+            let target = words.join(" ");
+            let t = target.trim();
+            if t.starts_with("spotify:") || t.contains("://") {
+                return play_uri(player, t);
+            }
+            search_and_play(player, library, PlayGroup::Song, t, style)
+        }
+    }
+}
+
+/// A URI plays straight away through AppleScript, which works on the Free
+/// tier. A user-supplied string is validated here, at the one point it enters
+/// trak, so every backend enforces the same rule and none can be bypassed.
+fn play_uri(player: &AnyPlayer, target: &str) -> i32 {
+    if let Err(e) = trak::player::check_playable_uri(target) {
+        let (msg, code) = trak::cli::report(e);
+        eprintln!("{msg}");
+        return code;
+    }
+    match player.play_uri(target) {
+        Ok(()) => EXIT_OK,
+        Err(e) => fail(e),
+    }
+}
+
+/// Search one group, pick the best match the way shpotify did, and play it.
+///
+/// The "Playing …" line is printed only after the play landed, so trak never
+/// says it is playing something Spotify refused — the next `trak status` is
+/// the confirmation, the same as for every other play spelling.
+fn search_and_play(
+    player: &AnyPlayer,
+    library: Option<&dyn Library>,
+    group: PlayGroup,
+    query: &str,
+    style: Style,
+) -> i32 {
+    let Some(library) = library else {
+        eprintln!(
+            "`trak {spelling} \"{query}\"` needs to search Spotify, which needs a Client ID.\n\n\
+             One-time setup:\n\
+               1. open https://developer.spotify.com/dashboard\n\
+               2. create an app, and add the redirect URI  http://127.0.0.1\n\
+               3. run `trak config` and paste the Client ID\n\n\
+             Until then you can play a URI directly:\n\
+               trak play spotify:track:6HacgXCExkzS552ILfJTXu",
+            spelling = group.spelling(),
+        );
+        return EXIT_USAGE;
+    };
+
+    let results = match library.search(query) {
+        Ok(results) => results,
+        Err(e) => {
+            eprintln!("{}", e.notice());
+            return EXIT_FAIL;
+        }
+    };
+    let Some(choice) = trak::cli::choose(group, query, &results, style) else {
+        // shpotify's own sentence, so a shpotify user is told the same thing
+        // by the same miss.
+        eprintln!("No results when searching for \"{query}\"");
+        return EXIT_FAIL;
+    };
+    match player.play_uri(&choice.uri) {
+        Ok(()) => {
+            println!("{}", choice.line);
+            EXIT_OK
+        }
+        Err(e) => fail(e),
+    }
 }
 
 /// `stop`. Spotify's dictionary has no `stop` command — `tell ... to stop`

@@ -46,6 +46,11 @@ escape codes — so `trak status | cat` is safe to put in a script.
 | `trak status track` | just the title | `Census Designated` |
 | `trak play` | resume | *(silent)* |
 | `trak play spotify:track:…` | play a URI — works on the Free tier | *(silent)* |
+| `trak play <song>` | search and play the best match (needs the optional Client ID) | `Playing Teardrop — Massive Attack (Mezzanine)` |
+| `trak play album <name>` | search albums, play the best match | `Playing Mezzanine — Massive Attack (1998)` |
+| `trak play artist <name>` | search artists, play the best match | `Playing Massive Attack` |
+| `trak play list <name>` | search playlists, play the best match | `Playing Massive Attack on Repeat · 3 tracks` |
+| `trak play uri <uri>` | play a URI, spelt the way shpotify did | *(silent)* |
 | `trak pause` | toggles play/pause, as shpotify's did | `Pausing Spotify.` / silent when already paused |
 | `trak stop` | pause if playing; Spotify has no `stop` command | `Pausing Spotify.` / silent |
 | `trak next` | skip | *(silent)* |
@@ -63,7 +68,16 @@ escape codes — so `trak status | cat` is safe to put in a script.
 
 `trak --help` lists them all. Exit codes are `0` on success, `1` on a runtime
 failure, `2` on a usage or setup problem. Commands that write to Spotify print
-nothing on success — the *next* `trak status` is the confirmation.
+nothing on success — the *next* `trak status` is the confirmation. The one
+exception is a play by name, which prints the match it chose: you named a song
+rather than a URI, and "the best match" is a decision worth seeing. It never
+prints a miss as a success — nothing found is `No results when searching for
+"…"`, exit 1.
+
+Search is the optional Client ID's too: `trak play <song>` and friends need the
+one-time setup (`trak config`, the steps it prints), which no machine has walked
+yet — until then those commands print the setup steps and exit 2, exactly as
+shpotify did before its user configured an app.
 
 ### JSON
 
