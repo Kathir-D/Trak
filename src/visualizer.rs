@@ -8,14 +8,17 @@
 //! be tested with no audio device, no tap and no permission prompt, which is what
 //! CI has to satisfy (`docs/ARCHITECTURE.md`).
 //!
-//! **Simulated is the default, not a placeholder.** TODO 1.5 refuted R1 — a
-//! global tap needs no "System Audio Recording" grant at all — but it
-//! materialised R6: every process-specific tap description fails with
-//! `kAudioHardwareBadObjectError` (`docs/AUDIO-TAP.md` §3c). Tapping all system
-//! audio instead would capture Sonar's as well, which is what COMPAT rule 3
-//! exists to prevent, so 8.3's tap stays blocked on an `objc2` bypass of the
-//! binding. Until that lands, a simulated spectrum is what ships, and it has to
-//! be good enough to look like music: smooth frame to frame, driven by the
+//! **Both sources ship, and which one is live is the config's decision.** TODO 1.5
+//! refuted R1 — a global tap needs no "System Audio Recording" grant at all — and
+//! then resolved R6: the process-specific tap works once the pids are translated
+//! into Core Audio process objects (`docs/AUDIO-TAP.md` §3b). So
+//! [`AudioPipeline`] taps Spotify and nothing else, and falls back to
+//! [`SimulatedSource`] when it cannot. Tapping all system audio instead would
+//! capture Sonar's as well, which is what COMPAT rule 3 exists to prevent, so that
+//! fallback is a *degradation* and never a substitute.
+//!
+//! The simulated source has to be good enough to look like music, because it is
+//! what a machine without the permission draws: smooth frame to frame, driven by the
 //! playback position, different per track, and silent when paused.
 //!
 //! Every renderer takes band magnitudes in 0..=1, a width and a height, and
@@ -26,15 +29,11 @@
 
 use std::f64::consts::{FRAC_PI_2, TAU};
 
-/// The Core Audio tap behind this seam (TODO 8.3, 8.5).
-///
-/// Declared here rather than in `lib.rs` so the module lands without a second file
-/// edit, and re-exported so it reads as `visualizer::AudioPipeline`. Promoting it to
-/// `trak::audio` is a two-line change and needs no code change: add `pub mod audio;`
-/// to `src/lib.rs` and delete the three lines below.
-#[path = "audio.rs"]
-mod audio;
-pub use audio::{AudioPipeline, TapError, TapState};
+/// The Core Audio tap behind this seam (TODO 8.3, 8.5) lives in [`crate::audio`],
+/// and is re-exported here so it reads as `visualizer::AudioPipeline`: the seam and
+/// the source that fills it belong in one place in the docs, and `trak::audio` is
+/// where the rest of it is.
+pub use crate::audio::{AudioPipeline, TapError, TapState};
 
 /// A filled cell, a cell filled in its lower half, and the dot the circular
 /// renderer marks cells with. All three are ambiguous-width glyphs: one column in

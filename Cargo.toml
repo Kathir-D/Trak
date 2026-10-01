@@ -30,10 +30,6 @@ objc2-foundation = { version = "0.3", features = [
 ] }
 ratatui-image = "8.0.1"
 image = "0.25"
-# The visualizer's spectrum maths (TODO 8.3). A pure-Rust port of cava's core
-# engine: it does the FFT, the three-band weighting and the peak ballistics, so
-# this module only has to hand it f64 samples and read f64 bars back.
-cavacore = "2.0.2"
 # The Core Audio process tap (TODO 8.3). `default-features = false` because the
 # default set is "full" -- the whole framework surface, plus `private` and
 # `foundation`, and `foundation` pulls in `swift`, which is what needs the

@@ -22,10 +22,10 @@
 //! `docs/AUDIO-TAP.md` is the write-up of the experiments this is built on, and
 //! every trap recorded there is load-bearing here. The four that cost the most:
 //!
-//! 1. **The rate is read, never assumed.** `cavacore` believes whatever sample
-//!    rate it is given, so the tap's own `asbd.sample_rate` configures it — and
-//!    [`max_input_samples`] is the other half of that, the half that is a panic
-//!    rather than a wrong picture.
+//! 1. **The rate is read, never assumed.** The transform is sized from the tap's
+//!    own `asbd.sample_rate` ([`window_len`]), because bin `k` means
+//!    `k * rate / 2N` and a 44.1 kHz transform over 48 kHz audio puts every band
+//!    in the wrong octave.
 //! 2. **The `StartedDevice` is held for the whole capture.** Dropping it stops the
 //!    device, and a stopped device delivers nothing, which looks exactly like a
 //!    hang. [`TapSession`] exists so that is one field's problem.
@@ -36,23 +36,35 @@
 //!    list is *accepted* by macOS and then delivers silence forever, which is a
 //!    much harder thing to notice than an error.
 //!
+//! The analysis half is a plain radix-2 FFT and a log-spaced band map, both in
+//! this file. That is not a preference for the hand-rolled version: it is because
+//! TODO 1.6 chose `cavacore` for this job and 1.6's own measurement was wrong.
+//! `cavacore` 2.0.2 builds each band's FFT range with
+//! `relative_cut_off[n] as u32 * (len / 2)` where `relative_cut_off[n]` is
+//! `cut_off / (rate / 2)` — a fraction, so the cast truncates it to **zero** and
+//! every band is assigned the same first bin (`cavacore-2.0.2/src/lib.rs:339`).
+//! The whole 60 Hz–16 kHz range then collapses into bins 0…31 of one transform:
+//! measured, an 80 Hz sine reports band 9 and a 16 kHz sine reports the same
+//! band 9, and everything above ~850 Hz is indistinguishable. There is no
+//! configuration that avoids it — the cast is only non-zero above Nyquist, which
+//! the builder rejects — and upstream still has it on `main` as of 2026-10.
+//! `docs/AUDIO-TAP.md` §2f has the measurement and the fix.
+//!
 //! Fallback is the product decision, not an error path: a machine that denies the
 //! tap still gets bars that move with the music, and the first failure raises
 //! exactly one line saying what to grant ([`TapError::notice`]).
 
 use std::cell::UnsafeCell;
-use std::num::{NonZeroU32, NonZeroUsize};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU32, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::thread::{JoinHandle, sleep, spawn};
 use std::time::{Duration, Instant};
 
-use cavacore::{Cava, CavaBuilder, Channels, SampleRate as CavaSampleRate};
 use cidre::{cat, cf, core_audio as ca, ns};
 
-use super::{AudioSource, BARS, SimulatedSource};
 use crate::config::VisualizerSource;
+use crate::visualizer::{AudioSource, BARS, SimulatedSource};
 
 /// How long the worker waits between analyses. The frame tick reads the bars at
 /// 30 fps (TODO 8.4), so much slower than this is wasted work and much faster is
@@ -254,7 +266,9 @@ impl SampleRing {
     fn push(&self, src: &[f32]) {
         let cap = self.capacity();
         let head = self.head.0.load(Ordering::Relaxed);
-        let used = head.wrapping_sub(self.tail.0.load(Ordering::Acquire)).min(cap);
+        let used = head
+            .wrapping_sub(self.tail.0.load(Ordering::Acquire))
+            .min(cap);
         let n = src.len().min(cap);
         // `n <= cap` and the free space is `cap - used`, so this moves the read
         // cursor only when the newest samples would not otherwise fit.
@@ -357,18 +371,25 @@ impl BarCell {
     }
 }
 
-/// Turns `cavacore`'s output into the 0..=1 magnitudes the renderers expect.
+/// Turns the magnitudes into the 0..=1 values the renderers expect.
 ///
-/// `cavacore`'s bars are **not** normalised (TODO 1.6): with autosens they ramp from
-/// near zero over about a second, and their absolute size depends on how loud the
-/// master output happens to be. Without this, a bar's height would say how long the
-/// tap had been listening rather than what was playing.
+/// The magnitudes are **not** normalised (TODO 1.6): their absolute size depends
+/// on how loud the master output happens to be, so without this a bar's height
+/// would say how loud the Spotify window was rather than what was playing.
 ///
 /// One recent peak: up instantly, down slowly. Up instantly because a loud frame
 /// should look loud in this frame; down slowly because a peak that fell as fast as
 /// it rose would make the whole spectrum twitch on every kick drum. At [`TICK`] and
 /// [`RELEASE`] the fall is about a second and a quarter, longer than a bar's own
 /// rise and fall.
+///
+/// The peak starts at nothing rather than at a floor, and reaching nothing is what
+/// silence means: a frame of digital silence has zero magnitudes, so the reference
+/// falls to zero and every bar is exactly zero within one tick. Nothing has to
+/// guess at an absolute "this is quiet enough" level, which is the guess that made
+/// `cavacore`'s own output unusable — its magnitudes span ten orders of magnitude
+/// between a bass note and a 15 kHz one, so any fixed floor is either invisible or
+/// cuts the top of the spectrum off.
 struct BarScale {
     peak: f32,
 }
@@ -378,44 +399,42 @@ struct BarScale {
 /// twitch, short enough that a pause is silence in about two seconds.
 const RELEASE: f32 = 0.92;
 
-/// Below this the answer is silence whatever the input says.
+/// Below this fraction of the peak, a band is silence — about −60 dB.
 ///
-/// **Measured**, not chosen: a 48 kHz `cavacore` answers a bass sine with about
-/// 6e-5 and a 2 kHz one with about 5e-7, so real music lives above 1e-7 and the
-/// floor goes below all of it. Above ~2 kHz the crate answers 1e-10 to 1e-11 for
-/// *every* frequency — that is the numerical floor of its FFT, not music — and
-/// normalising by a peak that small would draw that floor as a full-height
-/// triangle. Putting the floor here is what makes the quiet top of the spectrum
-/// read as silence instead of as noise (`docs/AUDIO-TAP.md` §4).
-const SILENCE: f32 = 1e-9;
+/// **Measured, not chosen**: a Hann window's first sidelobe is −31 dB and its
+/// leakage falls about 18 dB per octave after that, so a full-height band leaks
+/// past −60 dB within about a octave and a half of itself. Everything the window
+/// spreads from a real band is therefore under this, and a band under this is
+/// either the window's own skirt or nothing at all. Neither is worth a row of
+/// cells.
+const RELATIVE_FLOOR: f32 = 1e-3;
 
 impl BarScale {
     fn new() -> Self {
-        Self { peak: SILENCE }
+        Self { peak: 0.0 }
     }
 
     /// Normalise `bars` in place.
     fn scale(&mut self, bars: &mut [f32]) {
-        // A NaN or an infinity from the DSP must not become the peak: one poisoned
-        // value in a `max` would then divide every other bar by nonsense.
+        // A NaN or an infinity from the transform must not become the peak: one
+        // poisoned value in a `max` would then divide every other bar by nonsense.
         let loudest = bars
             .iter()
             .filter(|v| v.is_finite())
             .copied()
             .fold(0.0f32, f32::max)
             .max(0.0);
-        self.peak = if loudest >= self.peak {
-            loudest
-        } else {
-            (self.peak * RELEASE).max(loudest)
-        };
-        if self.peak <= SILENCE {
-            self.peak = SILENCE;
+        self.peak = loudest.max(self.peak * RELEASE);
+        if self.peak <= 0.0 {
+            // Silence: no reference, so nothing to draw. Reached on the first frame
+            // of a tap and again within a second of the music stopping.
+            self.peak = 0.0;
             bars.fill(0.0);
             return;
         }
+        let floor = self.peak * RELATIVE_FLOOR;
         for bar in bars.iter_mut() {
-            *bar = if bar.is_finite() && *bar > 0.0 {
+            *bar = if bar.is_finite() && *bar > floor {
                 (*bar / self.peak).clamp(0.0, 1.0)
             } else {
                 0.0
@@ -425,70 +444,340 @@ impl BarScale {
 }
 
 // ---------------------------------------------------------------------------
+// The transform
+// ---------------------------------------------------------------------------
+
+/// A radix-2 FFT, sized once and reused for every frame.
+///
+/// Hand-rolled because it is a hundred lines and no options, and because the crate
+/// that used to do this job cannot: see the module docs and `docs/AUDIO-TAP.md` §2f.
+/// A dependency would be no smaller than the tests this needs, and this is the part
+/// of the pipeline where being able to read the answer matters more than not writing
+/// the code.
+mod fft {
+    /// A complex number as the transform needs it.
+    #[derive(Clone, Copy)]
+    pub(super) struct Complex {
+        re: f64,
+        im: f64,
+    }
+
+    impl Complex {
+        fn new(re: f64, im: f64) -> Self {
+            Self { re, im }
+        }
+
+        /// The length of the vector, which is what a spectrum is made of.
+        fn magnitude(self) -> f64 {
+            self.re.hypot(self.im)
+        }
+    }
+
+    impl std::ops::Add for Complex {
+        type Output = Self;
+        fn add(self, rhs: Self) -> Self {
+            Self::new(self.re + rhs.re, self.im + rhs.im)
+        }
+    }
+
+    impl std::ops::Sub for Complex {
+        type Output = Self;
+        fn sub(self, rhs: Self) -> Self {
+            Self::new(self.re - rhs.re, self.im - rhs.im)
+        }
+    }
+
+    impl std::ops::Mul for Complex {
+        type Output = Self;
+        fn mul(self, rhs: Self) -> Self {
+            Self::new(
+                self.re * rhs.re - self.im * rhs.im,
+                self.re * rhs.im + self.im * rhs.re,
+            )
+        }
+    }
+
+    /// `exp(-2*pi*i*t/len)` for `t` in `0..len/2`, the twiddle factors of a
+    /// decimation-in-time transform.
+    fn twiddles(len: usize) -> Vec<Complex> {
+        let step = -std::f64::consts::TAU / len as f64;
+        (0..len / 2)
+            .map(|t| {
+                let angle = step * t as f64;
+                Complex::new(angle.cos(), angle.sin())
+            })
+            .collect()
+    }
+
+    /// `bit_reverse(i)` for every `i`, so the permutation is table lookup rather
+    /// than arithmetic on every frame.
+    fn bit_reversal(len: usize) -> Vec<usize> {
+        let bits = len.trailing_zeros();
+        (0..len)
+            .map(|i| (0..bits).fold(0usize, |acc, bit| (acc << 1) | ((i >> bit) & 1)))
+            .collect()
+    }
+
+    /// A Hann window of `len` points, which is what makes one tone occupy a few
+    /// bins instead of smearing across all of them.
+    fn hann(len: usize) -> Vec<f64> {
+        if len < 2 {
+            return vec![1.0; len];
+        }
+        (0..len)
+            .map(|i| 0.5 * (1.0 - (std::f64::consts::TAU * i as f64 / (len - 1) as f64).cos()))
+            .collect()
+    }
+
+    /// A forward transform of a fixed power-of-two length.
+    ///
+    /// A real signal is transformed as if it were complex rather than by the usual
+    /// real-FFT packing. That costs a factor of two in arithmetic and buys an
+    /// implementation with no index bookkeeping in it at all. At one transform per
+    /// [`TICK`] on 2048 points it is a few megaflops a second, which is not a number
+    /// the CPU ever notices — `docs/AUDIO-TAP.md` §4 has the measurement on this
+    /// machine.
+    pub(super) struct Fft {
+        len: usize,
+        /// The Hann window, because a transform without one is not a spectrum
+        /// estimate: it is a way of finding how much energy is *in* a band, which is
+        /// what a bar means, rather than a rectangle in time smearing a tone across
+        /// the whole pane.
+        window: Vec<f64>,
+        /// The twiddle factor for a butterfly, pre-indexed per stage: stage `s`
+        /// uses every `len / 2^(s+1)`-th of them.
+        twiddles: Vec<Complex>,
+        reversal: Vec<usize>,
+        signal: Vec<Complex>,
+    }
+
+    impl Fft {
+        /// A transform of `len` points.
+        ///
+        /// # Panics
+        ///
+        /// If `len` is not a power of two of at least 2. `len` comes from
+        /// [`window_len`], which only ever returns powers of two, and
+        /// [`the_window_length_is_always_a_power_of_two`] pins that; the check is here
+        /// because an FFT that silently computes the wrong thing for a
+        /// non-power-of-two length is a much worse outcome than a panic on the worker
+        /// with `panic = "abort"` in the release profile.
+        pub(super) fn new(len: usize) -> Self {
+            assert!(len.is_power_of_two() && len >= 2, "FFT length {len}");
+            Self {
+                len,
+                window: hann(len),
+                twiddles: twiddles(len),
+                reversal: bit_reversal(len),
+                signal: Vec::new(),
+            }
+        }
+
+        /// The length of the transform, and so of the window.
+        pub(super) fn len(&self) -> usize {
+            self.len
+        }
+
+        /// The magnitudes of the transform of `samples`, newest `len` samples only.
+        ///
+        /// `out` is filled with `len / 2 + 1` magnitudes — DC through Nyquist. The
+        /// mirror a real signal also produces is left alone: nothing between here and
+        /// a bar height wants it, and reading it would double every frequency's
+        /// apparent energy.
+        ///
+        /// `samples` shorter than `len` is treated as if the missing samples were
+        /// silence, which is the truth at the start of a capture: there is no history
+        /// yet, and inventing one would be a click.
+        pub(super) fn magnitudes(&mut self, samples: &[f64], out: &mut [f64]) {
+            let len = self.len;
+            let tail = samples.len().saturating_sub(len);
+            self.signal.clear();
+            self.signal.reserve(len);
+            for (i, sample) in samples[tail..].iter().enumerate() {
+                self.signal.push(Complex::new(sample * self.window[i], 0.0));
+            }
+            // Fewer samples than the window is zero-padding, so a frame shorter than
+            // the window is windowed against silence rather than shifted.
+            self.signal.resize(len, Complex::new(0.0, 0.0));
+
+            let data = &mut self.signal;
+            for (i, &j) in self.reversal.iter().enumerate() {
+                if j > i {
+                    data.swap(i, j);
+                }
+            }
+            let mut width = 2;
+            while width <= len {
+                let half = width / 2;
+                let stride = len / width;
+                let mut block = 0;
+                while block < len {
+                    for k in 0..half {
+                        let w = self.twiddles[k * stride];
+                        let even = data[block + k];
+                        let odd = data[block + k + half] * w;
+                        data[block + k] = even + odd;
+                        data[block + k + half] = even - odd;
+                    }
+                    block += width;
+                }
+                width <<= 1;
+            }
+
+            for (bin, slot) in out.iter_mut().enumerate().take(len / 2 + 1) {
+                *slot = data[bin].magnitude();
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The band map
+// ---------------------------------------------------------------------------
+
+/// Where each bar's frequencies are, and how much of it to show.
+///
+/// **Log-spaced**, because music is: the bands of a display that are spaced
+/// linearly put two thirds of the pane above 5 kHz, where a spectrum has nothing
+/// to say, and give the bass — where the energy and the eye are — one bar. This is
+/// the same 60 Hz to 16 kHz range TODO 1.6 chose for `cavacore`, over the same 32
+/// bars, so the simulated and the real source still draw the same shape.
+struct BandMap {
+    /// The first bin of each band, inclusive.
+    lower: [u16; BARS],
+    /// The last bin of each band, inclusive.
+    upper: [u16; BARS],
+    /// How much of each band to show, relative to the lowest.
+    gain: [f32; BARS],
+}
+
+/// The lowest frequency a bar covers: below this the display is all bass and no
+/// shape, and 60 Hz is where a kick drum lives anyway.
+const LOWEST_HZ: f64 = 60.0;
+
+/// The highest. A tap at 22 050 Hz cannot show 16 kHz, so the top is clamped to
+/// the transform rather than asked for; that clamp is the whole reason this is a
+/// function of the rate.
+const HIGHEST_HZ: f64 = 16_000.0;
+
+/// How much of a spectrum's natural downward tilt to put back.
+///
+/// Music falls off with frequency at roughly 3 to 6 dB per octave, and the window
+/// below wastes screen space on the quiet part of that. Raising each band by
+/// `(f / f_lowest)^TILT` undoes three of those decibels, so a full band is a real
+/// shape instead of a spike at the bottom left and a dark pane above it. Measured
+/// against pink noise — which falls at exactly 3 dB per octave, so this is the
+/// signal the exponent is defined on — a 32-band map comes out flat to within
+/// about 6 dB from band 0 to band 31 (`pink_noise_stays_readable_across_the_pane`).
+///
+/// Not more: past this the display starts inventing energy that is not there.
+const TILT: f32 = 0.5;
+
+/// The highest frequency a map at `sample_rate` can show.
+///
+/// A transform of `window` points resolves `nyquist / (window / 2)` Hz per bin, so a
+/// tap slower than 32 kHz cannot show [`HIGHEST_HZ`] at all: the top is pulled below
+/// Nyquist by a whole bin, so the last band sits inside the spectrum rather than half
+/// outside it. This is the clamp that makes the map a function of the rate.
+fn top_hz(sample_rate: f64, window: usize) -> f64 {
+    let nyquist = sample_rate / 2.0;
+    HIGHEST_HZ
+        .min(nyquist - nyquist / window as f64)
+        .max(LOWEST_HZ * 1.5)
+}
+
+impl BandMap {
+    /// The map for a transform of `window` points at `sample_rate` Hz.
+    fn new(sample_rate: f64, window: usize) -> Self {
+        let nyquist = sample_rate / 2.0;
+        let top = top_hz(sample_rate, window);
+        let per_band = (top / LOWEST_HZ).log10() / BARS as f64;
+
+        let mut lower = [0u16; BARS];
+        let mut upper = [0u16; BARS];
+        let mut gain = [1.0f32; BARS];
+        let bins = (window / 2) as f64;
+        // A band narrower than one bin still gets a bin: its own, the nearest one,
+        // rather than an empty range and a bar stuck at zero.
+        let bin_of =
+            |hz: f64| ((hz / nyquist * bins).round() as i64).clamp(0, window as i64 / 2 - 1);
+        for (n, (lo, hi)) in lower.iter_mut().zip(upper.iter_mut()).enumerate() {
+            let from = LOWEST_HZ * 10f64.powf(per_band * n as f64);
+            let to = LOWEST_HZ * 10f64.powf(per_band * (n + 1) as f64);
+            let first = bin_of(from);
+            let last = bin_of(to).max(first);
+            *lo = first as u16;
+            *hi = last as u16;
+            // The geometric centre, because the band is a ratio and not a span.
+            gain[n] = ((from * to).sqrt() / LOWEST_HZ).powf(TILT as f64) as f32;
+        }
+        Self { lower, upper, gain }
+    }
+
+    /// Fold `bins` of magnitudes into the `BARS` bands.
+    ///
+    /// The **mean** over each band's bins, not the sum: a band's width in bins grows
+    /// from one at the bottom to hundreds at the top, so summing would make the top
+    /// of the spectrum tall for no reason other than arithmetic.
+    fn bands(&self, bins: &[f64], out: &mut [f32]) {
+        for (n, bar) in out.iter_mut().enumerate() {
+            *bar = (self.mean(n, bins) as f32) * self.gain[n];
+        }
+    }
+
+    /// The mean magnitude of band `n`, or zero if `bins` is empty.
+    fn mean(&self, n: usize, bins: &[f64]) -> f64 {
+        // The ranges come from `new` and are clamped again here, because this is the
+        // one place an out-of-range index would be a panic on the worker.
+        let last = bins.len().saturating_sub(1);
+        let lo = (self.lower[n] as usize).min(last);
+        let hi = (self.upper[n] as usize).min(last).max(lo);
+        bins[lo..=hi].iter().sum::<f64>() / (hi - lo + 1) as f64
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The analyser
 // ---------------------------------------------------------------------------
 
-/// How many samples `cavacore` accepts in one `execute` at `sample_rate`.
+/// The transform length for `sample_rate`: the power of two nearest `rate / 24`,
+/// which is about 42 ms of audio at any rate.
 ///
-/// `Cava::execute` copies its argument into an internal buffer of
-/// `treble_buffer_size * 8` samples and shifts it with
-/// `copy_within(..len - input.len(), input.len())`, so an input longer than that
-/// **panics** — and `Cava` does not publish the length. The size is a function of the
-/// sample rate alone (`cavacore`'s `compute_treble_buffer_size`, times eight for the
-/// bass FFT), so it is reproduced here rather than guessed, and
-/// `the_window_bound_is_cavacores_own` pins it against the crate.
+/// Long enough that the lowest band's 12 Hz of span covers more than one bin at
+/// 48 kHz — a shorter window puts 60 Hz and 72 Hz in the same bin and the bottom of
+/// the display cannot separate a kick from a bass line — and short enough that a
+/// quarter of a bar's height is still worth drawing at 20 ms a frame.
 ///
-/// Getting this wrong is not a wrong picture, it is a dead visualizer: a panic on the
-/// worker, with `panic = "abort"` in the release profile, takes the TUI with it.
-fn max_input_samples(sample_rate: u32) -> usize {
-    let factor = if sample_rate <= 8_125 {
-        1
-    } else if sample_rate <= 16_250 {
-        2
-    } else if sample_rate <= 32_500 {
-        4
-    } else if sample_rate <= 75_000 {
-        8
-    } else if sample_rate <= 150_000 {
-        16
-    } else if sample_rate <= 300_000 {
-        32
-    } else {
-        64
-    };
-    factor * 128 * 8
+/// A power of two because the transform is radix-2, and derived from the rate
+/// because bin `k` of an `N`-point transform means `k * rate / (2N)` Hz. Hard-coding
+/// 2048 would put 48 kHz's bands a semitone from where they belong at 44.1 kHz and
+/// by a factor of two at 96 kHz.
+fn window_len(sample_rate: u32) -> usize {
+    // `rate / 24` is 2000 at 48 kHz, and the clamp keeps a 8 kHz telephone tap from
+    // asking for a 128-point transform and a 384 kHz one from asking for a 32 768.
+    let target = (sample_rate / 24).clamp(512, 8192) as usize;
+    target.next_power_of_two()
 }
 
-/// The frequency window `cavacore` is asked for: TODO 1.6's measured 60 Hz to 16
-/// kHz, clamped so a tap slower than 32 kHz cannot ask for its own Nyquist.
-/// `cavacore` rejects a range whose end is above half the sample rate, which is the
-/// one way a perfectly good tap rate can still fail to configure.
-fn frequency_top(sample_rate: u32) -> u32 {
-    (16_000u32).min(sample_rate / 2).max(120)
-}
-
-/// One tap's worth of analysis: the `cavacore` instance, the samples waiting for it,
-/// and the scaling between its output and a magnitude.
+/// One tap's worth of analysis: the transform, the band map, the newest samples,
+/// and the scaling between a magnitude and a bar.
 ///
-/// One instance per stream, which is not a style choice. `cavacore` carries peak and
-/// autosens state inside the instance, and TODO 1.6's spike reported an *identical*
-/// spectrum for an 80 Hz sine and a 440 Hz sine because it reused one across signals.
-/// Here there is exactly one continuous stream, so the state is what smooths the
-/// output rather than what corrupts it.
+/// One instance per stream, which is the same rule `cavacore` had and for the same
+/// reason — its peak state lives inside the instance — except that here there is
+/// exactly one continuous stream and so the state is what smooths the output rather
+/// than what corrupts it.
 struct Analyser {
-    cava: Cava,
-    /// The rate the tap reported, verbatim. A `Cava` can only be built from a rounded
-    /// one, and the number a status line shows should be the one Core Audio gave
-    /// rather than a truncation of it.
+    fft: fft::Fft,
+    map: BandMap,
+    /// The rate the tap reported, verbatim. A transform can only be sized from a
+    /// rounded rate, and the number a status line shows should be the one Core Audio
+    /// gave rather than a truncation of it.
     reported: f64,
-    rate: u32,
-    /// Samples read from the ring that have not been analysed yet.
-    pending: Vec<f64>,
-    /// A contiguous run of the front of `pending`, because `execute` borrows the
-    /// analyser mutably and so cannot be handed a slice of its own field.
-    chunk: Vec<f64>,
-    raw: Vec<f64>,
-    scaled: Vec<f32>,
+    /// The newest `fft.len()` samples, oldest first.
+    recent: Vec<f64>,
+    /// `fft.len() / 2 + 1` magnitudes.
+    magnitudes: Vec<f64>,
+    bars: Vec<f32>,
     scale: BarScale,
 }
 
@@ -496,46 +785,25 @@ impl Analyser {
     /// An analyser for a tap running at `sample_rate` Hz.
     ///
     /// The rate comes from the tap's own `AudioStreamBasicDesc` and never from a
-    /// constant: `cavacore` trusts whatever it is told, and 44.1 kHz's maths over 48
-    /// kHz's audio puts every band in the wrong place.
+    /// constant, and it is checked rather than cast: it is an `f64`, and a
+    /// truncation is where a rate of 47 999.5 would quietly become 47 999 and a rate
+    /// of NaN would become 0 — which sizes a 512-point transform and answers every
+    /// band from the same dozen bins.
     fn new(sample_rate: f64) -> Result<Self, TapError> {
-        // `asbd.sample_rate` is an `f64` and `cavacore` wants a `u32`, so the
-        // truncation is where a rate of 47 999.5 would become 47 999 and a rate of
-        // NaN would become 0. Both are checked rather than cast.
-        let rate = if sample_rate.is_finite() && (1.0..=384_000.0).contains(&sample_rate) {
+        let rate = if sample_rate.is_finite() && (4_000.0..=384_000.0).contains(&sample_rate) {
             sample_rate.round() as u32
         } else {
             return Err(TapError::BadSampleRate(format!("{sample_rate}")));
         };
-        let top = frequency_top(rate);
-        let cava = CavaBuilder::default()
-            .bars_per_channel(NonZeroUsize::new(BARS).expect("BARS is not zero"))
-            .sample_rate(CavaSampleRate::new(rate).expect("rate is in range"))
-            .audio_channels(Channels::Mono)
-            .enable_autosens(true)
-            .noise_reduction(0.2)
-            .frequency_range(
-                NonZeroU32::new(60).expect("60 is not zero")
-                    ..NonZeroU32::new(top).expect("the top is not zero"),
-            )
-            .build()
-            .map_err(|errors| {
-                TapError::Analyser(
-                    errors
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join("; "),
-                )
-            })?;
+        let fft = fft::Fft::new(window_len(rate));
+        let bins = fft.len() / 2 + 1;
         Ok(Self {
-            cava,
+            map: BandMap::new(sample_rate, fft.len()),
+            fft,
             reported: sample_rate,
-            rate,
-            pending: Vec::new(),
-            chunk: Vec::new(),
-            raw: vec![0.0; BARS],
-            scaled: vec![0.0; BARS],
+            recent: Vec::new(),
+            magnitudes: vec![0.0; bins],
+            bars: vec![0.0; BARS],
             scale: BarScale::new(),
         })
     }
@@ -545,38 +813,51 @@ impl Analyser {
         self.reported
     }
 
-    /// The most samples one `execute` may be given at this rate.
-    fn limit(&self) -> usize {
-        max_input_samples(self.rate)
+    /// The transform length in samples, which is also the depth of the history the
+    /// bars are computed from.
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.fft.len()
     }
 
-    /// Hand over samples from the ring. More than one window's worth is kept for the
-    /// next tick rather than dropped, so a slow tick costs resolution rather than
-    /// audio.
-    fn offer(&mut self, samples: &[f32]) {
-        self.pending.extend(samples.iter().map(|s| f64::from(*s)));
+    /// The bins band `n` reads, and the gain applied to it.
+    #[cfg(test)]
+    fn band(&self, n: usize) -> ((usize, usize), f32) {
+        (
+            (self.map.lower[n] as usize, self.map.upper[n] as usize),
+            self.map.gain[n],
+        )
     }
 
-    /// Analyse whatever has been offered, in window-sized pieces, and update the
-    /// magnitudes in place.
-    fn advance(&mut self) {
-        let take = self.pending.len().min(self.limit());
-        if take == 0 {
+    /// Hand over captured samples and update the bars in place.
+    ///
+    /// Anything older than one window is dropped rather than queued. That is the
+    /// whole latency policy: the bars describe the last [`window_len`] samples of
+    /// what the tap heard, and a slow tick costs resolution rather than delay.
+    fn push(&mut self, samples: &[f32]) {
+        let len = self.fft.len();
+        if samples.is_empty() {
             return;
         }
-        self.chunk.clear();
-        self.chunk.extend_from_slice(&self.pending[..take]);
-        self.pending.drain(..take);
-        self.cava.execute(&self.chunk, &mut self.raw);
-        for (bar, value) in self.scaled.iter_mut().zip(self.raw.iter()) {
-            *bar = *value as f32;
+        if samples.len() >= len {
+            self.recent.clear();
+            self.recent
+                .extend(samples[samples.len() - len..].iter().map(|s| f64::from(*s)));
+        } else {
+            self.recent.extend(samples.iter().map(|s| f64::from(*s)));
+            let excess = self.recent.len().saturating_sub(len);
+            if excess > 0 {
+                self.recent.drain(..excess);
+            }
         }
-        self.scale.scale(&mut self.scaled);
+        self.fft.magnitudes(&self.recent, &mut self.magnitudes);
+        self.map.bands(&self.magnitudes, &mut self.bars);
+        self.scale.scale(&mut self.bars);
     }
 
-    /// The magnitudes as they stand. Always [`BARS`] of them, always in 0..=1.
+    /// The bars as they stand. Always [`BARS`] of them, always in 0..=1.
     fn bars(&self) -> &[f32] {
-        &self.scaled
+        &self.bars
     }
 }
 
@@ -595,6 +876,13 @@ struct TapIo {
     /// interleaving its channels into the spectrum, which is the one mistake a
     /// display must never be handed.
     channels: u32,
+    /// Where a stereo tap is downmixed, held here rather than made per callback.
+    ///
+    /// Only the stereo path touches it, and Trak asks for a mono mixdown, so on the
+    /// machine this was built on it stays empty. It is a field anyway: an allocation
+    /// on this thread is a dropout, and a `Vec` declared inside the callback would
+    /// allocate on every single callback.
+    downmix: Vec<f32>,
 }
 
 /// The IO proc. It must not allocate, lock, log or panic, because it runs on the
@@ -612,7 +900,11 @@ extern "C" fn on_audio(
         return cidre::os::Status::default();
     };
     let channels = io.channels.max(1) as usize;
-    let mut downmix: Vec<f32> = Vec::new();
+    let TapIo {
+        ring,
+        channels: _,
+        downmix,
+    } = &mut *io;
     for buffer in input.buffers.iter().take(input.number_buffers as usize) {
         if buffer.data.is_null() || buffer.data_bytes_size == 0 {
             continue;
@@ -629,7 +921,7 @@ extern "C" fn on_audio(
         let samples =
             unsafe { std::slice::from_raw_parts(buffer.data as *const f32, frames * channels) };
         if channels == 1 {
-            io.ring.push(samples);
+            ring.push(samples);
         } else {
             downmix.clear();
             downmix.reserve(frames);
@@ -638,7 +930,7 @@ extern "C" fn on_audio(
                     .chunks_exact(channels)
                     .map(|frame| frame.iter().sum::<f32>() / channels as f32),
             );
-            io.ring.push(&downmix);
+            ring.push(downmix);
         }
     }
     cidre::os::Status::default()
@@ -681,9 +973,9 @@ struct TapSession {
 struct StartedDevice(Box<dyn std::any::Any>);
 
 impl TapSession {
-    /// Take up to `max` samples the callback has delivered.
-    fn drain(&self, out: &mut Vec<f32>, max: usize) -> usize {
-        self.io.ring.drain(out, max)
+    /// Take everything the callback has delivered since the last call.
+    fn drain(&self, out: &mut Vec<f32>) -> usize {
+        self.io.ring.drain(out, self.io.ring.capacity())
     }
 }
 
@@ -838,8 +1130,7 @@ fn open_tap() -> Result<(TapSession, f64), TapError> {
     }
 
     use cidre::core_audio::{aggregate_device_keys as agg, sub_device_keys as sub};
-    let sub_device =
-        cf::DictionaryOf::with_keys_values(&[sub::uid()], &[output_uid.as_type_ref()]);
+    let sub_device = cf::DictionaryOf::with_keys_values(&[sub::uid()], &[output_uid.as_type_ref()]);
     let sub_tap = cf::DictionaryOf::with_keys_values(&[sub::uid()], &[tap_uid.as_type_ref()]);
     let aggregate_desc = cf::DictionaryOf::with_keys_values(
         &[
@@ -872,6 +1163,7 @@ fn open_tap() -> Result<(TapSession, f64), TapError> {
     let mut io = Box::new(TapIo {
         ring: SampleRing::new(RING_SAMPLES),
         channels: asbd.channels_per_frame.max(1),
+        downmix: Vec::new(),
     });
     // The IO proc holds `&mut TapIo` for as long as the device runs, so the buffer it
     // writes into is boxed and owned by the session that starts the device. Nothing
@@ -1016,14 +1308,14 @@ fn run(commands: Receiver<Command>, outbox: Sender<TapEvent>, bars: Arc<BarCell>
         }
 
         if let Some((tap, analyser)) = session.as_mut() {
-            // One window per tick, which is a quarter of the ring, so the ring cannot
-            // end up permanently ahead of the analysis.
-            scratch.clear();
-            if tap.drain(&mut scratch, analyser.limit()) > 0 {
-                analyser.offer(&scratch);
-                analyser.advance();
+            // Everything the callback has delivered since the last tick, analysed as
+            // one window. Anything older than the window is already gone, so the
+            // ring cannot end up permanently ahead of the analysis.
+            tap.drain(&mut scratch);
+            if !scratch.is_empty() {
+                analyser.push(&scratch);
+                bars.store(analyser.bars());
             }
-            bars.store(analyser.bars());
         }
 
         sleep(TICK);
@@ -1031,6 +1323,14 @@ fn run(commands: Receiver<Command>, outbox: Sender<TapEvent>, bars: Arc<BarCell>
 
     // The teardown, however this loop ended.
     drop(session);
+
+    // And if a signal asked for it, pay it back now that the tap is down. Dropping the
+    // session first is the whole ordering: `die_of` diverges, so this must not be left
+    // to the drop at the end of the function.
+    let signum = SHUTDOWN.load(Ordering::SeqCst);
+    if signum != 0 {
+        die_of(signum);
+    }
 }
 
 /// A started tap and the analyser built from the rate that tap reported.
@@ -1062,17 +1362,25 @@ type Handler = usize;
 /// libc's "default action" sentinel, which is `SIG_DFL` at this type.
 const SIG_DFL: Handler = 0;
 
+/// Exit code for a signal that was re-raised but somehow not fatal, which should not
+/// happen. 128 + the signal number is what a shell expects for a signalled process.
+const EXIT_SIGNALLED: i32 = 128;
+
 unsafe extern "C" {
     fn signal(signum: i32, handler: Handler) -> Handler;
+    fn raise(signum: i32) -> i32;
 }
 
 /// Set by the handler, read by the worker. A signal handler may touch nothing but a
 /// lock-free atomic, so it cannot run the teardown itself; it asks the worker, which
 /// is at most one [`TICK`] away.
-static SHUTDOWN: AtomicBool = AtomicBool::new(false);
+static SHUTDOWN: AtomicI32 = AtomicI32::new(0);
 
-extern "C" fn note_signal(_signum: i32) {
-    SHUTDOWN.store(true, Ordering::SeqCst);
+extern "C" fn note_signal(signum: i32) {
+    // `swap` rather than `store`: a second signal while the first is being acted on is
+    // a user who is impatient, and the default disposition is put back by then, so
+    // this is not even reached twice for the same signal.
+    SHUTDOWN.swap(signum, Ordering::SeqCst);
 }
 
 /// Installs [`note_signal`] for [`SIGHUP`] and [`SIGTERM`].
@@ -1101,9 +1409,34 @@ impl SignalGuard {
         Self
     }
 
+    /// The signal that was asked for, or `0` for none. Read once, so the worker acts
+    /// on a signal that arrived rather than on one that arrives while it acts.
     fn shutdown_requested() -> bool {
-        SHUTDOWN.load(Ordering::SeqCst)
+        SHUTDOWN.load(Ordering::SeqCst) != 0
     }
+}
+
+/// Take the default disposition of `signum` back and raise it, so the process dies of
+/// the signal it was sent.
+///
+/// [`note_signal`] swallows the default action, and that swallow is the whole point —
+/// it is what buys the worker one tick to drop the tap. But a `kill` Trak does not die
+/// of is a worse bug than a leftover aggregate device, so the worker pays the signal
+/// back after the teardown is done. This is the ordinary shape of a signal handler
+/// that has real work to do: notice, clean up, re-raise.
+///
+/// Nothing here returns in the normal case, so the `process::exit` is only reached if
+/// `raise` was itself delivered and handled, which after putting `SIG_DFL` back is a
+/// kernel that disagrees with this code.
+fn die_of(signum: i32) -> ! {
+    // SAFETY: `SIG_DFL` is libc's own sentinel for "default action", and `raise` is
+    // the libc entry point for sending a signal to this process. Reaching `exit` means
+    // the signal did not end the process, so stopping is the only honest answer left.
+    unsafe {
+        signal(signum, SIG_DFL);
+        raise(signum);
+    }
+    std::process::exit(EXIT_SIGNALLED + signum);
 }
 
 impl Drop for SignalGuard {
@@ -1139,9 +1472,7 @@ pub enum TapState {
     Tapping { sample_rate: f64 },
     /// The tap failed and the simulated source is standing in. The error is kept for
     /// the notice.
-    Simulated {
-        reason: Option<TapError>,
-    },
+    Simulated { reason: Option<TapError> },
     /// `source = "simulated"`. The tap is never attempted, so nothing here can be a
     /// fallback from one.
     Forced,
@@ -1196,8 +1527,10 @@ fn outcome(event: &TapEvent, warned: bool) -> (TapState, Option<String>) {
 ///   once.
 ///
 /// ```no_run
-/// # use trak::visualizer::AudioPipeline;
-/// let mut viz = AudioPipeline::new(trak::config::VisualizerSource::Auto);
+/// # use trak::audio::AudioPipeline;
+/// # use trak::config::VisualizerSource;
+/// # use trak::visualizer::AudioSource;
+/// let mut viz = AudioPipeline::new(VisualizerSource::Auto);
 /// viz.set_track("spotify:track:abc");
 /// viz.set_wanted(true); // the visualizer came on screen
 /// viz.set_playing(true);
@@ -1364,22 +1697,60 @@ mod tests {
         vec![v; n]
     }
 
-    /// Feed `samples` through an analyser in window-sized pieces, as the worker does.
+    /// Feed `samples` through an analyser in the pieces the worker uses: one
+    /// callback's worth, which at 48 kHz and the 20 ms tick is about 960 samples
+    /// rather than a whole window.
     fn run_analyser(rate: f64, samples: &[f32]) -> Analyser {
-        let mut analyser = Analyser::new(rate).expect("a rate cavacore accepts");
-        let limit = analyser.limit();
-        let mut offset = 0;
-        while offset < samples.len() {
-            let end = (offset + limit).min(samples.len());
-            analyser.offer(&samples[offset..end]);
-            analyser.advance();
-            offset = end;
+        let mut analyser = Analyser::new(rate).expect("a rate the analyser accepts");
+        let tick = (rate / 50.0) as usize;
+        for chunk in samples.chunks(tick.max(1)) {
+            analyser.push(chunk);
         }
         analyser
     }
 
     fn loudest(bars: &[f32]) -> f32 {
         bars.iter().copied().fold(0.0, f32::max)
+    }
+
+    /// A deterministic noise source with a flat spectrum, for the tests that need a
+    /// signal with energy everywhere at once.
+    fn white_noise(n: usize, seed: u64) -> Vec<f32> {
+        let mut s = seed;
+        (0..n)
+            .map(|_| {
+                s = s
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                ((s >> 33) as f64 / (1u64 << 31) as f64) - 1.0
+            })
+            .map(|v| v as f32)
+            .collect()
+    }
+
+    /// A deterministic noise source with a −3 dB/octave slope, which is the signal
+    /// the tilt in [`TILT`] is defined against: three summed one-pole filters over
+    /// white noise, the usual pink-noise construction.
+    fn pink_noise(n: usize, seed: u64) -> Vec<f32> {
+        let mut s = seed;
+        let white = |s: &mut u64| {
+            *s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((*s >> 33) as f64 / (1u64 << 31) as f64) - 1.0
+        };
+        let mut b0 = 0.0;
+        let mut b1 = 0.0;
+        let mut b2 = 0.0;
+        (0..n)
+            .map(|_| {
+                let w = white(&mut s);
+                b0 = 0.99765 * b0 + w * 0.0990460;
+                b1 = 0.96300 * b1 + w * 0.2965164;
+                b2 = 0.57000 * b2 + w * 1.0526913;
+                ((b0 + b1 + b2 + w * 0.1848) * 0.15) as f32
+            })
+            .collect()
     }
 
     // -- the ring ----------------------------------------------------------
@@ -1576,7 +1947,7 @@ mod tests {
         scale.scale(&mut loud);
         assert_eq!(scale.peak, 1.0);
 
-        let quiet = vec![0.0; BARS];
+        let quiet = [0.0; BARS];
         let mut frames = 0;
         while scale.peak > 0.5 && frames < 500 {
             scale.scale(&mut quiet.to_vec());
@@ -1595,26 +1966,45 @@ mod tests {
     #[test]
     fn a_loud_frame_eventually_becomes_silence() {
         // A pause has to reach zero, or the visualizer shows a frozen spectrum of a
-        // song that stopped. From a music-level peak to the floor is about two
-        // seconds of ticks.
+        // song that stopped.
         let mut scale = BarScale::new();
         let mut loud = vec![0.0; BARS];
-        loud[0] = 1e-4;
+        loud[0] = 1.0;
         scale.scale(&mut loud);
+        assert_eq!(loud[0], 1.0, "the loud frame is full height to begin with");
 
+        // Every tick gets the same **raw** quiet frame — silence, every band zero, in
+        // the units the scaler is given magnitudes in. Handing it back its own output
+        // instead would be a state the worker can never be in: `Analyser::push`
+        // overwrites every band from the transform before scaling, so a scaled bar is
+        // never fed in again. It would also pin the reference for ever, because a
+        // full-height bar is louder than the reference it was divided by.
         let quiet = vec![0.0; BARS];
+        let mut bars = vec![0.0; BARS];
         let mut frames = 0;
-        let mut bars = loud;
-        while loudest(&bars) > 0.0 && frames < 2000 {
+        while scale.peak > 0.01 && frames < 2_000 {
+            bars.copy_from_slice(&quiet);
             scale.scale(&mut bars);
+            assert_eq!(
+                bars,
+                vec![0.0; BARS],
+                "frame {frames} of silence drew something"
+            );
             frames += 1;
         }
-        assert_eq!(bars, vec![0.0; BARS], "silence after the music stopped");
         assert!(
             frames <= 200,
-            "and it took {frames} frames, which is {} s",
+            "the reference fell a hundredfold in {frames} frames, which is {} s",
             f64::from(frames) * TICK.as_secs_f64()
         );
+
+        // And the point of letting it fall: a passage quieter than the loud one is
+        // visible again rather than a flat line. A reference that hovered at a floor
+        // would pass the first half of this and fail here.
+        let mut faint = vec![0.0; BARS];
+        faint[0] = 0.01;
+        scale.scale(&mut faint);
+        assert!(faint[0] > 0.9, "and a quiet passage came back: {faint:?}");
     }
 
     #[test]
@@ -1642,9 +2032,7 @@ mod tests {
         ];
         let mut scale = BarScale::new();
         for round in 0..30 {
-            let mut bars: Vec<f32> = (0..BARS)
-                .map(|i| junk[(i + round) % junk.len()])
-                .collect();
+            let mut bars: Vec<f32> = (0..BARS).map(|i| junk[(i + round) % junk.len()]).collect();
             scale.scale(&mut bars);
             for (i, bar) in bars.iter().enumerate() {
                 assert!(
@@ -1661,108 +2049,290 @@ mod tests {
         let mut poisoned = vec![f32::NAN; BARS];
         poisoned[1] = 0.25;
         scale.scale(&mut poisoned);
-        assert_eq!(poisoned[1], 1.0, "the real signal still scales: {poisoned:?}");
+        assert_eq!(
+            poisoned[1], 1.0,
+            "the real signal still scales: {poisoned:?}"
+        );
         assert_eq!(poisoned[0], 0.0, "and the NaN became silence");
 
         // And a frame that is *only* junk must not poison the peak either, because a
-        // peak of infinity would divide every later frame by it.
+        // peak of infinity would divide every later frame by it. On its own scale the
+        // junk leaves nothing behind at all...
+        let mut scale = BarScale::new();
         let mut junk = vec![f32::NAN; BARS];
         junk[0] = f32::INFINITY;
         scale.scale(&mut junk);
-        assert_eq!(scale.peak, SILENCE, "no junk became the peak");
+        assert_eq!(scale.peak, 0.0, "no junk became the peak");
         assert_eq!(junk, vec![0.0; BARS]);
+
+        // ...and it must not overwrite a peak that is already tracking, or every
+        // frame after one bad frame would be measured against nothing.
+        let mut scale = BarScale::new();
+        let mut real = vec![0.0; BARS];
+        real[0] = 0.5;
+        scale.scale(&mut real);
+        scale.scale(&mut junk);
+        assert!(
+            scale.peak.is_finite() && scale.peak > 0.0 && scale.peak <= 0.5,
+            "the real peak survived the junk frame: {}",
+            scale.peak
+        );
+    }
+
+    // -- the transform -----------------------------------------------------
+
+    #[test]
+    fn the_window_length_is_always_a_power_of_two() {
+        // The transform is radix-2, so this is not a style question: a non-power-of-two
+        // length would make `Fft::new` panic on the worker, and `panic = "abort"` in
+        // the release profile takes the TUI with it.
+        for rate in (1..=384_000).step_by(37) {
+            let len = window_len(rate);
+            assert!(len.is_power_of_two(), "{rate} Hz -> {len}");
+            assert!((512..=8192).contains(&len), "{rate} Hz -> {len}");
+        }
+    }
+
+    #[test]
+    fn the_window_length_is_about_forty_two_milliseconds_at_any_rate() {
+        for rate in [8_000u32, 16_000, 22_050, 44_100, 48_000, 96_000, 192_000] {
+            let ms = window_len(rate) as f64 / f64::from(rate) * 1000.0;
+            assert!(
+                (21.0..=85.0).contains(&ms),
+                "{rate} Hz -> a {ms:.1} ms window, which resolves neither the low bands \
+                 nor a 20 ms frame"
+            );
+        }
+        assert_eq!(window_len(48_000), 2048, "and the tap's own rate gets 2048");
+        assert!(
+            window_len(96_000) > window_len(48_000),
+            "a faster tap needs a longer window for the same span of time"
+        );
+        assert!(
+            window_len(48_000) > window_len(8_000),
+            "and a slower one needs a shorter one"
+        );
+    }
+
+    #[test]
+    fn the_transform_finds_a_tone_in_the_bin_its_frequency_names() {
+        // The claim every frequency decision rests on: bin `k` of an `N`-point
+        // transform means `k * rate / N` Hz. If this is wrong the band map is wrong.
+        for rate in [8_000.0f64, 44_100.0, 48_000.0, 96_000.0] {
+            let len = window_len(rate as u32);
+            let mut fft = fft::Fft::new(len);
+            let mut mags = vec![0.0; len / 2 + 1];
+            for freq in [200.0f64, 1_000.0, 4_000.0] {
+                if freq >= rate / 2.0 {
+                    continue;
+                }
+                let samples: Vec<f64> = (0..len)
+                    .map(|i| (std::f64::consts::TAU * freq * i as f64 / rate).sin())
+                    .collect();
+                fft.magnitudes(&samples, &mut mags);
+                let peak = mags.iter().copied().fold(0.0, f64::max);
+                let loudest = mags
+                    .iter()
+                    .position(|m| *m == peak)
+                    .expect("the transform filled the magnitudes");
+                let bin = (freq / rate * len as f64).round() as usize;
+                assert!(
+                    loudest.abs_diff(bin) <= 1,
+                    "{rate} Hz, {freq} Hz: bin {loudest}, expected {bin}"
+                );
+                assert!(
+                    peak > 1.0,
+                    "{rate} Hz, {freq} Hz: peak {peak} is not a tone"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_transform_keeps_a_constant_signal_in_the_first_two_bins() {
+        // DC in bin 0 and Nyquist in bin `len/2`, which is the one property of a
+        // real transform that the bar map leans on: it stops at Nyquist and never
+        // reads the mirrored half.
+        let len = 64;
+        let mut fft = fft::Fft::new(len);
+        let mut mags = vec![0.0; len / 2 + 1];
+        fft.magnitudes(&vec![1.0; len], &mut mags);
+        assert_eq!(mags[0].round(), len as f64 / 2.0, "DC: {:?}", mags);
+
+        let alternating: Vec<f64> = (0..len)
+            .map(|i| if i % 2 == 0 { 1.0 } else { -1.0 })
+            .collect();
+        fft.magnitudes(&alternating, &mut mags);
+        assert!(
+            mags[len / 2] > mags.iter().take(len / 2).copied().fold(0.0, f64::max),
+            "Nyquist: {:?}",
+            mags
+        );
+    }
+
+    #[test]
+    fn a_frame_shorter_than_the_window_is_zero_padded_and_not_shifted() {
+        // The first tick of a capture is shorter than the window, and the first few
+        // after it are too. What must not happen is the frame being read from the wrong
+        // offset — a window that starts halfway through the audio answers a different
+        // spectrum, and no test of the band map would notice. DC settles it: a frame of
+        // `n` ones has a DC magnitude of `n * sum(hann) / 2`, so half a window is half
+        // of the whole and a shifted read is neither.
+        let len = 256;
+        let mut fft = fft::Fft::new(len);
+        let mut short = vec![0.0; len / 2 + 1];
+        let mut full = vec![0.0; len / 2 + 1];
+        fft.magnitudes(&vec![1.0; len / 2], &mut short);
+        fft.magnitudes(&vec![1.0; len], &mut full);
+        assert!(
+            (short[0] - full[0] / 2.0).abs() < full[0] * 1e-6,
+            "DC is not halved: {} against {}",
+            short[0],
+            full[0]
+        );
+        assert!(short.iter().all(|m| m.is_finite() && *m >= 0.0));
+
+        // And one sample is one sample, not a window of them.
+        let mut one = vec![0.0; len / 2 + 1];
+        fft.magnitudes(&[1.0], &mut one);
+        assert!(one[0] < full[0] * 0.01, "DC of a single sample: {}", one[0]);
+    }
+
+    #[test]
+    fn a_transform_of_an_odd_length_is_refused_rather_than_wrong() {
+        // Both directions: the panic is the point, and it has to be reachable only by
+        // a caller that ignored `window_len`.
+        let refused = std::panic::catch_unwind(|| fft::Fft::new(1000));
+        assert!(refused.is_err(), "1000 is not a power of two");
+        let refused = std::panic::catch_unwind(|| fft::Fft::new(1));
+        assert!(
+            refused.is_err(),
+            "and a 1-point transform is not a transform"
+        );
+    }
+
+    // -- the band map ------------------------------------------------------
+
+    #[test]
+    fn the_bands_go_up_in_frequency_and_never_skip_a_bin() {
+        for rate in [16_000.0f64, 22_050.0, 44_100.0, 48_000.0, 96_000.0] {
+            let map = BandMap::new(rate, window_len(rate as u32));
+            let mut last = 0usize;
+            for n in 0..BARS {
+                let (lo, hi) = (map.lower[n] as usize, map.upper[n] as usize);
+                assert!(hi >= lo, "{rate} Hz band {n}: {lo}..{hi}");
+                assert!(lo >= last, "{rate} Hz band {n}: {lo} < {last}");
+                assert!(
+                    hi < rate as usize,
+                    "{rate} Hz band {n}: {hi} is past Nyquist"
+                );
+                last = lo;
+            }
+            assert!(
+                map.lower[BARS - 1] > map.lower[0],
+                "{rate} Hz: the map does not span anything"
+            );
+        }
+    }
+
+    #[test]
+    fn the_top_band_stays_below_nyquist_however_slow_the_tap_is() {
+        // The reason the top is a function of the rate: a 22 050 Hz tap cannot show
+        // 16 kHz, and asking it to is how a spectrum gets bands that answer nothing.
+        for rate in [8_000.0f64, 16_000.0, 22_050.0, 32_000.0, 44_100.0, 48_000.0] {
+            let map = BandMap::new(rate, window_len(rate as u32));
+            let _ = &map;
+            let window = window_len(rate as u32);
+            let top = top_hz(rate, window);
+            let nyquist = rate / 2.0;
+            let bin = nyquist / window as f64;
+            assert!(top <= HIGHEST_HZ, "{rate} Hz: top {top} is above the range");
+            if HIGHEST_HZ >= nyquist {
+                // Slow tap: Nyquist is the binding limit, and it binds within a bin so
+                // the last band is inside the spectrum rather than half outside it.
+                assert!(top < nyquist, "{rate} Hz: top {top}");
+                assert!(
+                    top > nyquist - bin * 2.0,
+                    "{rate} Hz: top {top} is more than a bin under Nyquist, which \\
+                     throws away range the transform has"
+                );
+            } else {
+                assert_eq!(top, HIGHEST_HZ, "{rate} Hz has room for the whole range");
+            }
+            assert!((map.upper[BARS - 1] as usize) < window / 2, "{rate} Hz");
+        }
+        // 48 kHz shows the whole range, and a slower tap shows everything it has.
+        assert_eq!(top_hz(48_000.0, 2048).round(), 16_000.0);
+        assert_eq!(top_hz(192_000.0, 8192).round(), 16_000.0);
+        assert!((top_hz(22_050.0, 1024) - 11_014.0).abs() < 1.0);
+        assert!((top_hz(8_000.0, 512) - 3_992.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn the_tilt_rises_with_frequency_and_leaves_the_bottom_alone() {
+        let map = BandMap::new(48_000.0, 2048);
+        for n in 1..BARS {
+            assert!(
+                map.gain[n] > map.gain[n - 1],
+                "band {n} is quieter than band {} and should be lifted further",
+                n - 1
+            );
+        }
+        assert!(
+            (0.5..2.0).contains(&map.gain[0]),
+            "and the bottom band is not itself boosted much: {}",
+            map.gain[0]
+        );
+    }
+
+    #[test]
+    fn pink_noise_stays_readable_across_the_pane() {
+        // The claim `TILT` is defined on: a −3 dB/octave source, which the tilt turns
+        // into a flat-ish spectrum. Without it the top two thirds of the pane would be
+        // dark for every track; with too much of it the top would be brighter than the
+        // bottom, which is not what music looks like.
+        let analyser = run_analyser(48_000.0, &pink_noise(48_000, 20_260_112));
+        let bars = analyser.bars();
+        let loud = bars[BARS / 4..BARS * 3 / 4]
+            .iter()
+            .copied()
+            .filter(|b| *b > 0.0)
+            .count();
+        assert!(
+            loud > BARS / 4,
+            "the middle of the pane is empty for pink noise: {bars:?}"
+        );
+        let top_quarter = bars[BARS * 3 / 4..].iter().copied().fold(0.0f32, f32::max);
+        assert!(top_quarter > 0.05, "and the top quarter is dark: {bars:?}");
     }
 
     // -- the analyser ------------------------------------------------------
 
-    /// A `Cava` built the way `Analyser` builds it, so the bound can be checked
-    /// against the crate rather than against a copy of the crate.
-    fn bare_cava(rate: u32) -> Cava {
-        CavaBuilder::default()
-            .bars_per_channel(NonZeroUsize::new(BARS).expect("BARS"))
-            .sample_rate(CavaSampleRate::new(rate).expect("in range"))
-            .audio_channels(Channels::Mono)
-            .enable_autosens(true)
-            .noise_reduction(0.2)
-            .frequency_range(
-                NonZeroU32::new(60).expect("60")..NonZeroU32::new(frequency_top(rate)).expect("top"),
-            )
-            .build()
-            .unwrap_or_else(|_| panic!("a Cava at {rate} Hz"))
-    }
-
-    #[test]
-    fn the_window_bound_is_cavacores_own() {
-        // `max_input_samples` reproduces a `pub(crate)` function, and being wrong in
-        // the direction of "too small" is a panic on the worker with `panic = "abort"`
-        // in the release profile. So: exactly the bound must be accepted by the real
-        // crate, and one more sample must not be.
-        for rate in [8_000u32, 44_100, 48_000, 96_000, 192_000] {
-            let bound = max_input_samples(rate);
-            assert_eq!(
-                Analyser::new(f64::from(rate)).expect("the rate is fine").limit(),
-                bound
-            );
-
-            let mut out = vec![0.0f64; BARS];
-            // SAFETY-free by way of `catch_unwind`: `Cava` holds raw pointers, so the
-            // closure needs the assertion. Nothing survives it either way; the point
-            // is only to see whether it panicked.
-            let at_bound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                bare_cava(rate).execute(&vec![0.0; bound], &mut out);
-            }));
-            assert!(at_bound.is_ok(), "{rate} Hz: the bound itself must work");
-
-            let over = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                bare_cava(rate).execute(&vec![0.0; bound + 1], &mut out);
-            }));
-            assert!(
-                over.is_err(),
-                "{rate} Hz: {bound} is not cavacore's bound, it accepted {bound} samples and \n\
-                 {bound} and one more"
-            );
-        }
-    }
-
-    #[test]
-    fn the_window_bound_grows_with_the_rate() {
-        assert!(max_input_samples(96_000) > max_input_samples(48_000));
-        assert!(max_input_samples(48_000) > max_input_samples(8_000));
-        assert_eq!(max_input_samples(48_000), 8192);
-    }
-
     #[test]
     fn an_analyser_takes_the_rate_it_is_given_and_not_a_constant() {
-        assert_eq!(Analyser::new(48_000.0).expect("48k").sample_rate(), 48_000.0);
-        assert_eq!(Analyser::new(44_100.0).expect("44.1k").sample_rate(), 44_100.0);
+        assert_eq!(
+            Analyser::new(48_000.0).expect("48k").sample_rate(),
+            48_000.0
+        );
+        assert_eq!(
+            Analyser::new(44_100.0).expect("44.1k").sample_rate(),
+            44_100.0
+        );
+        // And the window follows it, which is the half of that which decides where a
+        // frequency lands.
+        assert_eq!(Analyser::new(48_000.0).expect("48k").len(), 2048);
+        assert_eq!(Analyser::new(44_100.0).expect("44.1k").len(), 2048);
+        assert_eq!(Analyser::new(96_000.0).expect("96k").len(), 4096);
     }
 
     #[test]
     fn an_analyser_refuses_a_rate_it_cannot_use() {
-        for rate in [0.0, -1.0, f64::NAN, f64::INFINITY, 1e9] {
+        for rate in [0.0, -1.0, f64::NAN, f64::INFINITY, 1e9, 3_999.0] {
             assert!(
-                matches!(
-                    Analyser::new(rate),
-                    Err(TapError::BadSampleRate(_)) | Err(TapError::Analyser(_))
-                ),
+                matches!(Analyser::new(rate), Err(TapError::BadSampleRate(_))),
                 "{rate} Hz"
             );
         }
-    }
-
-    #[test]
-    fn the_window_is_clamped_to_nyquist_for_a_slow_tap() {
-        // `cavacore` rejects a frequency range whose end is above half the sample rate,
-        // so a 16 kHz window is a configuration error on a 22 kHz tap.
-        for rate in [16_000u32, 22_050, 32_000, 44_100, 48_000, 96_000] {
-            assert!(frequency_top(rate) <= rate / 2, "{rate}");
-            assert!(
-                Analyser::new(f64::from(rate)).is_ok(),
-                "{rate} Hz should configure"
-            );
-        }
-        assert_eq!(frequency_top(48_000), 16_000);
-        assert_eq!(frequency_top(22_050), 11_025);
     }
 
     #[test]
@@ -1782,8 +2352,8 @@ mod tests {
             .rposition(|b| *b > 0.02)
             .unwrap_or_else(|| panic!("no energy at all: {bars:?}"));
         assert!(
-            highest < BARS / 2,
-            "80 Hz landed in the upper half (band {highest}): {bars:?}"
+            highest < BARS / 4,
+            "80 Hz landed at band {highest} of {BARS}: {bars:?}"
         );
     }
 
@@ -1797,14 +2367,64 @@ mod tests {
             .unwrap_or_else(|| panic!("no energy at all: {bars:?}"));
         assert!(
             highest > BARS / 2,
-            "4 kHz landed in the lower half (band {highest}): {bars:?}"
+            "4 kHz landed at band {highest} of {BARS}: {bars:?}"
         );
     }
 
     #[test]
+    fn every_frequency_between_the_bands_lands_where_it_belongs() {
+        // The property the whole band map exists for, and the one TODO 1.6's fixture
+        // claimed without checking: sweeping the range, the loudest band only ever
+        // moves up. A map that collapsed every frequency onto one bin — which is what
+        // `cavacore` 2.0.2 does — fails this at the second frequency.
+        let mut previous = 0usize;
+        let mut freq = LOWEST_HZ;
+        while freq <= 12_000.0 {
+            let analyser = run_analyser(48_000.0, &sine(48_000.0, freq, 0.5));
+            let bars = analyser.bars();
+            let loudest = bars
+                .iter()
+                .enumerate()
+                .fold(
+                    (0usize, 0.0f32),
+                    |acc, (n, b)| {
+                        if *b > acc.1 { (n, *b) } else { acc }
+                    },
+                )
+                .0;
+            assert!(
+                loudest >= previous,
+                "{freq:.0} Hz went backwards, to band {loudest} from {previous}: {bars:?}"
+            );
+            assert!(bars[loudest] > 0.2, "{freq:.0} Hz drew nothing: {bars:?}");
+            previous = loudest;
+            freq *= 1.26;
+        }
+        assert!(
+            previous > BARS * 3 / 4,
+            "12 kHz still landed in the bottom quarter, at band {previous}"
+        );
+    }
+
+    #[test]
+    fn a_tone_at_the_bottom_of_the_band_range_is_in_the_first_band() {
+        // The edges, not just the middle of the range: the first band's upper edge is
+        // where a log map is most likely to be off by a bin.
+        let analyser = Analyser::new(48_000.0).expect("48k");
+        for n in [0usize, 1, 2] {
+            let ((lo, hi), _) = analyser.band(n);
+            let centre = ((lo + hi) / 2) as f64 * 48_000.0 / analyser.len() as f64;
+            assert!(
+                centre < 200.0,
+                "band {n} centres at {centre} Hz, not the bass"
+            );
+        }
+    }
+
+    #[test]
     fn an_analyser_discriminates_two_frequencies() {
-        // TODO 1.6's fixture, through the real path rather than a bare `Cava`. If the
-        // two came out the same shape, the tap would be feeding the display noise.
+        // TODO 1.6's fixture, through the real path. If the two came out the same
+        // shape, the tap would be feeding the display noise.
         let bass = run_analyser(48_000.0, &sine(48_000.0, 80.0, 1.0));
         let mid = run_analyser(48_000.0, &sine(48_000.0, 440.0, 1.0));
         let mean_difference = bass
@@ -1835,32 +2455,64 @@ mod tests {
 
     #[test]
     fn an_analyser_survives_more_audio_than_one_window() {
-        // The overflow case: a slow tick leaves more pending than one `execute` takes,
-        // and the leftovers have to be analysed rather than dropped or the spectrum
-        // develops gaps.
-        let samples = sine(48_000.0, 440.0, 1.0);
+        // A slow tick, or a worker that was descheduled, hands over far more than one
+        // window at once. The extra is dropped rather than queued — the bars describe
+        // the most recent window — but the frame must still be a whole one, so this
+        // asserts the bars describe the *end* of the audio rather than its start.
+        let window = window_len(48_000);
         let mut analyser = Analyser::new(48_000.0).expect("48k");
-        analyser.offer(&samples);
-        let window = analyser.limit();
-        analyser.advance();
-        let after_one = analyser.bars().to_vec();
-        while analyser.pending.len() > window {
-            analyser.advance();
-        }
+        analyser.push(&sine(48_000.0, 80.0, 1.0));
+        let low = analyser.bars().iter().rposition(|b| *b > 0.02);
+
+        let mut later = Analyser::new(48_000.0).expect("48k");
+        later.push(&sine(48_000.0, 4_000.0, 1.0));
+        let high = later.bars().iter().rposition(|b| *b > 0.02);
+
+        let mut both = Analyser::new(48_000.0).expect("48k");
+        let mut audio = sine(48_000.0, 80.0, 1.0);
+        audio.extend(sine(48_000.0, 4_000.0, 1.0));
+        both.push(&audio);
+        assert!(window < audio.len(), "and this really is several windows");
         assert!(
-            analyser.bars().iter().any(|b| *b > 0.05),
-            "the rest of the audio still analysed: {:?}",
-            analyser.bars()
+            low.unwrap_or(BARS) < BARS / 4,
+            "80 Hz alone is in the bass: {low:?}"
         );
-        assert_eq!(after_one.len(), BARS);
+        assert!(
+            high.unwrap_or(0) > BARS / 2,
+            "4 kHz alone is in the treble: {high:?}"
+        );
+        // One call, both sines, four windows' worth: the treble is last, so the bars
+        // must describe the treble and not the bass that came first.
+        let seen = both.bars().iter().rposition(|b| *b > 0.02);
+        assert_eq!(
+            seen, high,
+            "the last window is what counts, not the first: {seen:?} against {high:?}"
+        );
     }
 
     #[test]
     fn an_analyser_with_nothing_offered_is_a_no_op() {
         let mut analyser = Analyser::new(48_000.0).expect("48k");
-        analyser.advance();
-        analyser.advance();
+        analyser.push(&[]);
+        analyser.push(&[]);
         assert_eq!(analyser.bars(), &[0.0; BARS]);
+    }
+
+    #[test]
+    fn an_analyser_keeps_no_longer_history_than_one_window() {
+        // The latency policy, as a bound on memory rather than on a comment: a tap
+        // that ran for an hour must not have accumulated an hour of samples.
+        let mut analyser = Analyser::new(48_000.0).expect("48k");
+        for _ in 0..200 {
+            analyser.push(&white_noise(960, 7));
+        }
+        assert!(
+            analyser.recent.len() <= analyser.len(),
+            "{} samples held for a {} window",
+            analyser.recent.len(),
+            analyser.len()
+        );
+        assert!(analyser.bars().iter().any(|b| *b > 0.05));
     }
 
     // -- errors ------------------------------------------------------------
@@ -1884,15 +2536,14 @@ mod tests {
             TapError::from_status(560_947_818),
             TapError::CoreAudio(_)
         ));
-        assert!(matches!(
-            TapError::from_status(0),
-            TapError::CoreAudio(_)
-        ));
+        assert!(matches!(TapError::from_status(0), TapError::CoreAudio(_)));
     }
 
     #[test]
     fn a_denial_says_where_to_go_and_nothing_else_does() {
-        let line = TapError::PermissionDenied("'!hog'").notice().expect("a line");
+        let line = TapError::PermissionDenied("'!hog'")
+            .notice()
+            .expect("a line");
         assert!(
             line.contains("Screen & System Audio Recording"),
             "the line has to name the setting: {line}"
@@ -1932,8 +2583,18 @@ mod tests {
 
     #[test]
     fn a_started_tap_reports_the_rate_it_reported() {
-        let (state, notice) = outcome(&TapEvent::Started { sample_rate: 48_000.0 }, false);
-        assert_eq!(state, TapState::Tapping { sample_rate: 48_000.0 });
+        let (state, notice) = outcome(
+            &TapEvent::Started {
+                sample_rate: 48_000.0,
+            },
+            false,
+        );
+        assert_eq!(
+            state,
+            TapState::Tapping {
+                sample_rate: 48_000.0
+            }
+        );
         assert_eq!(notice, None, "starting is not news");
     }
 
@@ -1990,7 +2651,10 @@ mod tests {
             let bars = viz.spectrum();
             assert_eq!(bars.len(), BARS);
             for (i, bar) in bars.iter().enumerate() {
-                assert!(bar.is_finite() && (0.0..=1.0).contains(bar), "band {i}: {bar}");
+                assert!(
+                    bar.is_finite() && (0.0..=1.0).contains(bar),
+                    "band {i}: {bar}"
+                );
             }
         }
         assert_eq!(viz.take_notice(), None, "nothing failed, so nothing to say");
@@ -2021,7 +2685,9 @@ mod tests {
             TapState::Idle,
             TapState::WaitingForSpotify,
             TapState::Forced,
-            TapState::Tapping { sample_rate: 48_000.0 },
+            TapState::Tapping {
+                sample_rate: 48_000.0,
+            },
             TapState::Simulated { reason: None },
         ] {
             let mut viz = AudioPipeline::new(VisualizerSource::Simulated);
