@@ -44,6 +44,13 @@ how to sequence a session. The owner has restated each of them repeatedly, acros
    ticked task carries a note and why `CONTINUATION.md` exists. When you stop at the end of the
    TODO, rewrite `CONTINUATION.md` so the next agent inherits the plan, the decisions and the traps
    rather than rediscovering them.
+9. **Never stall.** The previous agent stalled mid-task and the repo sat broken and idle. So:
+   wrap anything that could hang in `scripts/with-timeout` and move on rather than waiting on it;
+   if a subagent fails, is cancelled or returns nothing useful, **do the work yourself or re-spawn
+   it — never wait on it**; never leave the tree not compiling, because a red suite is how a
+   session dies quietly. If you notice you have stopped making progress — the same command twice,
+   an empty turn, a subagent you are polling — **stop, re-anchor from `git log`/`git status`/
+   `TODO.md`, and start the next unchecked task.** Forward progress is the whole job.
 
 ---
 
