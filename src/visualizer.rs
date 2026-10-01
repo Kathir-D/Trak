@@ -26,6 +26,16 @@
 
 use std::f64::consts::{FRAC_PI_2, TAU};
 
+/// The Core Audio tap behind this seam (TODO 8.3, 8.5).
+///
+/// Declared here rather than in `lib.rs` so the module lands without a second file
+/// edit, and re-exported so it reads as `visualizer::AudioPipeline`. Promoting it to
+/// `trak::audio` is a two-line change and needs no code change: add `pub mod audio;`
+/// to `src/lib.rs` and delete the three lines below.
+#[path = "audio.rs"]
+mod audio;
+pub use audio::{AudioPipeline, TapError, TapState};
+
 /// A filled cell, a cell filled in its lower half, and the dot the circular
 /// renderer marks cells with. All three are ambiguous-width glyphs: one column in
 /// an ordinary terminal, two in a CJK one. Nothing here depends on which, and the

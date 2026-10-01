@@ -2,7 +2,7 @@
 name = "trak"
 version = "0.0.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "A fast, interactive terminal UI for the Spotify desktop app on macOS"
 license = "MIT"
 repository = "https://github.com/Kathir-D/Trak"
@@ -30,6 +30,30 @@ objc2-foundation = { version = "0.3", features = [
 ] }
 ratatui-image = "8.0.1"
 image = "0.25"
+# The visualizer's spectrum maths (TODO 8.3). A pure-Rust port of cava's core
+# engine: it does the FFT, the three-band weighting and the peak ballistics, so
+# this module only has to hand it f64 samples and read f64 bars back.
+cavacore = "2.0.2"
+# The Core Audio process tap (TODO 8.3). `default-features = false` because the
+# default set is "full" -- the whole framework surface, plus `private` and
+# `foundation`, and `foundation` pulls in `swift`, which is what needs the
+# libswift_Concurrency rpath docs/AUDIO-TAP.md 3e records. This list is the audio
+# half only, so nothing in the binary references a Swift dylib and Trak needs no
+# build.rs at all (verified: `otool -L` shows no @rpath entry). `app` is here only
+# for NSRunningApplication, which is how Spotify's pids are found without
+# launching anything.
+cidre = { version = "0.29", default-features = false, features = [
+    "core_audio",
+    "cf",
+    "ns",
+    "ca",
+    "cat",
+    "app",
+    "objc",
+    "blocks",
+    "dispatch",
+    "macos_14_2",
+] }
 # The Web API (Version A). Blocking on purpose: trak's loop is a single thread
 # and a token refresh, a search or a playlist fetch all happen on a worker
 # behind a trait. An async client would drag a runtime into the TUI for no gain.
