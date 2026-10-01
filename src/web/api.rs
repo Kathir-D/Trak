@@ -1483,6 +1483,65 @@ impl FakeLibrary {
         library
     }
 
+    /// A library seeded with a small, fixed Massive Attack catalogue, so the
+    /// binary's hidden `--fake-library` flag has something to find with no
+    /// network, no token and no Spotify. `player::sample_track` is the same
+    /// idea one layer down: one realistic state every test shares, so an
+    /// end-to-end test asserts against data it did not invent on the spot.
+    ///
+    /// The values are the ones the fixtures in this file are written from,
+    /// hand-written rather than shared with the test module for the reason that
+    /// module's own header gives: a fake seeded by the builders under test
+    /// would agree with them whatever both got wrong. One entry is *not* from
+    /// a fixture: the song "Mezzanine", which the album of the same name also
+    /// contains, so a `play mezzanine` has a name match that is not the first
+    /// row — the one case that tells the best-match rule from a plain
+    /// "first result".
+    pub fn seeded() -> Self {
+        let artist = Artist {
+            id: "4Z8W4fKeB5YxbusRsdQVPb".to_string(),
+            name: "Massive Attack".to_string(),
+            uri: "spotify:artist:4Z8W4fKeB5YxbusRsdQVPb".to_string(),
+            images: Vec::new(),
+        };
+        let album = Album {
+            id: "5nMdc39z78kifAc5WXv9Yj".to_string(),
+            name: "Mezzanine".to_string(),
+            uri: "spotify:album:5nMdc39z78kifAc5WXv9Yj".to_string(),
+            release_date: Some("1998-04-20".to_string()),
+            artists: vec![artist.clone()],
+            images: Vec::new(),
+            total_tracks: Some(11),
+        };
+        let on = |id: &str, name: &str, number: u32| Track {
+            id: id.to_string(),
+            name: name.to_string(),
+            uri: format!("spotify:track:{id}"),
+            duration_ms: 0,
+            track_number: Some(number),
+            disc_number: Some(1),
+            artists: vec![artist.clone()],
+            album: Some(album.clone()),
+        };
+        let tracks = vec![
+            on("6HacgXCExkzS552ILfJTXu", "Teardrop", 10),
+            on("5ghIJDpP6863d6KFwdPhJ3", "Angel", 1),
+            on("2pKZIvNQC1codGnMYCjBqY", "Mezzanine", 3),
+        ];
+        let playlist = Playlist {
+            id: "37i9dQZF1DXcBWIGoYBM5M".to_string(),
+            name: "Massive Attack on Repeat".to_string(),
+            uri: "spotify:playlist:37i9dQZF1DXcBWIGoYBM5M".to_string(),
+            description: Some("Long drives".to_string()),
+            images: Vec::new(),
+            contents: Some(PlaylistContents {
+                total: Some(3),
+                items: Vec::new(),
+            }),
+        };
+        Self::with_catalogue(tracks, vec![album], vec![artist], vec![playlist])
+    }
+
     /// Seed the user's library and playback state (TODO 7.7–7.9).
     pub fn with_library(
         self,
@@ -1851,6 +1910,30 @@ impl Library for FakeLibrary {
 /// The first [`SEARCH_LIMIT`] of a group, which is the whole of a search result.
 fn top<T>(found: Vec<T>) -> Vec<T> {
     found.into_iter().take(SEARCH_LIMIT as usize).collect()
+}
+
+/// The one row out of a search group that `trak play <name>` plays (TODO 7.12).
+///
+/// The rule, in shpotify's spirit but written down:
+///
+/// 1. **The first row whose name contains the whole query, case-insensitively.**
+///    A query that names a thing should not lose to a row that merely mentions
+///    it in an artist or album field — `play mezzanine` must find the *song*
+///    Mezzanine, not whichever track from that album Spotify happened to rank
+///    first.
+/// 2. **Failing that, the first row outright.** shpotify played the first result
+///    of a `limit=1` search and trusted Spotify's relevance ranking, and when no
+///    name matches the query there is nothing local to trust instead — the
+///    ranking *is* the answer, the way it was for shpotify.
+///
+/// Deliberately not shpotify's `play list`, which pulled ten results and played
+/// one at random: a coin flip is not a match, and this command's whole promise
+/// is that it can say which one it picked.
+pub fn best_match<'a, T>(rows: &'a [T], query: &str, name: impl Fn(&T) -> &str) -> Option<&'a T> {
+    let needle = query.trim().to_lowercase();
+    rows.iter()
+        .find(|row| name(row).to_lowercase().contains(&needle))
+        .or_else(|| rows.first())
 }
 
 /// Percent-encode one path segment.
@@ -4480,6 +4563,64 @@ mod tests {
             fake.queue().is_ok(),
             "and it recovers when the error is cleared"
         );
+    }
+
+    // =======================================================================
+    // The best match (TODO 7.12)
+    // =======================================================================
+
+    /// One row with just a name, so a pick is about the name and nothing else.
+    fn named(name: &str) -> Track {
+        Track {
+            name: name.to_string(),
+            ..teardrop()
+        }
+    }
+
+    /// The whole point of the tiebreak: the row *named* after the query is not
+    /// the first result, and must still win.
+    #[test]
+    fn the_best_match_is_the_first_row_whose_name_contains_the_query() {
+        let rows = [named("Teardrop"), named("Angel"), named("Mezzanine")];
+        let pick = best_match(&rows, "mezzanine", |t| &t.name).expect("a pick");
+        assert_eq!(pick.name, "Mezzanine");
+    }
+
+    /// Nothing on Mezzanine is named "mass" — the artist field is what matched —
+    /// so the ranking Spotify already did is the answer, exactly as it was for
+    /// shpotify's `limit=1` search.
+    #[test]
+    fn the_best_match_falls_back_to_spotifys_own_first_result() {
+        let rows = [named("Teardrop"), named("Angel")];
+        let pick = best_match(&rows, "mass", |t| &t.name).expect("a pick");
+        assert_eq!(pick.name, "Teardrop");
+    }
+
+    #[test]
+    fn the_best_match_ignores_case_and_space_and_finds_nothing_in_no_rows() {
+        let rows = [named("Angel"), named("Teardrop")];
+        let pick = best_match(&rows, "  TEARDROP ", |t| &t.name).expect("a pick");
+        assert_eq!(pick.name, "Teardrop");
+        assert!(best_match(&[], "anything", |t: &Track| &t.name).is_none());
+    }
+
+    /// The catalogue behind the binary's `--fake-library`: every group answers,
+    /// and the one query that separates the tiebreak from a plain "first result"
+    /// behaves there too.
+    #[test]
+    fn the_seeded_catalogue_answers_every_group() {
+        let results = FakeLibrary::seeded().search("mass").expect("search");
+        assert_eq!(results.tracks.len(), 3, "{results:?}");
+        assert_eq!(results.albums.len(), 1);
+        assert_eq!(results.artists.len(), 1);
+        assert_eq!(results.playlists.len(), 1);
+
+        let for_name = FakeLibrary::seeded().search("mezzanine").expect("search");
+        // All three tracks match the query through their album, and the song
+        // actually named Mezzanine is the last of them.
+        assert_eq!(for_name.tracks.len(), 3);
+        let pick = best_match(&for_name.tracks, "mezzanine", |t| &t.name).expect("pick");
+        assert_eq!(pick.name, "Mezzanine");
     }
 
     /// The trait has to work as `dyn Library`, because that is how the TUI holds
