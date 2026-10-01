@@ -505,11 +505,18 @@ fn event_loop<B: ratatui::backend::Backend>(
                 let dur = track.duration_secs();
                 app.lyrics.uri = uri.clone();
                 app.lyrics.status = crate::tui::app::LyricsStatus::Loading;
-                worker.submit(move |_| {
+                let accepted = worker.submit(move |_| {
                     let album = (!album.is_empty()).then_some(album);
                     let result = crate::lyrics::fetch(&title, &artist, album.as_deref(), Some(dur));
                     WorkerResult::Lyrics { uri, result }
                 });
+                // `submit` drops a job while another is in flight, and the
+                // status was claimed above: leaving it `Loading` after a refusal
+                // is how every track said "looking for lyrics…" forever.
+                if !accepted {
+                    app.lyrics.uri = None;
+                    app.lyrics.status = crate::tui::app::LyricsStatus::Idle;
+                }
             }
         }
 

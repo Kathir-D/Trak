@@ -13,7 +13,12 @@
 //! line. Each of those is handled here so the render loop never has to.
 
 use std::fmt::Write as _;
+use std::fs;
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
 
 /// The LRCLIB origin. A constant rather than a parameter so that a song title
 /// from Spotify can never influence which host trak talks to.
@@ -45,13 +50,17 @@ const USER_AGENT: &str = concat!(
     " (https://github.com/Kathir-D/trak)"
 );
 
+/// How many lookups to keep on disk. The same bound the art cache uses: a
+/// session plays a few hundred tracks and the most recent 64 covers a rewind.
+const MAX_CACHE_ENTRIES: usize = 64;
+
 /// One line of lyrics.
 ///
 /// `time_secs` is the offset from the start of the track in seconds, or
 /// [`f64::NAN`] when the lyrics are unsynced and no line has a time at all. A
 /// NaN compares false against everything, so it can never be mistaken for a real
 /// timestamp by a comparison; see [`index_at`].
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LyricLine {
     /// Seconds from the start of the track, or [`f64::NAN`] for unsynced lyrics.
     pub time_secs: f64,
@@ -60,7 +69,7 @@ pub struct LyricLine {
 }
 
 /// The lyrics for one track, or the reason there are none.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Lyrics {
     /// The lines, in time order. Empty only for an instrumental track.
     pub lines: Vec<LyricLine>,
@@ -207,7 +216,7 @@ pub fn index_at(lyrics: &Lyrics, position_secs: f64) -> Option<usize> {
     current
 }
 
-/// Look up lyrics for a track on LRCLIB.
+/// Look up lyrics for a track on LRCLIB, using the disk cache first.
 ///
 /// Blocking: call it from a worker, never from the render loop. `album` and
 /// `duration_secs` narrow the match when trak knows them and are simply left out
@@ -218,7 +227,114 @@ pub fn fetch(
     album: Option<&str>,
     duration_secs: Option<u64>,
 ) -> Result<Lyrics, LyricsError> {
-    fetch_from(ORIGIN, title, artist, album, duration_secs)
+    fetch_cached(
+        &crate::art::cache_dir(),
+        ORIGIN,
+        title,
+        artist,
+        album,
+        duration_secs,
+    )
+}
+
+/// `fetch` with the cache directory supplied, so a test can use a temporary one.
+pub fn fetch_cached(
+    dir: &Path,
+    base: &str,
+    title: &str,
+    artist: &str,
+    album: Option<&str>,
+    duration_secs: Option<u64>,
+) -> Result<Lyrics, LyricsError> {
+    let path = cache_path_for(dir, title, artist, album, duration_secs);
+    if let Some(lyrics) = cached(&path) {
+        return Ok(lyrics);
+    }
+    let lyrics = fetch_from(base, title, artist, album, duration_secs)?;
+    // Only a real answer is cached. A track with no lyrics today may have some
+    // tomorrow, and caching the miss would hide it from every later session.
+    store(dir, &path, &lyrics);
+    Ok(lyrics)
+}
+
+/// The lyrics cache sits next to the art cache (`~/Library/Caches/trak/`, or
+/// `$XDG_CACHE_HOME/trak`), which is the one place macOS tells apps to put
+/// per-app data and the one directory `art::prune` already knows how to bound.
+pub fn cache_dir() -> PathBuf {
+    crate::art::cache_dir()
+}
+
+/// A stable key for one lookup. FNV-1a rather than `DefaultHasher`, for the same
+/// reason `art` hashes its URLs: a key that changes when Rust changes its hasher
+/// throws away every cached lookup on a toolchain upgrade.
+///
+/// The fields are joined with U+001F, which no real title or artist contains, so
+/// `("ab", "c")` and `("a", "bc")` are not the same lookup.
+fn cache_key(title: &str, artist: &str, album: Option<&str>, duration_secs: Option<u64>) -> u64 {
+    let query = format!(
+        "{title}\u{1f}{artist}\u{1f}{}\u{1f}{}",
+        album.unwrap_or(""),
+        duration_secs.map(|s| s.to_string()).unwrap_or_default()
+    );
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in query.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// Where a lookup would live on disk. Pure, so it can be tested.
+pub fn cache_path_for(
+    dir: &Path,
+    title: &str,
+    artist: &str,
+    album: Option<&str>,
+    duration_secs: Option<u64>,
+) -> PathBuf {
+    dir.join(format!(
+        "{:016x}.json",
+        cache_key(title, artist, album, duration_secs)
+    ))
+}
+
+/// The cached lyrics for a lookup, if there is one.
+///
+/// A zero-length or unreadable file is a miss, the same rule the art cache
+/// uses: one interrupted write must not be a permanent hole. A file that does
+/// not deserialize is a miss too, so a format change between versions costs a
+/// refetch and never a crash on the worker.
+fn cached(path: &Path) -> Option<Lyrics> {
+    let body = std::fs::read_to_string(path).ok()?;
+    if body.is_empty() {
+        return None;
+    }
+    serde_json::from_str(&body).ok()
+}
+
+/// Write a lookup to the cache. Best effort: a full disk must not turn a found
+/// lyric into an error.
+///
+/// Beside the target and rename, like `art`: a crash mid-write cannot leave a
+/// half-written file the length check in [`cached`] would happily accept.
+fn store(dir: &Path, path: &Path, lyrics: &Lyrics) {
+    let Ok(body) = serde_json::to_string(lyrics) else {
+        return;
+    };
+    let tmp = path.with_extension("part");
+    let Ok(mut f) = std::fs::File::create(&tmp) else {
+        return;
+    };
+    if f.write_all(body.as_bytes()).is_err() {
+        return;
+    }
+    if f.sync_all().is_err() {
+        return;
+    }
+    if fs::rename(&tmp, path).is_err() {
+        return;
+    }
+    crate::art::prune(dir, MAX_CACHE_ENTRIES);
 }
 
 /// `fetch` against an arbitrary origin.
@@ -264,20 +380,34 @@ fn fetch_from(
 }
 
 /// The search fallback: the same track, found by name rather than by row.
-///
-/// A search is a guess — 20 rows, best first, and trak cannot tell which is the
-/// right version — so a row with synced lyrics wins over a plain one, and a row
-/// with no lyric text at all is not an answer.
 fn search(base: &str, title: &str, artist: &str) -> Result<Lyrics, LyricsError> {
     let endpoint = format!("{base}/api/search");
     let url = format!(
         "{endpoint}?q={}",
         percent_encode(&format!("{title} {artist}"))
     );
-    let (_, body) = http_get(&url)?;
+    let (status, body) = http_get(&url)?;
+    // The same reading as `/api/get`: a 404 is "nothing here", not a broken
+    // answer, and anything else the caller should not retry blindly is a
+    // status. Without this a 404 on the search falls through to the body,
+    // which is a `TrackNotFound` *object*, and comes out as `Malformed` — the
+    // one error whose message points at LRCLIB rather than at the song.
+    match status {
+        404 => return Err(LyricsError::NotFound),
+        200..=299 => {}
+        code => return Err(LyricsError::Status(code)),
+    }
     let json = parse_json(&body)?;
     let rows = json.as_array().ok_or(LyricsError::Malformed)?;
+    pick_row(rows, &endpoint)
+}
 
+/// Choose the answer from a search result, recorded-fixture-testable.
+///
+/// A search is a guess — 20 rows, best first, and trak cannot tell which is the
+/// right version — so a row with synced lyrics wins over a plain one, and a row
+/// with no lyric text at all is not an answer.
+fn pick_row(rows: &[Json], endpoint: &str) -> Result<Lyrics, LyricsError> {
     let mut plain: Option<&Json> = None;
     for row in rows {
         let synced = row.text("syncedLyrics");
@@ -285,15 +415,13 @@ fn search(base: &str, title: &str, artist: &str) -> Result<Lyrics, LyricsError> 
             continue;
         }
         if synced.is_some() {
-            return lyrics_from(row, &endpoint);
+            return lyrics_from(row, endpoint);
         }
         if plain.is_none() {
             plain = Some(row);
         }
     }
-    plain.map_or(Err(LyricsError::NotFound), |row| {
-        lyrics_from(row, &endpoint)
-    })
+    plain.map_or(Err(LyricsError::NotFound), |row| lyrics_from(row, endpoint))
 }
 
 /// GET a URL and hand back the status and the body together.
@@ -1262,5 +1390,194 @@ mod tests {
             assert!(!notice.contains('\n'), "one line: {notice:?}");
             assert!(!notice.contains("panicked"), "no panic text: {notice:?}");
         }
+    }
+
+    // -- Recorded fixtures (TODO 6.1) -------------------------------------
+    //
+    // Real LRCLIB responses, fetched once with curl on 2026-10-01 and
+    // committed under tests/fixtures/lyrics/. Read at compile time, so a
+    // fixture that disappears is a build failure and a stale one is caught by
+    // the assertions. No live network anywhere.
+
+    const FIXTURE_GET_CREEP: &str = include_str!("../tests/fixtures/lyrics/get-creep.json");
+    const FIXTURE_SEARCH_CREEP: &str = include_str!("../tests/fixtures/lyrics/search-creep.json");
+    const FIXTURE_NOT_FOUND: &str = include_str!("../tests/fixtures/lyrics/not-found.json");
+
+    #[test]
+    fn the_recorded_get_response_parses_into_synced_lyrics() {
+        let json = parse_json(FIXTURE_GET_CREEP).expect("the recorded /api/get body is JSON");
+        let lyrics = lyrics_from(&json, "test").expect("Creep has synced lyrics on LRCLIB");
+        assert!(lyrics.synced, "{lyrics:?}");
+        assert!(!lyrics.instrumental);
+        assert!(lyrics.lines.len() > 20, "{:?}", lyrics.lines);
+        assert_eq!(lyrics.lines[0].text, "When you were here before");
+        assert!(
+            close(lyrics.lines[0].time_secs, 19.16),
+            "{:?}",
+            lyrics.lines[0]
+        );
+        // And the current line at 0:46 is the one that starts there.
+        assert_eq!(index_at(&lyrics, 46.0), Some(5), "{:?}", lyrics.lines[5]);
+    }
+
+    #[test]
+    fn the_recorded_search_response_picks_a_row_with_synced_lyrics() {
+        let json = parse_json(FIXTURE_SEARCH_CREEP).expect("the recorded search body is JSON");
+        let rows = json.as_array().expect("a search answers an array");
+        assert!(rows.len() > 5, "{rows:?}");
+        let lyrics = pick_row(rows, "test").expect("the search found Creep");
+        assert!(
+            lyrics.synced,
+            "a synced row wins over a plain one: {lyrics:?}"
+        );
+        assert_eq!(lyrics.lines[0].text, "When you were here before");
+    }
+
+    #[test]
+    fn the_recorded_not_found_body_is_a_parseable_object() {
+        let json = parse_json(FIXTURE_NOT_FOUND).expect("the recorded 404 body is JSON");
+        // The status line carries the 404; the body only has to survive parsing,
+        // which is what keeps a miss from turning into "malformed".
+        assert!(json.as_array().is_none(), "{json:?}");
+    }
+
+    // -- The disk cache (TODO 6.1) ----------------------------------------
+
+    /// A temporary directory that removes itself, so no test touches the
+    /// owner's real cache.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "trak-lyrics-test-{tag}-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).expect("temp dir");
+            Self(dir)
+        }
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// One network fetch, then the cache answers the second time by itself.
+    #[test]
+    fn a_lookup_is_cached_and_the_second_call_never_touches_the_network() {
+        let dir = TempDir::new("once");
+        let server = serve(vec![canned(200, CREEP)]);
+        let base = server.base().to_string();
+        let first = fetch_cached(dir.path(), &base, "Creep", "Radiohead", None, None)
+            .expect("the first fetch goes to the server");
+        assert_eq!(server.requests(), 1);
+        // The server hands out one reply and stops, so a successful second call
+        // can only have come from the cache.
+        let second = fetch_cached(dir.path(), &base, "Creep", "Radiohead", None, None)
+            .expect("the cache answers");
+        assert_eq!(second, first);
+        assert_eq!(server.requests(), 1, "no second request");
+    }
+
+    #[test]
+    fn different_lookups_cache_to_different_files() {
+        let dir = TempDir::new("keys");
+        let a = cache_path_for(dir.path(), "Creep", "Radiohead", None, None);
+        let b = cache_path_for(dir.path(), "Creep", "Radiohead", Some("Pablo Honey"), None);
+        assert_ne!(a, b);
+        // Field order must not merge two lookups, either.
+        let c = cache_path_for(dir.path(), "ab", "c", None, None);
+        let d = cache_path_for(dir.path(), "a", "bc", None, None);
+        assert_ne!(c, d);
+        // And the same lookup is stable across calls.
+        assert_eq!(
+            a,
+            cache_path_for(dir.path(), "Creep", "Radiohead", None, None)
+        );
+        assert_eq!(a.extension().and_then(|e| e.to_str()), Some("json"));
+    }
+
+    /// A write that was interrupted leaves a zero-length file; serving that
+    /// forever would be a permanent hole, so it is a miss.
+    #[test]
+    fn a_zero_length_cache_file_is_a_miss() {
+        let dir = TempDir::new("empty");
+        let path = cache_path_for(dir.path(), "Creep", "Radiohead", None, None);
+        fs::write(&path, b"").expect("an empty file");
+        // Nothing is listening, so the lookup must fail rather than hand back
+        // the empty file.
+        let base = server_base_nowhere();
+        let e = fetch_cached(dir.path(), &base, "Creep", "Radiohead", None, None)
+            .expect_err("an empty file is not lyrics");
+        assert!(matches!(e, LyricsError::Unreachable), "{e:?}");
+    }
+
+    /// A file that is not a cached `Lyrics` is a miss, not a crash.
+    #[test]
+    fn a_corrupt_cache_file_is_a_miss() {
+        let dir = TempDir::new("corrupt");
+        let path = cache_path_for(dir.path(), "Creep", "Radiohead", None, None);
+        fs::write(&path, "not a cached lookup").expect("junk");
+        let server = serve(vec![canned(200, CREEP)]);
+        let lyrics = fetch_cached(dir.path(), server.base(), "Creep", "Radiohead", None, None)
+            .expect("the miss refetches");
+        assert!(lyrics.synced, "{lyrics:?}");
+    }
+
+    /// A miss is never cached: LRCLIB may have the track tomorrow, and "try
+    /// again on the next track" must keep working across sessions.
+    #[test]
+    fn a_not_found_lookup_writes_nothing_to_the_cache() {
+        let dir = TempDir::new("miss");
+        // One miss is two requests — `/api/get` answers 404, and the search
+        // fallback answers 404 too — and the point is the *second* lookup goes
+        // back to the network rather than finding the miss on disk.
+        let server = serve((0..4).map(|_| canned(404, NOT_FOUND)).collect());
+        let base = server.base().to_string();
+        for _ in 0..2 {
+            let e = fetch_cached(dir.path(), &base, "Creep", "Radiohead", None, None)
+                .expect_err("nothing there");
+            assert!(matches!(e, LyricsError::NotFound), "{e:?}");
+        }
+        assert_eq!(server.requests(), 4, "the miss is not cached");
+        assert_eq!(fs::read_dir(dir.path()).expect("dir").count(), 0);
+    }
+
+    /// The store is best effort: the lyric is the answer, the cache is a copy.
+    #[test]
+    fn a_cache_write_failure_does_not_fail_the_lookup() {
+        // A directory that cannot hold a file: `store` must be quiet about it.
+        let dir = TempDir::new("readonly");
+        let path = dir.path().join("x.json");
+        let lyrics = Lyrics {
+            lines: parse_synced(CREEP_SYNCED),
+            synced: true,
+            source: "test".to_string(),
+            instrumental: false,
+        };
+        store(dir.path(), &path, &lyrics);
+    }
+
+    #[test]
+    fn the_lyrics_cache_sits_next_to_the_art_cache() {
+        assert_eq!(cache_dir(), crate::art::cache_dir());
+    }
+
+    /// An origin the test cannot reach: bound and dropped, so the port is one
+    /// nothing holds.
+    fn server_base_nowhere() -> String {
+        let port = TcpListener::bind("127.0.0.1:0")
+            .expect("bind")
+            .local_addr()
+            .expect("addr")
+            .port();
+        format!("http://127.0.0.1:{port}")
     }
 }

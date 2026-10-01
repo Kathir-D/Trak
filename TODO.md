@@ -215,8 +215,8 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
       player is built**, so it works on a machine where Spotify is not installed and so it cannot
       launch Spotify (COMPAT rule 2). > With no terminal it prints the settings as TOML and exits 2. > Bare `trak` exists
       and says what does work, exit 2. Replaced by the TUI in 3.1. `trak config` not added yet.
-- [ ] 2.9 Update README "Usage" with real, copy-pasted output of each command. Done when: matches
-      the binary.
+- [x] 2.9 Update README "Usage" with real, copy-pasted output of each command. Done when: matches
+      the binary. (done in eb70a20; the box had been left unticked)
 
 ---
 
@@ -525,10 +525,18 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
 
 ## Phase 6 — Lyrics (both versions)
 
-- [ ] 6.1 **LRCLIB client** (`https://lrclib.net/api/get?...` by track/artist/album/duration; fall back
+- [x] 6.1 **LRCLIB client** (`https://lrclib.net/api/get?...` by track/artist/album/duration; fall back
       to search). Read their docs first and set a descriptive `User-Agent: trak/<version>
       (https://github.com/Kathir-D/trak)`. Timeouts, cache results on disk, never block the UI, no
       lyrics = clean empty state. Done when: tests with recorded JSON fixtures (no live network in CI).
+      > Finished on top of the 4.x part-done pass: the disk cache lives next to the art cache
+      > (`~/Library/Caches/trak/<fnv>.json`, 64 entries, temp+rename, zero-length and
+      > non-deserialising files are misses, misses are never cached). Real replies from
+      > 2026-10-01 are committed under `tests/fixtures/lyrics/` and read at compile time.
+      > **A 404 from the search fallback is `NotFound`, not `Malformed`**: the miss body is a
+      > JSON *object* (`TrackNotFound`), so without a status check in `search` a double miss came
+      > out as "LRCLIB sent an answer trak could not read" — a message that blames the service for
+      > the song not being there.
 - [ ] 6.2 **LRC parser + "current line for position"** (handles `[mm:ss.xx]`, multiple stamps per line,
       offset tag, plain-text lyrics without stamps). Done when: unit tests incl. malformed input.
 - [ ] 6.3 **Lyrics tab**: current line highlighted and auto-scrolling, manual scroll pauses
