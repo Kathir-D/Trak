@@ -37,31 +37,33 @@ escape codes — so `trak status | cat` is safe to put in a script.
 
 ### Every command
 
-```
-trak status                 # the card above
-trak status --json          # machine readable
-trak status artist          # just the artist
-trak status album           # just the album
-trak status track           # just the title
-trak play                   # resume
-trak play spotify:track:…   # play a URI — works on the Free tier
-trak pause                  # toggles play/pause, as shpotify's did
-trak stop                   # pause if playing
-trak next                   # skip
-trak prev                   # back
-trak replay                 # restart the track
-trak pos 60                 # seek to 1:00
-trak vol up                 # +10%
-trak vol down               # −10%
-trak vol show               # print the current volume
-trak toggle shuffle         # toggle shuffle
-trak toggle repeat          # cycle repeat off → all → one
-trak share url              # print and copy the open.spotify.com link
-trak share uri              # print and copy the spotify: URI
-```
+| Command | What it does | Output |
+| --- | --- | --- |
+| `trak status` | the card above | |
+| `trak status --json` | machine readable | one JSON object, below |
+| `trak status artist` | just the artist | `Jane Remover` |
+| `trak status album` | just the album | `Census Designated` |
+| `trak status track` | just the title | `Census Designated` |
+| `trak play` | resume | *(silent)* |
+| `trak play spotify:track:…` | play a URI — works on the Free tier | *(silent)* |
+| `trak pause` | toggles play/pause, as shpotify's did | `Pausing Spotify.` / silent when already paused |
+| `trak stop` | pause if playing; Spotify has no `stop` command | `Pausing Spotify.` / silent |
+| `trak next` | skip | *(silent)* |
+| `trak prev` | back | *(silent)* |
+| `trak replay` | restart the track | *(silent)* |
+| `trak pos 60` | seek to 1:00 | `1:00` |
+| `trak vol up` | +10% | `90` — the volume after the step |
+| `trak vol down` | −10% | `70` |
+| `trak vol show` | print the current volume | `80` |
+| `trak toggle shuffle` | toggle shuffle | *(silent)* |
+| `trak toggle repeat` | cycle repeat off → all → one | *(silent)* |
+| `trak share url` | print and copy the open.spotify.com link | `https://open.spotify.com/track/…` |
+| `trak share uri` | print and copy the spotify: URI | `spotify:track:…` |
+| `trak quit` | quit the Spotify app | *(silent)* |
 
 `trak --help` lists them all. Exit codes are `0` on success, `1` on a runtime
-failure, `2` on a usage or setup problem.
+failure, `2` on a usage or setup problem. Commands that write to Spotify print
+nothing on success — the *next* `trak status` is the confirmation.
 
 ### JSON
 
