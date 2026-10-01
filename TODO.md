@@ -206,11 +206,12 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
       which is the quantisation), `pos 60`.
 - [x] 2.6 **`share url|uri`** copies via `pbcopy` and prints the link. > A clipboard failure is
       not worth failing the command over, so it is best-effort; the link always goes to stdout.
-- [ ] 2.7 **`play <name>` / `play album|artist|list <name>` / `play uri`.** > The URI half is
-      done and tested: `trak play <spotify:uri>` works, and anything that is not a Spotify URI or a
-      search term is rejected before it reaches AppleScript. > The search half still needs 7.12; it
-      prints the Client ID steps and exits 2, which shpotify also did. `album|artist|list` subcommands
-      are still to add — they only make sense with search.
+- [x] 2.7 **`play <name>` / `play album|artist|list <name>` / `play uri`.** > Finished with 7.12:
+      every spelling exists and is tested — a bare name searches tracks, `album|artist|list`
+      search their group, and both the `uri` subcommand and a bare positional play straight
+      through AppleScript after the allow-list check. A name with no connected Web API prints
+      the Client ID steps and exits 2, as shpotify did. The pick and its one-line report are
+      `web::api::best_match` and `cli::choose`; see the 7.12 note.
 - [x] 2.8 **`trak` (no args) → TUI entry; `trak config` → settings entry.** > Handled **before the
       player is built**, so it works on a machine where Spotify is not installed and so it cannot
       launch Spotify (COMPAT rule 2). > With no terminal it prints the settings as TOML and exits 2. > Bare `trak` exists
@@ -644,8 +645,24 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
       playlist, create playlist. > Use `POST`/`DELETE /me/playlists/{id}/items` (the `/tracks`
       variants are removed), and `POST /me/playlists` to create. Same unverified-in-dev-mode caveat as
       7.7. Done when: confirmation on destructive actions; tests with fakes.
-- [ ] 7.12 **`trak play <song|album|artist|list>`** (finish 2.7) using search; pick the best match
+- [x] 7.12 **`trak play <song|album|artist|list>`** (finish 2.7) using search; pick the best match
       like shpotify; print what it chose. Done when: `assert_cmd` tests with `FakeLibrary`.
+      > The pick is shpotify's first-result rule plus one tiebreak: the first row whose
+      > **name** contains the whole query, case-insensitively — so `trak play mezzanine` plays
+      > the *song* Mezzanine, not whichever track from the album Spotify ranked first. The rule
+      > is written on `web::api::best_match`; `trak play uri <uri>` was added too (SPEC §9,
+      > shpotify's own spelling). The "Playing …" line prints only **after** the play landed,
+      > so trak never claims to be playing something Spotify refused. The setup path is still
+      > what every real machine sees today (no token file anywhere yet): Client ID steps, exit 2.
+      > `--fake` alone deliberately still means "no library", so that path stayed testable;
+      > `--fake-library` installs `FakeLibrary::seeded()` — the api.rs Massive Attack catalogue
+      > plus the song "Mezzanine", which is what exercises the tiebreak end to end. No refresh
+      > on the CLI path: a stale access token surfaces as the search's own "log in again"
+      > (`ApiError::Unauthorized`), because renewing is 7.3's login flow, not this task's.
+      > Two deliberate departures from shpotify, both because a command that reports its pick
+      > cannot report a coin flip: `play list` was a random row out of ten, and `play uri` was
+      > not silent (`Playing Spotify URI: …`). The setup message quotes back the spelling that
+      > was typed, so `trak play album x` is not told to run `trak play "x"`.
 - [ ] 7.13 **Tab order and default tab for A**, plus the B-mode hint that a Client ID unlocks these.
       Done when: SPEC §3 matches the built UI (update the doc if the order changed).
 
