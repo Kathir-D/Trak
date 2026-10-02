@@ -219,7 +219,7 @@ impl Setup {
                     line.pop();
                 }
             }
-            c if !c.is_control() => {
+            c if crate::tui::app::is_typed(c) => {
                 if let Some(line) = &mut self.typing {
                     line.push(c);
                 }

@@ -88,10 +88,16 @@ pub fn open(app: &mut App) {
 
 /// Handle one key. The screen owns the keyboard while it is open.
 ///
-/// Every key the loop sends is a char, with the arrows already folded onto
-/// their vim equivalents (`loop_.rs`'s `char_for`), so `h`/`l` is `←`/`→` and
-/// `j`/`k` is `↓`/`↑` and one match covers both.
+/// Every key the loop sends is a char, with `↓`/`↑` already folded onto `j`/`k`
+/// (`loop_.rs`'s `char_for`); `←`/`→` arrive as sentinels and are folded onto
+/// `h`/`l` here, so one match covers both.
 pub fn key(app: &mut App, c: char) {
+    // On this screen `←`/`→` change a value, as `h`/`l` do; it has no tabs.
+    let c = match c {
+        crate::tui::app::ARROW_LEFT if !is_typing() && !app.setup.open => 'h',
+        crate::tui::app::ARROW_RIGHT if !is_typing() && !app.setup.open => 'l',
+        c => c,
+    };
     if app.setup.open {
         crate::tui::setup::key(app, c);
         return;
@@ -113,7 +119,8 @@ pub fn key(app: &mut App, c: char) {
         }
         // `Q` as well as `q`, because that is what every other screen in trak
         // takes, and a user with caps lock on expects `q` to close this too.
-        'q' | 'Q' | '\x1b' => save_and_close(app, &config_path()),
+        // `?` too, because `?` is what opened it from the dashboard.
+        'q' | 'Q' | '\x1b' | '?' => save_and_close(app, &config_path()),
         _ => {}
     }
 }
@@ -135,7 +142,24 @@ pub fn render(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         return;
     }
 
+    // Every key trak has is listed here too, since `?` opens this screen: in a
+    // panel of its own beside the settings when the terminal is wide enough,
+    // and under them otherwise.
     let panel = panel(area);
+    let beside = keys_panel(area);
+    if let Some(keys) = beside {
+        f.render_widget(Clear, keys);
+        f.render_widget(
+            Paragraph::new(key_lines(theme)).block(
+                Block::bordered()
+                    .title(" Keys ")
+                    .border_type(theme.border.to_ratatui().unwrap_or(BorderType::Rounded))
+                    .border_style(theme.accent_style()),
+            ),
+            keys,
+        );
+    }
+    let beside = beside.is_some();
     f.render_widget(Clear, panel);
 
     let mut block = Block::bordered()
@@ -170,8 +194,26 @@ pub fn render(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     }
 
     let items = items();
-    let scroll = scroll_for(line_of(cursor_of(app)), rows.height as usize, items.len());
-    let lines: Vec<Line<'static>> = items.iter().map(|i| line_for(i, app, theme)).collect();
+    let mut lines: Vec<Line<'static>> = items.iter().map(|i| line_for(i, app, theme)).collect();
+    let cursor_line = line_of(cursor_of(app));
+    let mut scroll = scroll_for(cursor_line, rows.height as usize, items.len());
+    if !beside {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Keys",
+            theme.accent_style().add_modifier(Modifier::BOLD),
+        )));
+        lines.extend(key_lines(theme));
+        // On the last setting, show as much of the key list as fits while
+        // keeping the cursor's row on screen: that is the only way down to it.
+        if cursor_of(app) + 1 == row_count() {
+            scroll = lines
+                .len()
+                .saturating_sub(rows.height as usize)
+                .min(cursor_line)
+                .max(scroll);
+        }
+    }
     f.render_widget(Paragraph::new(lines).scroll((scroll as u16, 0)), rows);
 
     if let Some(at) = caret(app, rows, scroll) {
@@ -607,7 +649,7 @@ fn type_key(app: &mut App, c: char) {
         c => map_typing(|line| {
             // A control character is a key the terminal wanted, not one the
             // person typed into a Client ID.
-            if !c.is_control() {
+            if crate::tui::app::is_typed(c) {
                 line.push(c);
             }
         }),
@@ -717,11 +759,42 @@ fn items() -> Vec<Item> {
 /// the screen over the dashboard.
 fn panel(area: Rect) -> Rect {
     let width = area.width.min(MAX_WIDTH);
-    Rect {
-        x: area.x + area.width.saturating_sub(width) / 2,
-        width,
+    // With the key list beside it, the pair is centred rather than the panel.
+    let x = if keys_panel(area).is_some() {
+        area.x + (area.width - MAX_WIDTH - 1 - KEYS_WIDTH) / 2
+    } else {
+        area.x + area.width.saturating_sub(width) / 2
+    };
+    Rect { x, width, ..area }
+}
+
+/// Where the key list goes when it fits beside the settings, or `None`.
+fn keys_panel(area: Rect) -> Option<Rect> {
+    (area.width >= MAX_WIDTH + 1 + KEYS_WIDTH).then(|| Rect {
+        x: area.x + (area.width - MAX_WIDTH - 1 - KEYS_WIDTH) / 2 + MAX_WIDTH + 1,
+        width: KEYS_WIDTH,
         ..area
-    }
+    })
+}
+
+/// How wide the key list's own panel is, when it fits beside the settings.
+const KEYS_WIDTH: u16 = 56;
+
+/// Every key trak has, one per line, from the table the dashboard's footer and
+/// SPEC §4 are checked against.
+fn key_lines(theme: &Theme) -> Vec<Line<'static>> {
+    crate::tui::render::HELP_ROWS
+        .iter()
+        .map(|(k, v)| {
+            Line::from(vec![
+                Span::styled(
+                    format!(" {k:<width$}", width = crate::tui::render::HELP_KEY_WIDTH),
+                    theme.accent_style(),
+                ),
+                Span::raw(v.to_string()),
+            ])
+        })
+        .collect()
 }
 
 /// The bottom row: a notice if there is one to read, the key hints otherwise.
@@ -1952,7 +2025,11 @@ mod tests {
                     edge(y, buf.area.height, true),
                     "at {w}x{y}"
                 );
-                for x in (0..panel.x).chain(panel.right()..buf.area.width) {
+                let keys = keys_panel(buf.area);
+                for x in (0..panel.x)
+                    .chain(panel.right()..buf.area.width)
+                    .filter(|x| keys.is_none_or(|k| !(k.x..k.right()).contains(x)))
+                {
                     assert_eq!(
                         buf[(x, y)].symbol(),
                         " ",

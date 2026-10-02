@@ -73,6 +73,13 @@ pub fn layout_for(width: u16, height: u16) -> Layout_ {
     Layout_::Compact
 }
 
+/// The transport buttons, two cells each. Every glyph is one cell wide in
+/// every terminal font tried, which the media symbols are not.
+const TRANSPORT_PREV: &str = "◀◀";
+const TRANSPORT_PAUSE: &str = "▮▮";
+const TRANSPORT_PLAY: &str = " ▶";
+const TRANSPORT_NEXT: &str = "▶▶";
+
 /// The smallest art hole worth drawing. Below this the cover is a stripe, so the
 /// space goes to the text instead (TODO 4.1: art disappears cleanly when the
 /// terminal shrinks).
@@ -365,6 +372,8 @@ pub struct Regions {
     pub progress: Option<Rect>,
     /// The three transport controls, left to right.
     pub controls: Vec<(Rect, Control)>,
+    /// The volume meter's bar, without its label or percentage.
+    pub volume: Option<Rect>,
 }
 
 impl Regions {
@@ -389,6 +398,15 @@ impl Regions {
             if r.contains((col, row).into()) {
                 return Some(Hit::Control(*c));
             }
+        }
+        if let Some(v) = self.volume
+            && v.contains((col, row).into())
+            && v.width > 1
+        {
+            // The first cell is 0 and the last is 100, so both ends are
+            // reachable with a click rather than only by a drag past the edge.
+            let f = col.saturating_sub(v.x) as f64 / (v.width - 1) as f64;
+            return Some(Hit::Volume(f.clamp(0.0, 1.0)));
         }
         let h = self.history?;
         if !h.contains((col, row).into()) {
@@ -441,9 +459,6 @@ pub fn draw_with(
     // (SPEC §3). It is the only place trak ever offers to start Spotify.
     if app.is_idle() && h >= 8 && w >= 30 {
         draw_idle_card(f, area, theme);
-        if app.show_help {
-            draw_help(f, area);
-        }
         if let Some(t) = &app.toast {
             draw_toast(f, area, &t.text, theme);
         }
@@ -455,9 +470,6 @@ pub fn draw_with(
     // a page that covers it.
     if app.lyrics_full {
         draw_lyrics_page(f, area, app, theme);
-        if app.show_help {
-            draw_help(f, area);
-        }
         if let Some(t) = &app.toast {
             draw_toast(f, area, &t.text, theme);
         }
@@ -471,9 +483,6 @@ pub fn draw_with(
         Layout_::Wide => draw_wide(f, area, app, theme, regions, images),
     }
 
-    if app.show_help {
-        draw_help(f, area);
-    }
     if let Some(t) = &app.toast {
         draw_toast(f, area, &t.text, theme);
     }
@@ -927,19 +936,21 @@ fn draw_now_playing(
     let hole_w = body.width;
     let hole_h = art_h;
     if hole_h >= MIN_ART.1 && hole_w >= MIN_ART.0 {
-        // The spine occupies the first two columns, so the cover is inset past
-        // it. Drawing the spine over the artwork instead looks like a rendering
-        // fault rather than a design choice.
-        let hole = Rect {
-            x: body.x + 2,
-            y: body.y,
-            width: hole_w.saturating_sub(2),
-            height: hole_h,
-        };
         // The visualizer takes the same rectangle (TODO 4.3). The cover is still
         // fetched and still drives the accent: a visualizer tinted by the album
         // is the entire point of having one.
         let show_visualizer = app.settings.display_mode == DisplayMode::Visualizer;
+        // Only the visualizer gets the gradient spine, inset past its first two
+        // columns. Beside the cover the owner read it as a stray bar of colour,
+        // so the cover takes the full width (and drawing the spine over the
+        // artwork looks like a rendering fault).
+        let inset = if show_visualizer { 2 } else { 0 };
+        let hole = Rect {
+            x: body.x + inset,
+            y: body.y,
+            width: hole_w.saturating_sub(inset),
+            height: hole_h,
+        };
         let drawn = app
             .settings
             .show_art
@@ -963,10 +974,13 @@ fn draw_now_playing(
             );
         }
         regions.art = Some(hole);
-        // A gradient spine down the left edge of the artwork, tying the cover to
-        // the type underneath it. Two cells, and it is the difference between a
-        // pane that looks assembled and one that looks designed.
-        let spine_lines = crate::tui::theme::spine(hole_h as usize, &theme.palette);
+        // A gradient spine down the left edge of the visualizer, tying the bars
+        // to the type underneath them.
+        let spine_lines = if show_visualizer {
+            crate::tui::theme::spine(hole_h as usize, &theme.palette)
+        } else {
+            Vec::new()
+        };
         for (i, span) in spine_lines.into_iter().enumerate() {
             f.render_widget(
                 Paragraph::new(Line::from(span)),
@@ -1058,22 +1072,28 @@ fn draw_now_playing(
     lines.push(Line::from(""));
 
     // Controls, with the shuffle and repeat badges next to them.
+    //
+    // Drawn from geometric shapes, two cells per button and two cells between
+    // them. The media glyphs (⏮ ⏸ ⏭) are emoji-capable and cmux/Ghostty draw
+    // them wider than ratatui counts them, which squashed the three buttons into
+    // one smudge.
     let ctl_row = text_body.y + lines.len() as u16;
+    let accent = Style::default().fg(theme.accent_colour());
     let controls = vec![
         Span::raw(" "),
-        Span::styled("⏮", Style::default().fg(theme.accent_colour())),
-        Span::raw(" "),
+        Span::styled(TRANSPORT_PREV, accent),
+        Span::raw("  "),
         Span::styled(
             match app.state.as_ref().map(|s| s.playback) {
-                Some(PlaybackState::Playing) => "⏸",
-                _ => "▶",
+                Some(PlaybackState::Playing) => TRANSPORT_PAUSE,
+                _ => TRANSPORT_PLAY,
             },
             Style::default()
                 .fg(theme.palette.end())
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(" "),
-        Span::styled("⏭", Style::default().fg(theme.accent_colour())),
+        Span::raw("  "),
+        Span::styled(TRANSPORT_NEXT, accent),
     ];
     let mut badges = String::new();
     if app.state.as_ref().is_some_and(|s| s.shuffling_enabled) {
@@ -1087,17 +1107,16 @@ fn draw_now_playing(
     control_line.push(Span::raw(badges));
     lines.push(Line::from(control_line));
 
-    // The three transport glyphs sit at columns 1, 3 and 5 of that line. Their
-    // exact cell width is ambiguous (ratatui and the terminal can disagree about
-    // ⏮ and ⏸), so the targets are given two cells each.
-    regions.controls = [(0, Control::Prev), (2, Control::Toggle), (4, Control::Next)]
+    // The buttons sit at columns 1, 5 and 9, two cells each; the target takes
+    // the gap on either side too, so a click a cell off still lands.
+    regions.controls = [(0, Control::Prev), (4, Control::Toggle), (8, Control::Next)]
         .into_iter()
         .map(|(dx, c)| {
             (
                 Rect {
                     x: text_body.x + dx,
                     y: ctl_row,
-                    width: 2,
+                    width: 4,
                     height: 1,
                 },
                 c,
@@ -1114,6 +1133,12 @@ fn draw_now_playing(
         let meter_w = (text_body.width as usize)
             .saturating_sub(label.len() + 5)
             .max(1);
+        regions.volume = Some(Rect {
+            x: text_body.x + label.len() as u16,
+            y: text_body.y + lines.len() as u16,
+            width: meter_w as u16,
+            height: 1,
+        });
         let mut row = vec![Span::styled(label, dim)];
         row.extend(crate::tui::theme::gradient_meter(
             f64::from(v) / 100.0,
@@ -1751,12 +1776,13 @@ fn draw_footer_keys(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         vec![
             ("space", "play/pause"),
             ("n/p", "next/prev"),
-            ("←/→", "seek"),
+            ("h/l", "seek"),
+            ("←/→", "tab"),
             ("+/-", "vol"),
             ("s", "shuffle"),
             ("r", "repeat"),
             ("c", "copy"),
-            ("?", "help"),
+            ("?", "settings"),
             ("q", "quit"),
         ]
     };
@@ -1770,7 +1796,7 @@ fn draw_footer_keys(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 /// How wide the key column of the help overlay is. The keys are what the SPEC
 /// parity test reads, so the width is a constant rather than a `{:>16}` buried
 /// in a format string.
-const HELP_KEY_WIDTH: usize = 16;
+pub(crate) const HELP_KEY_WIDTH: usize = 16;
 
 /// Where the help overlay sits. Shared with the parity test so it reads the same
 /// cells the renderer wrote instead of guessing.
@@ -1783,10 +1809,10 @@ const HELP_KEY_WIDTH: usize = 16;
 ///
 /// SPEC §4 is the source of the keys;
 /// `the_help_overlay_matches_the_spec_table` fails the build if the two drift.
-const HELP_ROWS: &[(&str, &str)] = &[
+pub(crate) const HELP_ROWS: &[(&str, &str)] = &[
     ("space", "play / pause"),
     ("n / p", "next / previous track"),
-    ("h / l  ← →", "seek back / forward"),
+    ("h / l", "seek back / forward"),
     ("+ / -", "volume up / down"),
     ("m", "mute (saves the volume you had)"),
     ("s", "toggle shuffle"),
@@ -1797,7 +1823,8 @@ const HELP_ROWS: &[(&str, &str)] = &[
     ("a", "album art, or the visualizer"),
     ("v", "next visualizer style"),
     ("L", "full-screen lyrics"),
-    ("tab", "next tab    shift-tab  back"),
+    ("← / →", "previous / next tab"),
+    ("tab / shift-tab", "next / previous tab"),
     ("1 .. 6", "jump to a tab"),
     ("/", "search (Version A)"),
     ("o", "open the artist or album"),
@@ -1809,54 +1836,6 @@ const HELP_ROWS: &[(&str, &str)] = &[
     ("? / esc", "close this"),
     ("q / ctrl-c", "quit"),
 ];
-
-fn help_popup(area: Rect) -> Rect {
-    // A centred overlay. Clear first so it reads as a panel over the app.
-    let w = (area.width * 3 / 5).clamp(30, 60);
-    // As many rows as the list has, not a fraction of the screen. A fixed
-    // fraction meant every key added to `HELP_ROWS` silently fell off the
-    // bottom, and the last rows are the ones people scroll to. It still clamps,
-    // because a terminal shorter than the list has to show something.
-    let h = (HELP_ROWS.len().saturating_add(2).min(area.height as usize) as u16).clamp(9, 28);
-    Rect {
-        x: area.x + (area.width.saturating_sub(w)) / 2,
-        y: area.y + (area.height.saturating_sub(h)) / 2,
-        width: w,
-        height: h,
-    }
-}
-
-fn draw_help(f: &mut Frame, area: Rect) {
-    let popup = help_popup(area);
-    f.render_widget(Clear, popup);
-
-    // Only keys that do something today. Listing one that is not bound yet
-    // would be a small lie, and `the_help_overlay_matches_the_spec_table` fails
-    // the build if a key here is not either bound or listed in SPEC §4.
-    let rows: Vec<Line<'static>> = HELP_ROWS.iter().map(|(k, v)| line(k, v)).collect();
-
-    f.render_widget(
-        Paragraph::new(rows)
-            .block(
-                Block::bordered()
-                    .title(" Keys ")
-                    .border_type(ratatui::widgets::BorderType::Rounded)
-                    .border_style(Style::default().fg(Color::Cyan)),
-            )
-            .wrap(Wrap { trim: false }),
-        popup,
-    );
-}
-
-fn line(k: &str, v: &str) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(
-            format!("{k:<HELP_KEY_WIDTH$}"),
-            Style::default().fg(Color::Cyan),
-        ),
-        Span::raw(v.to_string()),
-    ])
-}
 
 fn draw_toast(f: &mut Frame, area: Rect, text: &str, theme: &Theme) {
     // Bottom right, one line, and never over the footer keys (TODO 4.8).
@@ -2215,48 +2194,34 @@ mod tests {
         }
     }
 
-    /// The help overlay's text, checked as a snapshot. The `?` overlay must list
-
+    /// `?` opens the settings screen, and every key is on it: beside the
+    /// settings on a wide terminal, under them on a narrow one.
     #[test]
-    fn the_help_overlay_is_centred_and_does_not_fill_the_screen() {
-        let backend = ratatui::backend::TestBackend::new(100, 30);
-        let mut term = ratatui::Terminal::new(backend).unwrap();
-        let mut app = app_at(100, 30);
-        app.show_help = true;
-        let theme = Theme::default();
-        term.draw(|f| draw(f, &app, &theme)).unwrap();
-        let buf = term.backend().buffer().clone();
-        // The app is still visible above the overlay, so it is a panel not a page.
-        let first_row: String = (0..100).map(|x| buf[(x, 0)].symbol().to_string()).collect();
-        assert!(
-            first_row.contains("Trak"),
-            "the app is still drawn: {first_row:?}"
-        );
-    }
-
-    #[test]
-    fn rendering_works_with_the_help_overlay_and_a_toast() {
-        let backend = ratatui::backend::TestBackend::new(100, 30);
-        let mut term = ratatui::Terminal::new(backend).unwrap();
-        let mut app = app_at(100, 30);
-        app.show_help = true;
-        app.toast = Some(crate::tui::app::Toast {
-            text: "copied https://open.spotify.com/track/abc".into(),
-            at: std::time::Instant::now(),
-        });
-        let theme = Theme::default();
-        term.draw(|f| draw(f, &app, &theme)).unwrap();
-    }
-
-    #[test]
-    fn the_help_overlay_renders_at_every_size_that_has_a_layout() {
-        for (w, h) in [(100u16, 30u16), (80, 24), (60, 18), (50, 14), (35, 10)] {
+    fn the_settings_screen_lists_every_key() {
+        for (w, h) in [(140u16, 40u16), (100, 30), (60, 20)] {
             let backend = ratatui::backend::TestBackend::new(w, h);
             let mut term = ratatui::Terminal::new(backend).unwrap();
             let mut app = app_at(w, h);
-            app.show_help = true;
+            app.settings_open = true;
+            crate::tui::settings::open(&mut app);
+            // On a narrow screen the keys are under the last setting.
+            app.settings_cursor = usize::MAX;
             let theme = Theme::default();
-            term.draw(|f| draw(f, &app, &theme)).unwrap();
+            term.draw(|f| crate::tui::settings::render(f, f.area(), &app, &theme))
+                .unwrap();
+            let buf = term.backend().buffer().clone();
+            let text: String = (0..h)
+                .map(|y| row_text(&buf, y, 0, w))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(text.contains("Keys"), "{w}x{h}: {text}");
+            if w >= 140 {
+                for (_, what) in HELP_ROWS {
+                    assert!(text.contains(what), "{w}x{h} lacks {what:?}: {text}");
+                }
+            } else {
+                assert!(text.contains("play / pause"), "{w}x{h}: {text}");
+            }
         }
     }
 
@@ -2564,30 +2529,26 @@ mod tests {
     /// that check, and it reads the SPEC rather than a copy of it.
     #[test]
     fn the_help_overlay_matches_the_spec_table() {
-        let backend = ratatui::backend::TestBackend::new(100, 30);
+        // The key column of the settings screen's Keys panel, as drawn: wide
+        // enough that the panel sits beside the settings and every row fits.
+        let (w, h) = (140u16, 40u16);
+        let backend = ratatui::backend::TestBackend::new(w, h);
         let mut term = ratatui::Terminal::new(backend).unwrap();
-        let mut app = app_at(100, 30);
-        app.show_help = true;
-        // Tall enough for every row the overlay has.
+        let mut app = app_at(w, h);
+        app.settings_open = true;
+        crate::tui::settings::open(&mut app);
         let theme = Theme::default();
-        term.draw(|f| draw(f, &app, &theme)).unwrap();
-        // Only the overlay's key column, never the whole screen: a one-letter
-        // key such as `m` appears somewhere on any 100x30 screen, so searching
-        // the whole buffer would pass no matter what the overlay said.
-        let popup = help_popup(Rect {
-            x: 0,
-            y: 0,
-            width: 100,
-            height: 30,
-        });
+        term.draw(|f| crate::tui::settings::render(f, f.area(), &app, &theme))
+            .unwrap();
         let buf = term.backend().buffer().clone();
-        let rows: Vec<String> = (0..popup.height)
-            .map(|i| {
-                let y = popup.y + 1 + i;
-                (popup.x + 1..popup.x + 1 + HELP_KEY_WIDTH as u16)
-                    .map(|x| buf[(x, y)].symbol().to_string())
-                    .collect::<String>()
-            })
+        // Only the key column, never the whole screen: a one-letter key such as
+        // `m` appears somewhere on any screen, so searching everything would
+        // pass no matter what the panel said.
+        let left = (0..w)
+            .find(|x| row_text(&buf, 0, *x, 7) == "╭ Keys ")
+            .expect("the Keys panel");
+        let rows: Vec<String> = (1..h - 1)
+            .map(|y| row_text(&buf, y, left + 2, HELP_KEY_WIDTH as u16))
             .filter(|row| !row.trim().is_empty())
             .collect();
         // Whitespace tokens, compared exactly and case-sensitively. A substring
@@ -2808,11 +2769,31 @@ mod tests {
             assert_eq!(*c, want[i]);
             let drawn = row_text(&buf, r.y, r.x, r.width);
             assert!(
-                ["⏮", "⏸", "▶", "⏹", "⏭"].iter().any(|g| drawn.contains(*g)),
+                [
+                    TRANSPORT_PREV,
+                    TRANSPORT_PAUSE,
+                    TRANSPORT_PLAY,
+                    TRANSPORT_NEXT
+                ]
+                .iter()
+                .any(|g| drawn.contains(g.trim())),
                 "control {i} is not over a transport glyph: {drawn:?}"
             );
             assert_eq!(regions.hit(r.x, r.y), Some(Hit::Control(want[i])));
         }
+    }
+
+    /// The volume meter's two ends are 0 and 100, and it sits on the row the
+    /// renderer drew it on.
+    #[test]
+    fn the_volume_meter_is_clickable_end_to_end() {
+        let app = app_at(100, 30);
+        let (buf, regions) = render(100, 30, &app);
+        let v = regions.volume.expect("a volume meter");
+        assert!(row_text(&buf, v.y, v.x.saturating_sub(4), 4).contains("vol"));
+        assert_eq!(regions.hit(v.x, v.y), Some(Hit::Volume(0.0)));
+        assert_eq!(regions.hit(v.x + v.width - 1, v.y), Some(Hit::Volume(1.0)));
+        assert_eq!(regions.hit(v.x + v.width, v.y), None);
     }
 
     /// A click on a history row selects that row, counted from what is shown.
@@ -3108,24 +3089,31 @@ mod tests {
         // The placeholder is a frame of box-drawing characters.
         // The hole sits inside the Now Playing pane, so the pane's rounded border
         // is the frame around it: two cells above the hole, not one.
-        // The spine sits beside the cover, two cells at the pane's left edge, and
-        // the hole starts after it.
-        assert_eq!(art.x, 3, "the hole is inset past the spine: {art:?}");
-        let spine = row_text(&buf, art.y, art.x - 2, 2);
-        assert_eq!(spine, "██", "the spine is two cells of gradient");
-        // The hole is otherwise untouched until a cover arrives.
-        let row = row_text(&buf, art.y, art.x, art.width);
-        assert_eq!(row.trim(), "", "the hole should be empty: {row:?}");
-        assert!(art.width >= MIN_ART.0 && art.height >= MIN_ART.1, "{art:?}");
-        // And it is empty, because there is no image yet: the space is reserved,
+        // No spine beside the cover (owner, 2026-10-01): the hole starts at the
+        // pane's inner edge and nothing is drawn left of it.
+        assert_eq!(
+            art.x, 1,
+            "the hole starts at the pane's inner edge: {art:?}"
+        );
+        // The hole is untouched until a cover arrives: the space is reserved,
         // not filled with a picture of nothing.
-        // The spine occupies the first two columns; everything right of it is
-        // untouched, because there is no cover yet.
         let hole: String = (0..art.height)
-            .map(|i| row_text(&buf, art.y + i, art.x + 2, art.width - 2))
+            .map(|i| row_text(&buf, art.y + i, art.x, art.width))
             .collect::<Vec<_>>()
             .join("");
         assert_eq!(hole.trim(), "", "the hole should be empty: {hole:?}");
+        assert!(art.width >= MIN_ART.0 && art.height >= MIN_ART.1, "{art:?}");
+    }
+
+    /// The visualizer keeps its spine; the cover does not.
+    #[test]
+    fn only_the_visualizer_has_a_spine() {
+        let mut app = app_at(100, 30);
+        app.settings.display_mode = DisplayMode::Visualizer;
+        let (buf, regions) = render(100, 30, &app);
+        let art = regions.art.expect("the visualizer area");
+        assert_eq!(art.x, 3, "inset past the spine: {art:?}");
+        assert_eq!(row_text(&buf, art.y, art.x - 2, 2), "██");
     }
 
     /// TODO 4.1: "art disappears cleanly when the terminal shrinks below the

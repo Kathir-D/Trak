@@ -632,6 +632,13 @@ pub fn spaced_caps(text: &str) -> String {
     let chars: Vec<char> = text.chars().collect();
     let mut out = String::new();
     for (i, c) in chars.iter().enumerate() {
+        // A terminal draws the hair space as a whole cell, so a single word
+        // space is as wide as the gap between two letters and "JANE REMOVER"
+        // reads as one word. Three cells keeps the words apart.
+        if *c == ' ' {
+            out.push_str("   ");
+            continue;
+        }
         if !c.is_alphanumeric() {
             out.push(*c);
             continue;
@@ -749,7 +756,7 @@ mod whimsy_tests {
         let words = spaces + 1;
         assert_eq!(
             out.chars().count(),
-            letters + (letters - words) + spaces,
+            letters + (letters - words) + 3 * spaces,
             "one hair space between the letters of a word: {out:?}"
         );
         assert!(
@@ -765,7 +772,7 @@ mod whimsy_tests {
             "and the other way round: {out:?}"
         );
         let stripped: String = out.chars().filter(|c| *c != '\u{2009}').collect();
-        assert_eq!(stripped, "JANE REMOVER", "and it reads as small caps");
+        assert_eq!(stripped, "JANE   REMOVER", "and it reads as small caps");
         assert_eq!(spaced_caps("!!!"), "!!!", "punctuation is left alone");
         assert_eq!(spaced_caps(""), "");
     }

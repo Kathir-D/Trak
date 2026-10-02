@@ -269,6 +269,18 @@ pub enum Control {
 }
 
 /// Something on screen that can be clicked.
+/// `←` and `→` as `update` sees them. The arrows switch tabs (owner, 2026-10-01)
+/// while `h`/`l` seek, so they can no longer fold onto `h`/`l` the way `↑`/`↓`
+/// fold onto `j`/`k`; the loop sends these instead.
+pub const ARROW_LEFT: char = '\u{2190}';
+pub const ARROW_RIGHT: char = '\u{2192}';
+
+/// A key a text field should insert: not a control character, and not one of
+/// the arrow sentinels, which are keys rather than letters.
+pub fn is_typed(c: char) -> bool {
+    !c.is_control() && c != ARROW_LEFT && c != ARROW_RIGHT
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Hit {
     /// One of the tab labels.
@@ -280,6 +292,8 @@ pub enum Hit {
     /// The progress bar, as a fraction of the track.
     Seek(f64),
     Control(Control),
+    /// The volume meter, as a fraction of its width.
+    Volume(f64),
 }
 
 /// Which pane the right side is showing.
@@ -1066,7 +1080,6 @@ pub struct App {
     /// track change would drag the cursor down with the new row, and a session
     /// left alone would end up selecting the *oldest* track.
     pub cursor_moved: bool,
-    pub show_help: bool,
     /// What Spotify last reported, kept only so the meter has something to show
     /// before the user has chosen a volume of their own.
     pub read_volume: u8,
@@ -1154,7 +1167,6 @@ impl App {
             history_scroll: 0,
             viewport: 10,
             cursor_moved: false,
-            show_help: false,
             read_volume: 0,
             user_volume: None,
             volume_hidden: false,
@@ -1632,7 +1644,7 @@ fn web_search_key(app: &mut App, c: char, web: &mut Vec<WebJob>) {
             app.web.searching = false;
         }
         // A control character is not text.
-        ch if ch.is_control() => {}
+        ch if !is_typed(ch) => {}
         ch => {
             app.web.query.push(ch);
             // Every keystroke restarts the wait, so a slow typist sends one
@@ -1707,7 +1719,7 @@ fn web_edit_key(app: &mut App, c: char, web: &mut Vec<WebJob>) {
                 text.pop();
                 Some(PlaylistEdit::Name(text))
             }
-            ch if !ch.is_control() => {
+            ch if is_typed(ch) => {
                 text.push(ch);
                 Some(PlaylistEdit::Name(text))
             }
@@ -2124,17 +2136,6 @@ fn handle_key(app: &mut App, c: char, commands: &mut Vec<PlayerCommand>, web: &m
         return;
     }
 
-    if app.show_help {
-        // The overlay swallows everything so a stray key cannot fire a write
-        // behind it, but the quit keys still work.
-        if matches!(c, 'q' | 'Q') {
-            app.should_quit = true;
-        } else {
-            app.show_help = false;
-        }
-        return;
-    }
-
     if app.is_idle() {
         // Idle card: enter is the only key that does anything, and it is the
         // single allowed launch (COMPAT rule 2).
@@ -2181,7 +2182,6 @@ fn handle_key(app: &mut App, c: char, commands: &mut Vec<PlayerCommand>, web: &m
 
     match c {
         'q' | 'Q' => app.should_quit = true,
-        '?' => app.show_help = true,
         // Full-screen lyrics (SPEC §4). Any tab: the words are about the song,
         // not about whichever list happens to be behind them.
         'L' => app.lyrics_full = true,
@@ -2195,14 +2195,15 @@ fn handle_key(app: &mut App, c: char, commands: &mut Vec<PlayerCommand>, web: &m
             app.settings.visualizer_style = app.settings.visualizer_style.next();
             app.config_dirty = true;
         }
-        ',' => {
+        // `?` opens the same screen (owner, 2026-10-01): one place with every
+        // setting, and every key listed beside them.
+        ',' | '?' => {
             app.settings_open = true;
             crate::tui::settings::open(app);
         }
-        '\t' => app.tab = app.tab.next(),
+        '\t' | ARROW_RIGHT => app.tab = app.tab.next(),
         // Shift-Tab arrives as an unbound sentinel from the event loop.
-        'Z' => app.tab = app.tab.prev(),
-        // Shift-Tab is a modifier key, not a char, and is handled in the loop.
+        'Z' | ARROW_LEFT => app.tab = app.tab.prev(),
         // One table, not one arm per digit: the number a tab is drawn with and
         // the key that selects it are the same fact, and two tables is one of
         // them being wrong.
@@ -2304,10 +2305,10 @@ fn handle_mouse(app: &mut App, m: Mouse, commands: &mut Vec<PlayerCommand>) {
     if !app.settings.mouse {
         return;
     }
-    // The overlay is modal: a click behind it must not reach the dashboard, and a
-    // click *on* it just closes it.
-    if app.show_help {
-        app.show_help = false;
+    // The settings screen has no mouse, and it is modal: a click behind it must
+    // not reach the dashboard (COMPAT rule 3 -- nobody meant that click for
+    // Spotify).
+    if app.settings_open {
         return;
     }
     // COMPAT rule 3 again: a click is a user action, but a *drag* is only a user
@@ -2359,6 +2360,28 @@ fn handle_mouse(app: &mut App, m: Mouse, commands: &mut Vec<PlayerCommand>) {
                     PlayerCommand::Seek((fraction.clamp(0.0, 1.0) * dur as f64).round()),
                 );
             }
+        }
+        // The meter is a slider: a click or a drag sets the volume where the
+        // pointer is. Guarded exactly like `+`/`-`, for the same reasons.
+        Hit::Volume(fraction) => {
+            if app.settings.volume_control == VolumeControl::System {
+                app.toast("volume is on the system control, which changes every sound on this Mac");
+                return;
+            }
+            if app.sonar.is_ducking() {
+                app.toast("Sonar is adjusting the volume — leave it alone for a moment");
+                return;
+            }
+            let v = (fraction.clamp(0.0, 1.0) * 100.0).round() as u8;
+            // Behind a write still in flight the click is dropped, like any
+            // other, and the meter stays where Spotify is; a drag sends the
+            // next position a moment later anyway.
+            if (app.meter_volume() == v && !app.muted) || app.busy.is_some() {
+                return;
+            }
+            push(app, commands, PlayerCommand::SetVolume(v));
+            app.muted = false;
+            app.user_volume = Some(v);
         }
         Hit::Control(c) => {
             let cmd = match c {
@@ -2991,34 +3014,21 @@ mod tests {
     }
 
     #[test]
-    fn the_help_overlay_swallows_keys_then_closes() {
+    fn question_mark_opens_settings_which_swallow_keys() {
         let (app, _) = press(with_track(), '?');
-        assert!(app.show_help);
+        assert!(app.settings_open, "`?` opens the settings screen");
         let (app, cmds) = press(app, 'n');
-        assert!(cmds.is_empty(), "a key must not fire behind the overlay");
-        assert!(!app.show_help);
+        assert!(cmds.is_empty(), "a key must not fire behind the screen");
+        assert!(app.settings_open);
     }
 
-    /// SPEC §4: `esc` closes the overlay, and is inert everywhere else.
+    /// SPEC §4: `esc` is inert on the dashboard.
     #[test]
-    fn esc_closes_the_overlay_and_is_inert_elsewhere() {
-        let (app, _) = press(with_track(), '?');
-        assert!(app.show_help);
-        let (app, cmds) = press(app, '\x1b');
-        assert!(!app.show_help, "esc closes it");
-        assert!(cmds.is_empty(), "and fires nothing behind it");
-
+    fn esc_is_inert_on_the_dashboard() {
         let (app, cmds) = press(with_track(), '\x1b');
         assert!(cmds.is_empty());
         assert!(!app.should_quit, "esc must not quit");
         assert_eq!(app.tab, Tab::History, "esc must not change anything");
-    }
-
-    #[test]
-    fn q_still_quits_from_the_help_overlay() {
-        let (app, _) = press(with_track(), '?');
-        let (app, _) = press(app, 'q');
-        assert!(app.should_quit);
     }
 
     #[test]
@@ -3120,6 +3130,64 @@ mod tests {
         assert!(app.toast.is_none());
     }
 
+    /// `←`/`→` switch tabs and never seek; `h`/`l` seek (owner, 2026-10-01).
+    #[test]
+    fn arrows_switch_tabs_and_h_l_seek() {
+        let start = with_track().tab;
+        let (app, cmds) = press(with_track(), ARROW_RIGHT);
+        assert!(cmds.is_empty(), "an arrow must not seek: {cmds:?}");
+        assert_eq!(app.tab, start.next());
+        let (app, cmds) = press(app, ARROW_LEFT);
+        assert!(cmds.is_empty());
+        assert_eq!(app.tab, start);
+        let (app, cmds) = press(app, ARROW_LEFT);
+        assert!(cmds.is_empty());
+        assert_eq!(app.tab, start.prev(), "and it wraps");
+        let (_, cmds) = press(with_track(), 'l');
+        assert!(
+            matches!(cmds.as_slice(), [PlayerCommand::Seek(_)]),
+            "{cmds:?}"
+        );
+        // From a Web tab too, which takes its own keys first.
+        let mut app = with_track();
+        app.tab = Tab::Search;
+        let (app, cmds) = press(app, ARROW_RIGHT);
+        assert!(cmds.is_empty());
+        assert_eq!(app.tab, Tab::Playlists);
+    }
+
+    /// An arrow in a text field is a key, not a letter to insert.
+    #[test]
+    fn arrows_are_not_typed_into_the_search_box() {
+        let mut app = with_track();
+        app.tab = Tab::Search;
+        app.web.search_focus = true;
+        let (app, _) = press(app, 'a');
+        let (app, _) = press(app, ARROW_LEFT);
+        let (app, _) = press(app, ARROW_RIGHT);
+        assert_eq!(app.web.query, "a");
+    }
+
+    /// The volume meter is a slider: where you click is the volume you get.
+    #[test]
+    fn clicking_the_volume_meter_sets_the_volume() {
+        let (app, cmds) = step(with_track(), click(Hit::Volume(0.3)));
+        assert_eq!(cmds, vec![PlayerCommand::SetVolume(30)]);
+        assert_eq!(app.meter_volume(), 30, "the meter follows the click");
+        let mut app = with_track();
+        app.user_volume = Some(40);
+        let (_, cmds) = step(app, click(Hit::Volume(1.7)));
+        assert_eq!(cmds, vec![PlayerCommand::SetVolume(100)], "clamped");
+        let (_, cmds) = step(with_track(), click(Hit::Volume(0.0)));
+        assert_eq!(cmds, vec![PlayerCommand::SetVolume(0)]);
+        // The system control is someone else's volume, as with `+`/`-`.
+        let mut app = with_track();
+        app.settings.volume_control = VolumeControl::System;
+        let (app, cmds) = step(app, click(Hit::Volume(0.5)));
+        assert!(cmds.is_empty());
+        assert!(app.toast.is_some());
+    }
+
     /// A click has to do what the pixel under it looks like it does.
     #[test]
     fn a_click_does_what_the_thing_under_it_says() {
@@ -3182,14 +3250,15 @@ mod tests {
         );
     }
 
-    /// The overlay is modal: a click behind it must not reach the dashboard.
+    /// The settings screen is modal: a click behind it must not reach the
+    /// dashboard.
     #[test]
-    fn a_click_behind_the_overlay_only_closes_it() {
-        let (app, _) = press(with_track(), '?');
+    fn a_click_behind_the_settings_screen_does_nothing() {
+        let (app, _) = press(with_track(), ',');
         let want = fingerprint(&app);
         let (app, cmds) = step(app, click(Hit::Control(Control::Next)));
-        assert!(cmds.is_empty(), "a click must not fire behind the overlay");
-        assert!(!app.show_help, "and it closes the overlay");
+        assert!(cmds.is_empty(), "a click must not fire behind the screen");
+        assert!(app.settings_open);
         assert_eq!(app.tab, want.tab);
     }
 
@@ -3378,7 +3447,7 @@ mod tests {
             history: app.history.len(),
             cursor: app.history_cursor,
             cursor_moved: app.cursor_moved,
-            help: app.show_help,
+            help: app.settings_open,
             user_volume: app.user_volume,
             read_volume: app.read_volume,
             volume_hidden: app.volume_hidden,

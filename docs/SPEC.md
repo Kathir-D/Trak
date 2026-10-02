@@ -66,7 +66,7 @@ Full dashboard: rounded panes, header, two columns, footer. Left = Now Playing, 
 ││  1:42 ━━━━━━━━━━●──────────────────── 5:07    ││                                            ││
 ││       ⏮     ⏸     ⏭        🔊 ▰▰▰▰▰▰▰▱▱▱ 70%  ││                                            ││
 │╰───────────────────────────────────────────────╯╰────────────────────────────────────────────╯│
-│ space play/pause  n/p next/prev  ←/→ seek  +/- vol  s shuffle  r repeat  / search  ? help     │
+│ space play/pause  n/p next/prev  h/l seek  +/- vol  s shuffle  r repeat  / search  ? help     │
 ╰────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
@@ -96,7 +96,8 @@ Rules:
 | --- | --- | --- |
 | `space` | Play / pause | both |
 | `n` / `p` | Next / previous track | both |
-| `←` `→` / `h` `l` | Seek −/+ 5 s (a setting) | both |
+| `h` `l` | Seek −/+ 5 s (a setting) | both |
+| `←` `→` | Previous / next tab (owner, 2026-10-01: arrows no longer seek) | both |
 | `+` `-` | Spotify volume ±10 (a setting) | both |
 | `m` | Mute / unmute (disabled while Sonar is fading, see COMPAT) | both |
 | `s` / `r` | Toggle shuffle / cycle repeat | both |

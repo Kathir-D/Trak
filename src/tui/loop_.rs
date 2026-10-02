@@ -373,6 +373,8 @@ fn event_loop<B: ratatui::backend::Backend>(
     let mut last_poll: Option<Instant> = None;
     let mut last_clock_tick = Instant::now();
     let mut last_scroll = Duration::ZERO;
+    // What covered the cover last frame; see the draw step.
+    let mut last_covering: Option<(bool, bool, bool, bool)> = None;
     let mut last_sonar = Instant::now() - SONAR_EVERY;
     let mut last_viz = Instant::now() - VIZ_FPS;
     // The real-audio source (TODO 8.3). Created idle: nothing touches Core Audio
@@ -380,7 +382,18 @@ fn event_loop<B: ratatui::backend::Backend>(
     // function joins the worker, which is what takes the tap down on a normal exit.
     let mut audio = crate::audio::AudioPipeline::new(app.settings.visualizer_source);
 
+    // What the user asked for and the worker has not taken yet. The worker runs
+    // one job at a time and refuses the rest, and a status poll is in flight a
+    // good part of every second -- so a key sent straight to it was thrown away
+    // while `app.busy` went on saying a command was running, and from then on
+    // every transport key was ignored. Queued here instead, and handed over the
+    // moment the worker is free, ahead of any poll.
+    let mut pending: std::collections::VecDeque<PlayerCommand> = Default::default();
+    let mut pending_web: std::collections::VecDeque<WebJob> = Default::default();
+
     loop {
+        flush(&mut pending, &mut pending_web, &worker);
+
         // 1. Finished writes first, so a completed command is applied before the
         //    next key can queue another.
         while let Some(result) = worker.poll() {
@@ -449,7 +462,7 @@ fn event_loop<B: ratatui::backend::Backend>(
                 // cannot announce what was already playing when trak started.
                 let u = update(app, Event::SoundForTrackChanged);
                 app = u.app;
-                submit_all(u.commands, &worker);
+                pending.extend(u.commands);
                 worker.submit(|p| match p.state() {
                     Ok(st) => crate::player::actions::WorkerResult::State(Box::new(st)),
                     Err(e) => crate::player::actions::WorkerResult::ReadFailed(e),
@@ -573,16 +586,18 @@ fn event_loop<B: ratatui::backend::Backend>(
                     } else if let Some(c) = char_for(k) {
                         let u = update(app, Event::Key(c));
                         app = u.app;
-                        submit_all(u.commands, &worker);
-                        submit_web(u.web, &worker);
+                        pending.extend(u.commands);
+                        pending_web.extend(u.web);
+                        flush(&mut pending, &mut pending_web, &worker);
                     }
                 }
                 Ok(TermEvent::Mouse(m)) => {
                     if app.settings.mouse {
                         let u = update(app, mouse_event(m, &regions, &mut scrubbing));
                         app = u.app;
-                        submit_all(u.commands, &worker);
-                        submit_web(u.web, &worker);
+                        pending.extend(u.commands);
+                        pending_web.extend(u.web);
+                        flush(&mut pending, &mut pending_web, &worker);
                     }
                 }
                 Ok(TermEvent::Resize(_, _)) => {
@@ -681,6 +696,22 @@ fn event_loop<B: ratatui::backend::Backend>(
         theme.accent = app.settings.accent;
         theme.border = app.settings.border;
         let settings_open = app.settings_open;
+        // A Kitty cover is drawn row by row from each row's first cell, and
+        // ratatui-image marks the rest of the row "skip", which ratatui's diff
+        // never rewrites. So when something that was drawn over the cover goes
+        // away, the cells it left behind stay on top of the picture. Anything
+        // that covers the cover therefore forces one full repaint when it opens
+        // or closes.
+        let covering = (
+            settings_open,
+            app.setup.open,
+            app.lyrics_full,
+            app.web.edit.is_some(),
+        );
+        if last_covering.is_some_and(|c| c != covering) {
+            let _ = terminal.clear();
+        }
+        last_covering = Some(covering);
         if terminal
             .draw(|f| {
                 crate::tui::render::draw_with(f, &app, &theme, &mut regions, &mut images);
@@ -1101,21 +1132,46 @@ fn page_needs(open: &crate::tui::app::Open, web: &crate::tui::app::WebState) -> 
     }
 }
 
-/// Queue commands on the worker.
-fn submit_all(commands: Vec<PlayerCommand>, worker: &Worker) {
-    for cmd in commands {
-        worker.submit(move |p| {
-            let result = run_one(p, cmd.clone());
-            WorkerResult::Command(match result {
-                // The read-back travels with the result rather than being thrown
-                // away: a volume write Spotify ignored is a state the app has to
-                // hear about (COMPAT rule 5), not a success.
-                Ok(Some(outcome)) => CommandOutcome::read_back(cmd, outcome),
-                Ok(None) => CommandOutcome::ok(cmd),
-                Err(e) => CommandOutcome::failed(cmd, e),
-            })
-        });
+/// Hand the user's queued commands, then their Web jobs, to the worker, as many
+/// as it takes (one, when it is free).
+fn flush(
+    pending: &mut std::collections::VecDeque<PlayerCommand>,
+    pending_web: &mut std::collections::VecDeque<WebJob>,
+    worker: &Worker,
+) {
+    while let Some(cmd) = pending.front() {
+        if !submit_command(cmd.clone(), worker) {
+            return;
+        }
+        pending.pop_front();
     }
+    while let Some(job) = pending_web.front() {
+        // With no token there is nothing to send, and never will be until the
+        // user logs in; the tab already says so.
+        if !web_ready() {
+            pending_web.clear();
+            return;
+        }
+        if !submit_web(vec![job.clone()], worker) {
+            return;
+        }
+        pending_web.pop_front();
+    }
+}
+
+/// Offer one command to the worker; `false` if it was busy and did not take it.
+fn submit_command(cmd: PlayerCommand, worker: &Worker) -> bool {
+    worker.submit(move |p| {
+        let result = run_one(p, cmd.clone());
+        WorkerResult::Command(match result {
+            // The read-back travels with the result rather than being thrown
+            // away: a volume write Spotify ignored is a state the app has to
+            // hear about (COMPAT rule 5), not a success.
+            Ok(Some(outcome)) => CommandOutcome::read_back(cmd, outcome),
+            Ok(None) => CommandOutcome::ok(cmd),
+            Err(e) => CommandOutcome::failed(cmd, e),
+        })
+    })
 }
 
 /// Run one write. `Ok(Some(outcome))` means the command was read back.
@@ -1291,8 +1347,8 @@ fn mouse_event(
 
 /// The char `update` should see for a key, or `None` for a key trak ignores.
 ///
-/// Arrows are folded onto their vim equivalents so both work from one binding
-/// (SPEC §4: "Arrows **and** vim keys").
+/// `↑`/`↓` are folded onto `j`/`k` so both work from one binding (SPEC §4).
+/// `←`/`→` switch tabs while `h`/`l` seek, so they get sentinels of their own.
 fn char_for(k: KeyEvent) -> Option<char> {
     // Some terminals emit a release event as well as a press; acting on both would
     // make a held key repeat twice as fast.
@@ -1314,8 +1370,8 @@ fn char_for(k: KeyEvent) -> Option<char> {
         // to be the one place that knows about key codes. Either erase works:
         // macOS terminals send \x7f, the DEC/PC set sends \x08.
         KeyCode::Backspace => Some('\x7f'),
-        KeyCode::Left => Some('h'),
-        KeyCode::Right => Some('l'),
+        KeyCode::Left => Some(crate::tui::app::ARROW_LEFT),
+        KeyCode::Right => Some(crate::tui::app::ARROW_RIGHT),
         KeyCode::Down => Some('j'),
         KeyCode::Up => Some('k'),
         _ => None,
@@ -1382,11 +1438,18 @@ mod tests {
         assert_eq!(char_for(key(KeyCode::Tab, KeyModifiers::NONE)), Some('\t'));
     }
 
-    /// SPEC §4: arrows and vim keys both work, from one binding.
+    /// SPEC §4: `↑`/`↓` are `k`/`j`; `←`/`→` are tab keys of their own, not
+    /// `h`/`l`, which seek.
     #[test]
     fn arrows_fold_onto_their_vim_equivalents() {
-        assert_eq!(char_for(key(KeyCode::Left, KeyModifiers::NONE)), Some('h'));
-        assert_eq!(char_for(key(KeyCode::Right, KeyModifiers::NONE)), Some('l'));
+        assert_eq!(
+            char_for(key(KeyCode::Left, KeyModifiers::NONE)),
+            Some(crate::tui::app::ARROW_LEFT)
+        );
+        assert_eq!(
+            char_for(key(KeyCode::Right, KeyModifiers::NONE)),
+            Some(crate::tui::app::ARROW_RIGHT)
+        );
         assert_eq!(char_for(key(KeyCode::Down, KeyModifiers::NONE)), Some('j'));
         assert_eq!(char_for(key(KeyCode::Up, KeyModifiers::NONE)), Some('k'));
     }
@@ -1447,6 +1510,41 @@ mod tests {
         cmd.get_args()
             .map(|a| a.to_string_lossy().into_owned())
             .collect()
+    }
+
+    /// A key pressed while the worker is busy with a poll must still reach
+    /// Spotify once the poll is done. It used to be dropped, which left
+    /// `app.busy` set for good and every transport key dead after it.
+    #[test]
+    fn a_command_queued_behind_a_busy_worker_still_runs() {
+        use crate::player::FakePlayer;
+        use std::sync::mpsc::channel;
+        let worker = Worker::new(FakePlayer::playing());
+        let (release, wait) = channel::<()>();
+        // A "poll" that holds the worker until the test lets it go.
+        assert!(worker.submit(move |_| {
+            let _ = wait.recv();
+            WorkerResult::Command(CommandOutcome::ok(PlayerCommand::Toggle))
+        }));
+        let mut pending: std::collections::VecDeque<PlayerCommand> =
+            [PlayerCommand::Next].into_iter().collect();
+        let mut pending_web = Default::default();
+        flush(&mut pending, &mut pending_web, &worker);
+        assert_eq!(pending.len(), 1, "the worker is busy, so it stays queued");
+        release.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut ran = false;
+        while Instant::now() < deadline && !ran {
+            flush(&mut pending, &mut pending_web, &worker);
+            if let Some(WorkerResult::Command(out)) = worker.poll()
+                && out.cmd == PlayerCommand::Next
+            {
+                ran = true;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(ran, "the queued command never ran");
+        assert!(pending.is_empty());
     }
 
     #[test]

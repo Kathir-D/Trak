@@ -67,7 +67,8 @@ the right, collapsing to a compact strip when it gets small.
 | --- | --- |
 | `space` | play / pause |
 | `n` / `p` | next / previous |
-| `←` `→` or `h` `l` | seek −/+ (5 s, a setting) |
+| `h` / `l` | seek −/+ (5 s, a setting) |
+| `←` / `→` | previous / next tab |
 | `+` `-` | volume ±10 (a setting) |
 | `s` / `r` | shuffle / repeat |
 | `a` / `v` | art ↔ visualizer / next visualizer style |
