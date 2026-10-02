@@ -69,7 +69,7 @@ fn from_samples(rgba: &[u8]) -> Option<Color> {
         }
         let (_h, s, _lightness) = hsl(r, g, b);
         let y = luma(r, g, b);
-        if s < MIN_SATURATION || y < MIN_LUMA || y > MAX_LUMA {
+        if s < MIN_SATURATION || !(MIN_LUMA..=MAX_LUMA).contains(&y) {
             continue;
         }
         // Weight saturation by how central the luminance is: a colour at the very
@@ -699,7 +699,7 @@ fn hue_bins(image: &image::DynamicImage) -> Vec<Bin> {
         }
         let (h, s, _l) = hsl(r, g, b);
         let y = luma(r, g, b);
-        if s < MIN_SATURATION || y < MIN_LUMA || y > MAX_LUMA {
+        if s < MIN_SATURATION || !(MIN_LUMA..=MAX_LUMA).contains(&y) {
             continue;
         }
         let weight = s * y;

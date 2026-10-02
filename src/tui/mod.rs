@@ -7,6 +7,7 @@ pub mod app;
 pub mod loop_;
 pub mod render;
 pub mod settings;
+pub mod setup;
 pub mod theme;
 pub mod web_tabs;
 

@@ -586,7 +586,7 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
       warn before expiry, and treat an invalid refresh token as "discard and re-login", not as an
       error state. Needs: 7.1. Done when: unit tests with a mock token endpoint; **[owner]** completes
       a real login once.
-- [ ] 7.3 **Guided setup in `trak config`**: screen with numbered steps — open
+- [x] 7.3 **Guided setup in `trak config`**: screen with numbered steps — open
       `https://developer.spotify.com/dashboard` (via `open`), create an app, add the exact redirect URI
       shown (copyable), paste the Client ID (validate shape), press enter → browser login → success
       screen. `Log out` clears the token. > **The redirect URI to display and copy is exactly
@@ -596,6 +596,17 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
       `http://127.0.0.1:<port>/callback` if not. Done when: every step has an on-screen explanation
       and errors (bad ID, denied consent, port busy) are handled with retry. **[owner]** walks
       through it once.
+      > Done: `s` in the settings screen (heading `Spotify API` says so) opens `tui/setup.rs`, a
+      > pure state machine (`Setup::handle` -> `Effect`s) that `loop_.rs`'s `SetupRunner` carries
+      > out: open the dashboard / copy the URI (`pbcopy`) / save the config / log in on its own
+      > thread / delete the token. Client ID is validated as 32 hex digits and a bad paste stays in
+      > the input with the reason; a failed login (denied, port busy, timeout) shows the notice and
+      > `enter` retries; a second login cannot start while one waits. **Found while wiring it:
+      > nothing set `app.web.connection` at startup**, so no Web API tab could ever have loaded;
+      > `connection_at_start` now derives it from the config and token file. Not done (backlog):
+      > the TUI never refreshes a stale *access* token (`web_client()` just reads the file), so a
+      > login works for ~1 h until that lands. `esc` while the browser is open closes the panel but
+      > cannot cancel the wait; it ends at the login timeout. **[owner]** walk through it once.
 - [x] 7.4 **Token storage**: the `0600` file decided in 1.8 (`~/.config/trak/token.json`, `XDG_CONFIG_HOME`
       respected, directory `0700`, atomic temp-then-rename write). **Refuse to read a token whose mode
       is looser than `0600`** rather than proceeding, and assert that in a test. Never logged, never in

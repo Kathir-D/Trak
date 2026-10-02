@@ -1048,6 +1048,8 @@ pub struct App {
     pub settings_open: bool,
     /// Which row of the settings overlay has the cursor (TODO 5.2).
     pub settings_cursor: usize,
+    /// The guided Spotify setup panel inside the settings screen (TODO 7.3).
+    pub setup: crate::tui::setup::Setup,
     /// The visualizer's bars and where they come from (TODO 8.4). The source is
     /// seeded from the track so a new song visibly looks different, and the
     /// spectrum is kept on the app because the render path must not block.
@@ -1112,6 +1114,7 @@ impl App {
             hint: None,
             settings_open: false,
             settings_cursor: 0,
+            setup: crate::tui::setup::Setup::default(),
             // Seeded from the clock rather than a constant so two trak processes
             // do not draw in lockstep, and so a snapshot test can pin it.
             viz: crate::visualizer::SimulatedSource::new(0),

@@ -236,6 +236,8 @@ pub fn config_screen() -> i32 {
     }
     app.settings_open = true;
     crate::tui::settings::open(&mut app);
+    app.web.connection = connection_at_start(&app.config.spotify.client_id);
+    let mut setup = SetupRunner::default();
 
     let mut guard = match TerminalGuard::enter() {
         Ok(g) => g,
@@ -279,6 +281,7 @@ pub fn config_screen() -> i32 {
             Ok(false) => {}
             Err(_) => break 1,
         }
+        setup.drive(&mut app);
         theme.accent = app.settings.accent;
         theme.border = app.settings.border;
         if terminal
@@ -337,6 +340,8 @@ fn event_loop<B: ratatui::backend::Backend>(
     if let Some(n) = notice {
         app.toast(n);
     }
+    app.web.connection = connection_at_start(&app.config.spotify.client_id);
+    let mut setup = SetupRunner::default();
     if first_run {
         app.hint = Some(FIRST_RUN_HINT.to_string());
     }
@@ -626,6 +631,7 @@ fn event_loop<B: ratatui::backend::Backend>(
         // The theme is rebuilt from the settings every frame rather than once at
         // startup, which is the only reason `,` can preview a border or an accent
         // change on the live dashboard before you close the screen.
+        setup.drive(&mut app);
         theme.accent = app.settings.accent;
         theme.border = app.settings.border;
         let settings_open = app.settings_open;
@@ -675,6 +681,125 @@ fn event_loop<B: ratatui::backend::Backend>(
         .config_dirty
         .then(|| app.config.with_settings(&app.settings));
     (0, pending)
+}
+
+/// What the connection looks like at start, from the config and the token file.
+///
+/// Without this `app.web.connection` stays at its default for the whole session
+/// and no Web API tab can ever load, whatever the token file holds.
+fn connection_at_start(client_id: &str) -> crate::tui::app::Connection {
+    use crate::tui::app::Connection as Shown;
+    use crate::web::token::Connection as Stored;
+    if client_id.is_empty() {
+        return Shown::NoClientId;
+    }
+    let store = crate::web::token::TokenFile::at(&crate::config::Paths::from_env());
+    let Ok(loaded) = store.load() else {
+        return Shown::LoggedOut;
+    };
+    match Stored::of(&loaded, std::time::SystemTime::now()) {
+        Stored::Connected | Stored::ExpiringSoon => Shown::Connected,
+        Stored::LoggedOut => Shown::LoggedOut,
+        Stored::NeedsReconnect => Shown::NeedsRelogin,
+    }
+}
+
+/// Carries out what the guided setup panel asked for (TODO 7.3).
+///
+/// The panel's state machine only *says* what should happen; this is the one
+/// place that opens a browser, writes the config or waits on a login. The login
+/// runs on its own thread because it blocks until the browser redirects back,
+/// which can be minutes -- the UI thread must keep drawing meanwhile.
+#[derive(Default)]
+struct SetupRunner {
+    login: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
+}
+
+impl SetupRunner {
+    fn drive(&mut self, app: &mut App) {
+        use crate::tui::setup::Effect;
+        use crate::web::auth::{Browser, MacBrowser};
+        for effect in std::mem::take(&mut app.setup.pending) {
+            match effect {
+                // Applied by `setup::key` before it gets here.
+                Effect::ClientId(_) => {}
+                Effect::Open(url) => {
+                    if MacBrowser.open(&url).is_err() {
+                        app.setup.notice = Some(format!("could not open a browser -- go to {url}"));
+                    }
+                }
+                Effect::Copy(text) => {
+                    app.setup.notice = Some(if crate::player::actions::copy_to_clipboard(&text) {
+                        format!("copied {text}")
+                    } else {
+                        format!("could not copy -- type it exactly: {text}")
+                    });
+                }
+                Effect::SaveConfig => {
+                    // The settings are folded in as well, so clearing the dirty flag
+                    // cannot lose a toggle made earlier on the same screen.
+                    let next = app.config.with_settings(&app.settings);
+                    match next.save() {
+                        Ok(()) => {
+                            app.config = next;
+                            app.config_dirty = false;
+                        }
+                        Err(e) => app.setup.notice = Some(e.notice()),
+                    }
+                }
+                Effect::Login(id) => {
+                    if self.login.is_none() {
+                        self.login = Some(spawn_login(id));
+                    }
+                }
+                Effect::Logout => {
+                    let store = crate::web::token::TokenFile::at(&crate::config::Paths::from_env());
+                    match store.clear() {
+                        Ok(()) => {
+                            app.setup.logged_out();
+                            app.web.connection = crate::tui::app::Connection::LoggedOut;
+                        }
+                        Err(e) => app.setup.notice = Some(e.notice()),
+                    }
+                }
+            }
+        }
+        if let Some(rx) = &self.login {
+            let done = match rx.try_recv() {
+                Ok(result) => Some(result),
+                Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    Some(Err("trak: the Spotify login stopped unexpectedly".into()))
+                }
+            };
+            if let Some(result) = done {
+                self.login = None;
+                if result.is_ok() {
+                    app.web.connection = crate::tui::app::Connection::Connected;
+                }
+                app.setup.login_finished(result);
+            }
+        }
+    }
+}
+
+fn spawn_login(client_id: String) -> std::sync::mpsc::Receiver<Result<(), String>> {
+    use crate::web::auth::{Login, MacBrowser, SpotifyEndpoint};
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let store = crate::web::token::TokenFile::at(&crate::config::Paths::from_env());
+        let endpoint = SpotifyEndpoint::default();
+        let result = Login::new(&endpoint, &MacBrowser, &store)
+            .run(
+                &client_id,
+                crate::tui::setup::SCOPES,
+                std::time::SystemTime::now(),
+            )
+            .map(|_| ())
+            .map_err(|e| e.notice());
+        let _ = tx.send(result);
+    });
+    rx
 }
 
 /// A Web API client for whatever the token file currently holds, or `None` when
