@@ -12,12 +12,17 @@
   <img alt="status: pre-alpha" src="https://img.shields.io/badge/status-pre--alpha-orange">
 </p>
 
-> **Status: pre-alpha.** Everything below describes what is built and tested. Two parts have not
-> met a real account yet and are marked **unverified**: the Spotify Web API tabs (they need a
+<p align="center">
+  <img src="docs/images/trak-demo.gif" width="760" alt="Trak in a terminal: album art and the session history, then synced lyrics on the Lyrics tab, the visualizer cycling through waveform, circular and spectrum, full-screen lyrics, and the settings screen.">
+  <br><sub>Version B (no Client ID, Free account) in <a href="https://cmux.dev">cmux</a>, which draws the cover with the Kitty graphics protocol.</sub>
+</p>
+
+> **Status: pre-alpha.** Everything below describes what is built and tested. One part has not
+> met a real account yet and is marked **unverified**: the Spotify Web API tabs (they need a
 > Client ID and a first live login). There is no Homebrew release yet; build from source.
 
 **Contents:** [Why Trak](#why-trak) · [Features](#features) · [Install](#install) ·
-[The TUI](#the-tui) · [Version A and B](#version-a-and-b) · [Settings](#settings) ·
+[Screenshots](#screenshots) · [The TUI](#the-tui) · [Version A and B](#version-a-and-b) · [Settings](#settings) ·
 [One-shot commands](#one-shot-commands) · [Permissions](#permissions) ·
 [Works with Sonar and headless-spotify](#made-for-a-headless-setup) · [Credits](#credits)
 
@@ -41,7 +46,7 @@
 | 📜 **Synced lyrics** | from [LRCLIB](https://lrclib.net), follow the song, with a full-screen page on `L` |
 | 📊 **Visualizer** | four styles (`v`), 30 fps while visible, from Spotify's own audio (a Core Audio tap on Spotify alone, never the rest of the system); simulated if the tap is unavailable |
 | 🕘 **History and Info** | tracks played this session; everything AppleScript exposes about the current track |
-| ⚙️ **Settings** | `,` or `trak config`: a checklist where changes apply live |
+| ⚙️ **Settings** | `,` or `?` (or `trak config`): a checklist where changes apply live, with every key beside it |
 | 🔎 **Search, playlists, queue, library** | optional, with a Spotify Client ID (**unverified** against a live account) |
 | 🔌 **Plays well with others** | shows Sonar's ducking, detects headless-spotify, never fights either |
 | ⌨️ **shpotify's commands** | `trak play`, `vol`, `status --json` and the rest, for scripts |
@@ -58,6 +63,22 @@ cargo build --release
 Needs macOS 14.2 or newer and a recent stable Rust. A Homebrew formula is planned and does not
 exist yet. `cargo test` runs with no Spotify, no network and no audio device.
 
+## Screenshots
+
+<details>
+<summary>Dashboard, visualizer styles, full-screen lyrics, settings</summary>
+
+| | |
+| --- | --- |
+| <img src="docs/images/dashboard.png" width="380" alt="The dashboard: album art with the artist, title and album under it, a progress bar, transport controls and volume meter on the left; the session history on the right."> | <img src="docs/images/visualizer-waveform.png" width="380" alt="The visualizer in waveform style in place of the cover, beside synced lyrics with the current line highlighted."> |
+| Dashboard with the cover and the session history | `waveform` visualizer beside synced lyrics |
+| <img src="docs/images/visualizer-circular.png" width="380" alt="The visualizer in circular style: a ring of dots that swells with the music."> | <img src="docs/images/visualizer-spectrum.png" width="380" alt="The visualizer in spectrum style: vertical bars in the album's colours."> |
+| `circular` | `spectrum` |
+| <img src="docs/images/lyrics-fullscreen.png" width="380" alt="Full-screen lyrics: the whole song centred, the current line bright and the rest dimmed."> | <img src="docs/images/settings.png" width="380" alt="The settings screen over the dashboard: display, theme, visualizer, input, notifications and Spotify API settings, with the key list below."> |
+| Full-screen lyrics (`L`) | Settings (`,` or `?`) |
+
+</details>
+
 ## The TUI
 
 Run `trak` with no arguments. The layout adapts to the terminal: Now Playing on the left, tabs on
@@ -70,14 +91,14 @@ the right, collapsing to a compact strip when it gets small.
 | `h` / `l` | seek −/+ (5 s, a setting) |
 | `←` / `→` | previous / next tab |
 | `+` `-` | volume ±10 (a setting) |
-| `s` / `r` | shuffle / repeat |
+| `m` | mute (and back to the volume you had) |
+| `s` / `r` / `R` | shuffle / repeat off → all → one / replay the track |
 | `a` / `v` | art ↔ visualizer / next visualizer style |
 | `j` `k` `enter` | move in a list / play the selection |
-| `tab`, `1`–`6` | change tab |
+| `tab` `shift-tab`, `1`–`6` | change tab |
 | `L` | full-screen lyrics |
 | `c` | copy the track's share link |
-| `,` | settings |
-| `?` | every key, in the app |
+| `,` or `?` | settings, with every key listed beside them |
 | `q` | quit |
 
 With a Client ID there are more: `/` search, `A` add to queue, `f` like the playing track, `o`
