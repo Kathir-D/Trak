@@ -87,6 +87,13 @@ to open the Spotify window via `open -a Spotify`).
   (headless-spotify README, verified 2026-09-28). Trak therefore runs against normal Spotify today.
   When Spotify honours the key again, Trak needs no change.
 - Sonar requires macOS 15+; headless-spotify macOS 15+; Trak macOS 14.2+. All in one machine ⇒ 15+.
+- **Observed 2026-10-01:** on the owner's Mac `/Applications/Spotify.app` is owned by another
+  local user (`dev`), so a *fresh launch* of Spotify blocks its main thread in
+  `AuthorizationCopyRights` (`system.privilege.admin`, its updater) until someone answers a password
+  dialog. Every Apple Event — Trak's, Sonar's, anyone's — times out meanwhile. Trak handled it as
+  designed (timeout toast, idle card, no writes, reattached once the dialog was cancelled), but
+  the idle card says "isn't running" for a Spotify that is running and stuck; a sharper line for
+  that case is in TODO's Backlog. Not a Trak bug; the fix is `chown` of the bundle or a reinstall.
 
 ## Test matrix (fill in as verified; each row is a TODO 10.x task)
 
@@ -98,6 +105,6 @@ to open the Spotify window via `open -a Spotify`).
 | Noise stops → Sonar resumes | Trak returns to `playing` | |
 | User pauses in Trak, then noise starts/stops | Sonar does **not** resume it | |
 | User presses `m` during a duck | ignored with a hint | |
-| Spotify quits while Trak open | idle card, no crash, no relaunch | |
-| Trak open with no Sonar / no headless-spotify | everything works, no errors | |
+| Spotify quits while Trak open | idle card, no crash, no relaunch | ✅ 2026-10-01, Spotify 1.3.1.234, Trak `main`: `quit` via AppleScript → idle card at once, Spotify still not running 20 s later. `enter` on the card relaunched it (`headless-spotify launch`), and once it answered Trak reattached by itself: cover, paused state and position back, no restart of Trak. See the note below on what blocked the relaunch |
+| Trak open with no Sonar / no headless-spotify | everything works, no errors | ✅ 2026-10-01: `PATH=/usr/bin:/bin`, `SONAR_STATE=/nonexistent` — the TUI draws with no badge, no toast, no hint about headless-spotify, and `trak status` exits 0 |
 | Headless Spotify (when possible again) | badge shown, all controls work | |

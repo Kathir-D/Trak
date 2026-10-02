@@ -875,14 +875,34 @@ Run each row of the table in `docs/COMPAT.md`, tick it there with the date and w
 Requires Sonar installed and running (`brew install --cask kathir-d/tap/sonar`) and the real Spotify.
 
 - [ ] 10.1 Trak ↔ Sonar skip/prev both directions (< ~1 s propagation).
+      > 2026-10-01: not observable unattended. Sonar 0.1.3 launched, but its status item exposes no
+      > title to Accessibility and its popover does not open from System Events, so there is no way
+      > to read what Sonar shows. Trak's half is measured (3.9: a skip from any source reaches Trak
+      > in ~173 ms through the notification). **[owner]**: skip in Trak, watch Sonar's title; skip in
+      > Sonar, watch Trak.
 - [ ] 10.2 Ducking: Trak shows the Sonar badge (needs Sonar prompt 1) and stays consistent; the volume
       meter is not corrupted; `m` is disabled during a duck.
+      > 2026-10-01: blocked here. Sonar's Auto-Pause has never been switched on on this Mac (no saved
+      > settings) and needs *Screen & System Audio Recording* plus Automation for Sonar, which only a
+      > person can grant. The Trak side is covered by 4.6's 26 state-file tests. **[owner]**.
 - [ ] 10.3 Ownership: pausing in Trak during/after a duck never gets undone by Sonar.
-- [ ] 10.4 Spotify quit / relaunch while both are running.
-- [ ] 10.5 Without Sonar and without headless-spotify installed: zero errors, zero warnings.
+      > Blocked like 10.2. Note: Sonar's own README lists as a *known limitation* that a pause sent
+      > by another tool **while `ducked`** is invisible to Sonar, which will still resume. So the
+      > "during" half is expected to fail on Sonar's side, not Trak's; check "after" separately.
+- [x] 10.4 Spotify quit / relaunch while both are running.
+      > 2026-10-01, Trak only (Sonar could not be driven, see 10.1): quit → idle card, no relaunch in
+      > 20 s; `enter` → relaunch → Trak reattached on its own. The relaunch hit a Spotify admin
+      > password dialog (bundle owned by another user; COMPAT "Status"); Trak timed out politely
+      > throughout. Found: the quit/relaunch adds the same track to History a second time (Backlog).
+- [x] 10.5 Without Sonar and without headless-spotify installed: zero errors, zero warnings.
+      > 2026-10-01: `PATH=/usr/bin:/bin SONAR_STATE=/nonexistent`: TUI and `trak status` clean.
 - [ ] 10.6 Headless Spotify: badge + full control, **when Spotify honours LSUIElement again (R7)**;
       until then leave unchecked and say so.
+      > 2026-10-01: still R7 — `headless-spotify status --json` reports `"headless":false`.
 - [ ] 10.7 Visualizer taps concurrently with Sonar's tap without either failing.
+      > Blocked like 10.2 (Sonar's tap only runs with Auto-Pause on). Both are private process taps
+      > on disjoint process sets (Sonar excludes Spotify; Trak includes only Spotify), so no conflict
+      > is expected — reasoned, not observed. **[owner]**.
 
 ---
 
@@ -953,3 +973,6 @@ Requires Sonar installed and running (`brew install --cask kathir-d/tap/sonar`) 
 ## Backlog (not committed to; do not start without the owner)
 
 - Rebindable keys.
+- History: a Spotify quit and relaunch on the same track records that track a second time (10.4).
+- Idle card: when Spotify is running but every Apple Event times out (e.g. stuck on an admin
+  dialog), say "Spotify is not answering" rather than "isn't running" (COMPAT "Status").
