@@ -236,6 +236,9 @@ pub fn config_screen() -> i32 {
     }
     app.settings_open = true;
     crate::tui::settings::open(&mut app);
+    app.web.connection = connection_at_start(&app.config.spotify.client_id);
+    let mut setup = SetupRunner::default();
+    let depth = crate::tui::colour::Depth::from_env();
 
     let mut guard = match TerminalGuard::enter() {
         Ok(g) => g,
@@ -279,10 +282,14 @@ pub fn config_screen() -> i32 {
             Ok(false) => {}
             Err(_) => break 1,
         }
+        setup.drive(&mut app);
         theme.accent = app.settings.accent;
         theme.border = app.settings.border;
         if terminal
-            .draw(|f| crate::tui::settings::render(f, f.area(), &app, &theme))
+            .draw(|f| {
+                crate::tui::settings::render(f, f.area(), &app, &theme);
+                crate::tui::colour::apply(f.buffer_mut(), depth);
+            })
             .is_err()
         {
             break 1;
@@ -337,6 +344,9 @@ fn event_loop<B: ratatui::backend::Backend>(
     if let Some(n) = notice {
         app.toast(n);
     }
+    app.web.connection = connection_at_start(&app.config.spotify.client_id);
+    let mut setup = SetupRunner::default();
+    let depth = crate::tui::colour::Depth::from_env();
     if first_run {
         app.hint = Some(FIRST_RUN_HINT.to_string());
     }
@@ -453,6 +463,26 @@ fn event_loop<B: ratatui::backend::Backend>(
             && let Some(job) = tab_needs(app.tab, &app.web)
         {
             submit_web(vec![job], &worker);
+        }
+        // The playing track's heart (7.7), asked once per track. Skipped while
+        // the worker is busy, so a check that could not be sent is not marked as
+        // sent and is simply asked on a later pass.
+        // The next page of the list on screen (7.9), when the cursor is near the
+        // end of it.
+        if app.web.connection.connected()
+            && !worker.is_busy()
+            && let Some(job) = app.web.next_more(app.tab)
+            && !submit_web(vec![job], &worker)
+        {
+            // Not sent, so it is not on its way.
+            app.web.loading_more = false;
+        }
+        if !worker.is_busy() {
+            let playing = app.track().and_then(|t| t.uri.clone());
+            let connected = app.web.connection.connected();
+            if let Some(job) = app.web.next_liked_check(playing.as_deref(), connected) {
+                submit_web(vec![job], &worker);
+            }
         }
         // A page that has just been opened, and an opened page that has no rows
         // yet. The open page is fetched because the user asked for it by name.
@@ -586,7 +616,11 @@ fn event_loop<B: ratatui::backend::Backend>(
         crate::player::notify::pump_run_loop(frame.as_secs_f64());
 
         // 4. The local tick: toast expiry and the poll-due flag.
-        app = update(app, Event::Tick).app;
+        //     It can also fire the debounced search (7.6), so its web jobs are
+        //     sent rather than dropped.
+        let ticked = update(app, Event::Tick);
+        app = ticked.app;
+        submit_web(ticked.web, &worker);
 
         // 4b. The visualizer's own tick. Separate from the clock above because
         //     bars need thirty frames a second and the clock needs one, and
@@ -625,6 +659,7 @@ fn event_loop<B: ratatui::backend::Backend>(
         // The theme is rebuilt from the settings every frame rather than once at
         // startup, which is the only reason `,` can preview a border or an accent
         // change on the live dashboard before you close the screen.
+        setup.drive(&mut app);
         theme.accent = app.settings.accent;
         theme.border = app.settings.border;
         let settings_open = app.settings_open;
@@ -634,6 +669,9 @@ fn event_loop<B: ratatui::backend::Backend>(
                 if settings_open {
                     crate::tui::settings::render(f, f.area(), &app, &theme);
                 }
+                // Last, so it sees every cell: NO_COLOR and 16/256-colour
+                // terminals are handled once here, not by each widget (11.6).
+                crate::tui::colour::apply(f.buffer_mut(), depth);
             })
             .is_err()
         {
@@ -676,26 +714,169 @@ fn event_loop<B: ratatui::backend::Backend>(
     (0, pending)
 }
 
+/// What the connection looks like at start, from the config and the token file.
+///
+/// Without this `app.web.connection` stays at its default for the whole session
+/// and no Web API tab can ever load, whatever the token file holds.
+fn connection_at_start(client_id: &str) -> crate::tui::app::Connection {
+    use crate::tui::app::Connection as Shown;
+    use crate::web::token::Connection as Stored;
+    if client_id.is_empty() {
+        return Shown::NoClientId;
+    }
+    let store = crate::web::token::TokenFile::at(&crate::config::Paths::from_env());
+    let Ok(loaded) = store.load() else {
+        return Shown::LoggedOut;
+    };
+    match Stored::of(&loaded, std::time::SystemTime::now()) {
+        Stored::Connected | Stored::ExpiringSoon => Shown::Connected,
+        Stored::LoggedOut => Shown::LoggedOut,
+        Stored::NeedsReconnect => Shown::NeedsRelogin,
+    }
+}
+
+/// Carries out what the guided setup panel asked for (TODO 7.3).
+///
+/// The panel's state machine only *says* what should happen; this is the one
+/// place that opens a browser, writes the config or waits on a login. The login
+/// runs on its own thread because it blocks until the browser redirects back,
+/// which can be minutes -- the UI thread must keep drawing meanwhile.
+#[derive(Default)]
+struct SetupRunner {
+    login: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
+}
+
+impl SetupRunner {
+    fn drive(&mut self, app: &mut App) {
+        use crate::tui::setup::Effect;
+        use crate::web::auth::{Browser, MacBrowser};
+        for effect in std::mem::take(&mut app.setup.pending) {
+            match effect {
+                // Applied by `setup::key` before it gets here.
+                Effect::ClientId(_) => {}
+                Effect::Open(url) => {
+                    if MacBrowser.open(&url).is_err() {
+                        app.setup.notice = Some(format!("could not open a browser -- go to {url}"));
+                    }
+                }
+                Effect::Copy(text) => {
+                    app.setup.notice = Some(if crate::player::actions::copy_to_clipboard(&text) {
+                        format!("copied {text}")
+                    } else {
+                        format!("could not copy -- type it exactly: {text}")
+                    });
+                }
+                Effect::SaveConfig => {
+                    // The settings are folded in as well, so clearing the dirty flag
+                    // cannot lose a toggle made earlier on the same screen.
+                    let next = app.config.with_settings(&app.settings);
+                    match next.save() {
+                        Ok(()) => {
+                            app.config = next;
+                            app.config_dirty = false;
+                        }
+                        Err(e) => app.setup.notice = Some(e.notice()),
+                    }
+                }
+                Effect::Login(id) => {
+                    if self.login.is_none() {
+                        self.login = Some(spawn_login(id));
+                    }
+                }
+                Effect::Logout => {
+                    let store = crate::web::token::TokenFile::at(&crate::config::Paths::from_env());
+                    match store.clear() {
+                        Ok(()) => {
+                            app.setup.logged_out();
+                            app.web.connection = crate::tui::app::Connection::LoggedOut;
+                        }
+                        Err(e) => app.setup.notice = Some(e.notice()),
+                    }
+                }
+            }
+        }
+        if let Some(rx) = &self.login {
+            let done = match rx.try_recv() {
+                Ok(result) => Some(result),
+                Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    Some(Err("trak: the Spotify login stopped unexpectedly".into()))
+                }
+            };
+            if let Some(result) = done {
+                self.login = None;
+                if result.is_ok() {
+                    app.web.connection = crate::tui::app::Connection::Connected;
+                }
+                app.setup.login_finished(result);
+            }
+        }
+    }
+}
+
+fn spawn_login(client_id: String) -> std::sync::mpsc::Receiver<Result<(), String>> {
+    use crate::web::auth::{Login, MacBrowser, SpotifyEndpoint};
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let store = crate::web::token::TokenFile::at(&crate::config::Paths::from_env());
+        let endpoint = SpotifyEndpoint::default();
+        let result = Login::new(&endpoint, &MacBrowser, &store)
+            .run(
+                &client_id,
+                crate::tui::setup::SCOPES,
+                std::time::SystemTime::now(),
+            )
+            .map(|_| ())
+            .map_err(|e| e.notice());
+        let _ = tx.send(result);
+    });
+    rx
+}
+
+/// Whether there is a token the Web API could be called with. Reads one small
+/// file and does no network, so the UI thread may ask it every frame.
+///
+/// A stale *access* token still counts: it is renewed by [`web_client`] on the
+/// worker. An expired *refresh* token is the one case that is not "just stale":
+/// it is a new login.
+fn web_ready() -> bool {
+    let store = crate::web::token::TokenFile::at(&crate::config::Paths::from_env());
+    store
+        .load()
+        .ok()
+        .and_then(|l| l.token)
+        .is_some_and(|t| !t.refresh_stale(std::time::SystemTime::now()))
+}
+
 /// A Web API client for whatever the token file currently holds, or `None` when
-/// there is nothing to talk to.
+/// there is nothing to talk to. **Blocks on the network when the access token is
+/// stale**, so it is only for the worker; the UI thread asks [`web_ready`].
 ///
 /// Read fresh each time rather than cached: the token can expire under a running
 /// session, and a client holding a dead token is how "search silently stopped
-/// working an hour ago" happens.
+/// working an hour ago" happens. A stale access token is renewed and written back
+/// here, which is what keeps a login from lasting exactly one hour.
 fn web_client() -> Option<SpotifyLibrary> {
+    use crate::web::auth::{Session, SpotifyEndpoint};
     let store = crate::web::token::TokenFile::at(&crate::config::Paths::from_env());
-    let loaded = store.load().ok()?;
+    let token = store.load().ok()?.token?;
     let now = std::time::SystemTime::now();
-    // A token that is stale still has a refresh token, and refreshing is the
-    // caller's business, not this function's. An *expired* refresh token is the
-    // one case that is not "just stale": it is a new login.
-    if loaded.token.as_ref().is_some_and(|t| t.refresh_stale(now)) {
+    if token.refresh_stale(now) {
         return None;
     }
-    Some(SpotifyLibrary::at(
-        crate::web::api::API_BASE,
-        loaded.token.as_ref()?,
-    ))
+    let token = if token.access_stale(now) {
+        let client_id = crate::config::Config::load().ok()?.config.spotify.client_id;
+        let endpoint = SpotifyEndpoint::default();
+        // A refresh that fails leaves `None` here, so the job is dropped rather
+        // than sent with a token Spotify will answer 401.
+        Session::new(&endpoint, &store, &client_id)
+            .access(&token, now)
+            .token()?
+            .clone()
+    } else {
+        token
+    };
+    Some(SpotifyLibrary::at(crate::web::api::API_BASE, &token))
 }
 
 /// Run one Web API job on the worker and turn its answer into an app event.
@@ -741,6 +922,24 @@ fn run_web(job: WebJob) -> Option<crate::player::actions::WorkerResult> {
                 },
             }
         }
+        WebJob::More(what, after) => {
+            let result = match &what {
+                PageWhat::Playlists => client.playlists(Some(&after)).map(PageLoaded::Playlists),
+                PageWhat::Liked => client.liked_tracks(Some(&after)).map(PageLoaded::Liked),
+                PageWhat::LibraryAlbums => client
+                    .saved_albums(Some(&after))
+                    .map(PageLoaded::LibraryAlbums),
+                PageWhat::LibraryArtists => client
+                    .followed_artists(Some(&after))
+                    .map(PageLoaded::LibraryArtists),
+                PageWhat::LibraryRecent => client
+                    .recently_played(Some(&after))
+                    .map(PageLoaded::LibraryRecent),
+                // Only the five top-level lists are paged.
+                _ => return None,
+            };
+            Event::MorePage { what, result }
+        }
         WebJob::PlaylistItems(id) => Event::Page {
             what: PageWhat::PlaylistItems(id.clone()),
             result: client
@@ -773,7 +972,12 @@ fn run_web(job: WebJob) -> Option<crate::player::actions::WorkerResult> {
         }
         // Nothing to send: the check is folded into the like write, which is
         // one request rather than two.
-        WebJob::IsLiked(_) => return None,
+        WebJob::IsLiked(uri) => {
+            return Some(WorkerResult::Web(Event::LikedHere {
+                result: client.is_liked(&uri),
+                uri,
+            }));
+        }
         WebJob::CreatePlaylist(name) => {
             let result = client.create_playlist(&name, false);
             return Some(WorkerResult::Web(Event::WebWrote(result.map(|_| ()))));
@@ -796,26 +1000,38 @@ fn run_web(job: WebJob) -> Option<crate::player::actions::WorkerResult> {
 /// commands, for the same reason. A refused job is not queued for later either --
 /// a search the user has already typed past is not worth sending, and a list they
 /// have left is not worth loading.
-fn submit_web(jobs: Vec<WebJob>, worker: &Worker) {
+/// `false` if any job was not sent, so a caller that marked something "on its
+/// way" can unmark it.
+fn submit_web(jobs: Vec<WebJob>, worker: &Worker) -> bool {
+    let mut all_sent = true;
     for job in jobs {
         // `run_web` needs a client, which needs a token. Without one there is
         // nothing to send and the tab has already said so in its own body.
-        if web_client().is_none() {
+        if !web_ready() {
+            all_sent = false;
             continue;
         }
-        // `run_web` answers `None` only for a job that has nothing to do, and
-        // the worker has to answer with *something*. The something is a Web event
-        // that changes nothing, so a job which turned out to be a no-op cannot
-        // show a stale badge.
+        // `run_web` answers `None` when it has nothing to send -- no client (a
+        // refresh that failed) or a job with no request in it. The worker has to
+        // answer with *something*: a page that was asked for gets its own error
+        // so its "on its way" flag is cleared, and anything else gets `Resize`,
+        // which changes nothing. (Not a landed write: that event re-asks the
+        // like check, and a failing client would then ask every frame.)
+        let fallback = match &job {
+            WebJob::More(what, _) => crate::tui::app::Event::MorePage {
+                what: what.clone(),
+                result: Err(crate::web::api::ApiError::NotConnected),
+            },
+            _ => crate::tui::app::Event::Resize,
+        };
         let accepted = worker.submit(move |_| {
-            run_web(job).unwrap_or(crate::player::actions::WorkerResult::Web(
-                crate::tui::app::Event::WebWrote(Ok(())),
-            ))
+            run_web(job).unwrap_or(crate::player::actions::WorkerResult::Web(fallback))
         });
         if !accepted {
-            break;
+            return false;
         }
     }
+    all_sent
 }
 
 /// What a tab needs the first time it is shown, if anything.

@@ -12,12 +12,122 @@
   <img alt="status: pre-alpha" src="https://img.shields.io/badge/status-pre--alpha-orange">
 </p>
 
-> **Status: pre-alpha.** The CLI works today and is shown below. The TUI, settings screen and
-> visualizer are built in the order set out in [`TODO.md`](TODO.md); this README is rewritten around
-> the shipped product at the end (TODO 11.1). Nothing here is aspirational — every command listed
-> runs against a real Spotify today.
+> **Status: pre-alpha.** Everything below describes what is built and tested. Two parts have not
+> met a real account yet and are marked **unverified**: the Spotify Web API tabs (they need a
+> Client ID and a first live login) and the visualizer reading real audio (it draws a simulated
+> spectrum today). There is no Homebrew release yet; build from source.
 
-## What works now
+**Contents:** [Why Trak](#why-trak) · [Features](#features) · [Install](#install) ·
+[The TUI](#the-tui) · [Version A and B](#version-a-and-b) · [Settings](#settings) ·
+[One-shot commands](#one-shot-commands) · [Permissions](#permissions) ·
+[Works with Sonar and headless-spotify](#made-for-a-headless-setup) · [Credits](#credits)
+
+## Why Trak
+
+- **It controls the app you already have.** Trak talks to the official Spotify desktop app through
+  AppleScript, so the **Free tier works with zero setup** — no account linking, no developer app.
+- **It is a real interface, not just commands.** Now playing, album art in the terminal, synced
+  lyrics, a visualizer, and the whole of [shpotify](https://github.com/hnarayanan/shpotify)'s
+  command set for scripts.
+- **It is polite.** It never launches Spotify as a side effect, writes only in answer to a key you
+  pressed, and coexists with [Sonar](https://github.com/Kathir-D/Sonar) and
+  [headless-spotify](https://github.com/Kathir-D/headless-spotify).
+
+## Features
+
+| | |
+| --- | --- |
+| 🎧 **Now Playing** | title, artist, album, progress bar you can click, volume meter, shuffle and repeat |
+| 🖼 **Album art** | in kitty, iTerm2, sixel or half-block terminals (negotiated at start); the accent colour is taken from the cover |
+| 📜 **Synced lyrics** | from [LRCLIB](https://lrclib.net), follow the song, with a full-screen page on `L` |
+| 📊 **Visualizer** | four styles (`v`), 30 fps while visible. *Simulated spectrum today; real audio is not wired up.* |
+| 🕘 **History and Info** | tracks played this session; everything AppleScript exposes about the current track |
+| ⚙️ **Settings** | `,` or `trak config`: a checklist where changes apply live |
+| 🔎 **Search, playlists, queue, library** | optional, with a Spotify Client ID (**unverified** against a live account) |
+| 🔌 **Plays well with others** | shows Sonar's ducking, detects headless-spotify, never fights either |
+| ⌨️ **shpotify's commands** | `trak play`, `vol`, `status --json` and the rest, for scripts |
+
+## Install
+
+```sh
+git clone https://github.com/Kathir-D/Trak && cd Trak
+cargo build --release
+./target/release/trak            # the TUI
+./target/release/trak status     # one-shot
+```
+
+Needs macOS 14.2 or newer and a recent stable Rust. A Homebrew formula is planned and does not
+exist yet. `cargo test` runs with no Spotify, no network and no audio device.
+
+## The TUI
+
+Run `trak` with no arguments. The layout adapts to the terminal: Now Playing on the left, tabs on
+the right, collapsing to a compact strip when it gets small.
+
+| Key | Action |
+| --- | --- |
+| `space` | play / pause |
+| `n` / `p` | next / previous |
+| `←` `→` or `h` `l` | seek −/+ (5 s, a setting) |
+| `+` `-` | volume ±10 (a setting) |
+| `s` / `r` | shuffle / repeat |
+| `a` / `v` | art ↔ visualizer / next visualizer style |
+| `j` `k` `enter` | move in a list / play the selection |
+| `tab`, `1`–`6` | change tab |
+| `L` | full-screen lyrics |
+| `c` | copy the track's share link |
+| `,` | settings |
+| `?` | every key, in the app |
+| `q` | quit |
+
+With a Client ID there are more: `/` search, `A` add to queue, `f` like the playing track, `o`
+open an artist or album, `P` add to a playlist, `X` remove from the open playlist.
+
+## Version A and B
+
+| | **B** — no setup | **A** — with a Client ID |
+| --- | --- | --- |
+| Needs | the Spotify desktop app | the desktop app **and** a free Spotify developer app |
+| Works on Free | yes | search, library and playlists yes; add-to-queue needs Premium (Spotify's rule) |
+| Now Playing, art, lyrics, visualizer, history, CLI | ✅ | ✅ |
+| Search, playlists, queue, liked songs, library | tabs explain what to add | ✅ *(unverified live)* |
+
+To switch to A: `trak config`, press `s` on the settings screen, and follow the four steps (open
+the dashboard, create an app with the redirect URI `http://127.0.0.1`, paste the Client ID, log
+in). Trak keeps the token in `~/.config/trak/token.json` with mode `0600`; see
+[`SECURITY.md`](SECURITY.md). Spotify's development mode limits an app to a handful of users, so
+each person creates their own.
+
+## Settings
+
+`~/.config/trak/config.toml` (`XDG_CONFIG_HOME` is respected). Unknown keys are ignored, missing
+keys take defaults, and a corrupt file is renamed to `config.toml.bak`.
+
+<details>
+<summary>Every key and its default</summary>
+
+| Section | Key | Values (default first) |
+| --- | --- | --- |
+| `[display]` | `art`, `progress`, `volume`, `popularity`, `key_hints`, `clock`, `side_pane` | `true` / `false` |
+| | `mode` | `art`, `visualizer` |
+| | `default_tab` | `history`, `info`, `lyrics`, `search`, `playlists`, `queue`, `liked`, `library` |
+| | `border` | `rounded`, `sharp`, `double`, `none` |
+| | `accent` | `art`, `green`, `terminal` |
+| | `art_protocol` | `auto`, `kitty`, `iterm2`, `sixel`, `halfblocks` |
+| `[visualizer]` | `style` | `spectrum`, `mirrored`, `waveform`, `circular` |
+| | `source` | `auto`, `simulated` (both draw the simulated spectrum today) |
+| `[input]` | `mouse` | `true`, `false` |
+| | `volume_step`, `seek_step` | `10`, `5` |
+| `[notifications]` | `song_change` | `false`, `true` |
+| `[lyrics]` | `enabled` | `true`, `false` |
+| `[spotify]` | `client_id` | `""` (Version B) |
+
+</details>
+
+`NO_COLOR=1` removes colour from the TUI and the CLI; terminals without 24-bit colour get the
+nearest 256- or 16-colour approximation.
+
+## One-shot commands
 
 ```sh
 trak status                 # a card of what is playing
@@ -31,9 +141,9 @@ Jane Remover · Census Designated
 volume 100
 ```
 
-On a terminal that also gets a progress bar and a volume meter, and the artist's
-name in bold. Piped or redirected, the same command prints clean text with no
-escape codes — so `trak status | cat` is safe to put in a script.
+On a terminal that also gets a progress bar and a volume meter, and the artist's name in bold.
+Piped or redirected, the same command prints clean text with no escape codes — so
+`trak status | cat` is safe to put in a script.
 
 ### Every command
 
@@ -89,16 +199,6 @@ trak status --json
 {"state":"▶","title":"Census Designated","artist":"Jane Remover","album":"Census Designated","album_artist":"Jane Remover","uri":"spotify:track:6HacgXCExkzS552ILfJTXu","duration_ms":360511,"position_secs":95.196,"volume":100,"shuffling":false,"repeating":true,"popularity":48,"track_number":8,"disc_number":1,"artwork_url":"https://i.scdn.co/image/ab67616d0000b2738a821784ac3e69e691d4945f","is_ad":false}
 ```
 
-## Coming next
-
-- The TUI: `trak` on its own, with a Now Playing pane, session history, track
-  details and synced lyrics, adapting to the terminal size.
-- Album art with true colour in terminals that support it.
-- A live visualizer, with a simulated fallback so it works with no permission
-  prompt.
-- `trak config` for settings.
-- Optional Spotify Client ID, which unlocks search, playlists, queue and library.
-
 ## Permissions
 
 The first AppleScript call asks your terminal for permission to control Spotify.
@@ -118,16 +218,6 @@ and auto-pause) and [headless-spotify](https://github.com/Kathir-D/headless-spot
 (Spotify with no Dock icon). The contract Trak keeps with both is written down in
 [`docs/COMPAT.md`](docs/COMPAT.md) and the details that are easy to get wrong are
 measured in [`docs/APPLESCRIPT.md`](docs/APPLESCRIPT.md).
-
-## Building from source
-
-```sh
-cargo build --release
-./target/release/trak status
-```
-
-Needs macOS 14.2 or newer. `cargo test` runs with no Spotify, no network and no
-audio device.
 
 ## For contributors and agents
 

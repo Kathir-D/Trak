@@ -67,11 +67,13 @@ It is one piece of the owner's music setup, alongside two sibling projects in `.
 **headless-spotify** (hides Spotify from the Dock) and **Sonar** (menu-bar skip/prev + auto-pause).
 Trak must coexist with both. That contract is `docs/COMPAT.md` and is non-negotiable.
 
-**Status:** pre-alpha, and further along than it looks. Phases 1–6 are done: the player layer and
-the full shpotify CLI, the TUI, album art and the accent extracted from it, config and the settings
-screen, and synced lyrics with a full-screen page. Phase 7 (the Web API, "Version A") has its client,
-token store and tabs built but is not finished. `TODO.md` is the truth, and every ticked box carries
-a note about the decisions behind it — read those notes, not just the boxes.
+**Status:** pre-alpha, and further along than it looks. Phases 1–7 are done (player layer and the
+full shpotify CLI, the TUI, art and accent, config and settings, synced lyrics, and the Web API
+tabs with the guided setup). What remains is what needs the owner's Mac or a live account: the real
+audio tap (8.3/8.5), the Homebrew release (9.4–9.8), the Sonar/headless compatibility matrix
+(phase 10), and screenshots/polish (11.x). The Web API half has **never met a real account**:
+treat it as unverified. `TODO.md` is the truth, and every ticked box carries a note about the
+decisions behind it — read those notes, not just the boxes. `CONTINUATION.md` has the handover.
 
 ## Start here (read in this order)
 

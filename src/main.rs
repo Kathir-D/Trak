@@ -162,7 +162,10 @@ enum PlayWhat {
 const VOLUME_STEP: u8 = 10;
 
 fn style(plain: bool) -> Style {
-    if plain || !std::io::stdout().is_terminal() {
+    // `NO_COLOR` (no-color.org) is a request for no colour from any program, and
+    // the plain style is the one without it (TODO 11.6).
+    let no_color = std::env::var("NO_COLOR").is_ok_and(|v| !v.is_empty());
+    if plain || no_color || !std::io::stdout().is_terminal() {
         Style::Plain
     } else {
         Style::Tidy

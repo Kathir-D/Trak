@@ -586,7 +586,7 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
       warn before expiry, and treat an invalid refresh token as "discard and re-login", not as an
       error state. Needs: 7.1. Done when: unit tests with a mock token endpoint; **[owner]** completes
       a real login once.
-- [ ] 7.3 **Guided setup in `trak config`**: screen with numbered steps — open
+- [x] 7.3 **Guided setup in `trak config`**: screen with numbered steps — open
       `https://developer.spotify.com/dashboard` (via `open`), create an app, add the exact redirect URI
       shown (copyable), paste the Client ID (validate shape), press enter → browser login → success
       screen. `Log out` clears the token. > **The redirect URI to display and copy is exactly
@@ -596,6 +596,18 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
       `http://127.0.0.1:<port>/callback` if not. Done when: every step has an on-screen explanation
       and errors (bad ID, denied consent, port busy) are handled with retry. **[owner]** walks
       through it once.
+      > Done: `s` in the settings screen (heading `Spotify API` says so) opens `tui/setup.rs`, a
+      > pure state machine (`Setup::handle` -> `Effect`s) that `loop_.rs`'s `SetupRunner` carries
+      > out: open the dashboard / copy the URI (`pbcopy`) / save the config / log in on its own
+      > thread / delete the token. Client ID is validated as 32 hex digits and a bad paste stays in
+      > the input with the reason; a failed login (denied, port busy, timeout) shows the notice and
+      > `enter` retries; a second login cannot start while one waits. **Found while wiring it:
+      > nothing set `app.web.connection` at startup**, so no Web API tab could ever have loaded;
+      > `connection_at_start` now derives it from the config and token file. The TUI also
+      > never refreshed a stale *access* token, so a login would have died after ~1 h:
+      > `web_client()` (worker only) now renews and saves it via `Session::access`, and the UI
+      > thread asks the no-network `web_ready()` instead. `esc` while the browser is open closes the panel but
+      > cannot cancel the wait; it ends at the login timeout. **[owner]** walk through it once.
 - [x] 7.4 **Token storage**: the `0600` file decided in 1.8 (`~/.config/trak/token.json`, `XDG_CONFIG_HOME`
       respected, directory `0700`, atomic temp-then-rename write). **Refuse to read a token whose mode
       is looser than `0600`** rather than proceeding, and assert that in a test. Never logged, never in
@@ -619,32 +631,69 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
       one-liner; distinguish `"reason": "QUOTA_EXCEEDED"` in the body. 403: two real causes — Premium
       (queue) and an account not on the app's 5-user allowlist. Map both to friendly typed errors.
       Needs: 7.1. Done when: fixture-driven tests, no live network.
-- [ ] 7.6 **Search tab**: `/` focuses the input, live results debounced (~250 ms), grouped Tracks /
+- [x] 7.6 **Search tab**: `/` focuses the input, live results debounced (~250 ms), grouped Tracks /
       Albums / Artists / Playlists, `Tab` jumps groups, `enter` plays (AppleScript `play track "<uri>"`,
       so it works on Free), `A` queues, `o` opens the artist/album page. Done when: update() tests
       with `FakeLibrary`; snapshot tests; stale responses never overwrite newer ones.
-- [ ] 7.7 **Playlists tab** (list, open, play, tracklist) and **Liked tab** (list, play from here,
+      > The tab, keys, grouping and stale-response drop were already built; **the live search
+      > itself never fired** — `search_debounce` was reset on keys but nothing advanced it. `Event::Tick`
+      > now counts it (only while the box has focus, connected, not already searching, and the
+      > query is neither blank nor the one on screen) and the loop sends the job (it used to
+      > discard a tick's `web` jobs). `[`/`]` jump groups, not `Tab` (SPEC §4). **[owner]**: type in
+      > Search with a real login and watch results appear ~0.3 s after you pause.
+- [x] 7.7 **Playlists tab** (list, open, play, tracklist) and **Liked tab** (list, play from here,
       `f` toggles like on the current track). > Field rename: playlist `tracks` → **`items`**
       (`items.items.item`), and `items` is **only present for playlists the user owns or collaborates
       on** — no feature may promise to show any playlist's tracks. > `f` is `PUT`/`DELETE
       `/me/library` and the liked check is `GET /me/library/contains`, not `/me/tracks`. > **Playlist
       item read/write is unverified in dev mode** (docs contradict themselves) — confirm here with a
       real login and degrade cleanly if it 403s. Done when: tests + manual.
-- [ ] 7.8 **Queue tab** (now playing + up next) and add-to-queue (`A`). > `POST /me/player/queue`
+      > Lists, open, play and `f` were built; **nothing ever asked the server whether the playing
+      > track is liked**, so `liked_here` stayed blank and `f` could only ever send a like. The
+      > loop now asks once per track (`WebState::next_liked_check` -> `WebJob::IsLiked` ->
+      > `Event::LikedHere`, dropped if the track changed) and re-asks after any landed write.
+      > **[owner]** with a real login: confirm the heart matches the app, and whether playlist
+      > items 403 in dev mode (the tab must degrade, not crash).
+- [x] 7.8 **Queue tab** (now playing + up next) and add-to-queue (`A`). > `POST /me/player/queue`
       is **Premium-only by Spotify's own documentation**; `GET /me/player/queue` is not. A 403 on add
       is the expected Free-tier path, not an error. `User.product` no longer exists, so Premium
       cannot be detected up front — rely on the 403. Done when: works or shows the clear Premium
       message; tests.
-- [ ] 7.9 **Library tab**: saved albums, followed artists, recently played. Done when: paginated
+      > Audited: tab, `A`, lazy load and the typed Premium 403 (`ApiError::PremiumOnly`) were all
+      > built and tested. Added: a landed write empties the cached queue so the tab refetches on
+      > its next visit and shows the track just added. **[owner]**: add to queue on Free to see
+      > the Premium line.
+- [x] 7.9 **Library tab**: saved albums, followed artists, recently played. Done when: paginated
       lists load lazily; tests.
-- [ ] 7.10 **Artist page** and **album page** (tracklist, play from track). Back with `esc`. >
+      > The three Library lists loaded their first page and stopped: **every fetch passed `None`
+      > for the continuation**, so "more ↓" was drawn and unreachable, for Playlists and Liked as
+      > well. `WebState::next_more` now asks for the next page when the cursor is within
+      > `MORE_AHEAD` (5) rows of the end of the list on screen (`WebJob::More` ->
+      > `Event::MorePage`, appended). A failed page gives up on the rest with a toast rather than
+      > retrying every frame; a not-sent page unmarks itself. Also fixed on the way: `submit_web`'s
+      > no-op fallback was `WebWrote(Ok)`, which now re-asks the like check and would have looped on
+      > a failing client — it is `Resize` now. Opened pages (playlist items, artist albums, album
+      > tracks) are still one request each.
+- [x] 7.10 **Artist page** and **album page** (tracklist, play from track). Back with `esc`. >
       **Albums only — `GET /artists/{id}/top-tracks` was removed in dev mode with no replacement**, so
       the top-tracks half of this task is dead. `GET /artists/{id}/albums` still works. SPEC §6 is
       updated. Done when: navigation stack tests; manual.
-- [ ] 7.11 **Playlist editing**: add current/selected track to a playlist (picker), remove from a
+      > Audited: `o` opens, `esc` walks the stack (`escape_walks_the_navigation_stack`), `enter` on
+      > a track row plays it (`PlayUri`); an artist page lists albums only. Nothing to add.
+- [x] 7.11 **Playlist editing**: add current/selected track to a playlist (picker), remove from a
       playlist, create playlist. > Use `POST`/`DELETE /me/playlists/{id}/items` (the `/tracks`
       variants are removed), and `POST /me/playlists` to create. Same unverified-in-dev-mode caveat as
       7.7. Done when: confirmation on destructive actions; tests with fakes.
+      > The three write jobs and the client calls existed; **no key reached them**. Now: `P` opens
+      > a picker (`PlaylistEdit::Pick`) for the selected track, or the playing one when the cursor
+      > is not on a track, and fetches the playlist list if it was never loaded; `n` in the picker
+      > names and creates a private playlist; `X` in an open playlist asks `y`/`n` before removing
+      > (the row leaves the list at once, a failed write toasts). The modal owns the keyboard, so
+      > `space`/`n`/`p` there are answers, not transport keys. A playlist with no `items` (not
+      > yours) is shown read-only and refused with a toast rather than sent to 403. Keys are in
+      > SPEC §4 and the `?` overlay (its height clamp went 24 -> 28 to fit two rows). **[owner]**
+      > with a real login: add, create and remove once, and report whether dev mode 403s the item
+      > writes (the caveat is unchanged).
 - [x] 7.12 **`trak play <song|album|artist|list>`** (finish 2.7) using search; pick the best match
       like shpotify; print what it chose. Done when: `assert_cmd` tests with `FakeLibrary`.
       > The pick is shpotify's first-result rule plus one tiebreak: the first row whose
@@ -663,8 +712,12 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
       > cannot report a coin flip: `play list` was a random row out of ten, and `play uri` was
       > not silent (`Playing Spotify URI: …`). The setup message quotes back the spelling that
       > was typed, so `trak play album x` is not told to run `trak play "x"`.
-- [ ] 7.13 **Tab order and default tab for A**, plus the B-mode hint that a Client ID unlocks these.
+- [x] 7.13 **Tab order and default tab for A**, plus the B-mode hint that a Client ID unlocks these.
       Done when: SPEC §3 matches the built UI (update the doc if the order changed).
+      > Built order already matched the SPEC's list (`Tab::ALL`, digits 1-6, History/Info via
+      > `Tab`, `default_tab` = history). What differed was the *B-mode* wording: SPEC said B has
+      > three tabs, but the build draws one strip of eight and the Web tabs carry the Client ID
+      > notice. SPEC §3 now says what is built, and why (one strip, one meaning for `1`-`6`).
 
 ---
 
@@ -792,11 +845,27 @@ Requires Sonar installed and running (`brew install --cask kathir-d/tap/sonar`) 
       Needs: phases 3–8 built enough to screenshot. Done when: the README renders well on GitHub in
       light and dark mode (check both), all links work (`lychee` or manual), and an outsider can
       install and use Trak from it alone.
+      > **Partly done (left unticked).** README rewritten around the shipped product: status note
+      > that names what is *unverified* (Web API live, real-audio visualizer), contents list, Why
+      > Trak, feature table, install (source only: no formula exists), TUI key table, A vs B table,
+      > settings in a `<details>`, `NO_COLOR`, CLI reference kept, permissions, Sonar/headless,
+      > credits; relative links checked. **Not done:** the hero demo GIF (needs a real terminal),
+      > release/Homebrew badges (no release yet), `docs/README-NOTES.md` (it asks for a study of
+      > 6–8 external READMEs, which was not done), and the light/dark GitHub render check.
+      > **[owner] privacy:** `docs/images/tui-6.4-fullscreen.png` is a whole-desktop screenshot
+      > (other windows, an API-key page) and is deliberately **not** referenced in the README;
+      > consider removing it from the repo and re-shooting just the terminal window.
 - [ ] 11.2 Record the demo GIF/screenshots: Version B, Version A, visualizer styles, settings screen,
       full-screen lyrics. Done when: images committed and referenced.
 - [ ] 11.3 GitHub repo polish: description, topics (`spotify`, `tui`, `rust`, `ratatui`, `macos`,
       `homebrew`, `terminal`), social preview image, `CONTRIBUTING.md`, issue templates,
       `SECURITY.md` (token handling note), `CODE_OF_CONDUCT.md` optional.
+      > Files written: `CONTRIBUTING.md`, `SECURITY.md` (token handling, checked against
+      > `web/token.rs` and `web/auth.rs`), `.github/ISSUE_TEMPLATE/{bug_report,feature_request}.md`
+      > and `config.yml`. **[owner]** (needs repo admin, not available to an agent session): set the
+      > description and topics (`spotify`, `tui`, `rust`, `ratatui`, `macos`, `homebrew`,
+      > `terminal`), upload the social preview, enable *private vulnerability reporting* so the
+      > SECURITY.md link works. Left unticked until those are done.
 - [ ] 11.4 Add a "Works with Trak" mention in Sonar's and headless-spotify's READMEs (their agents do
       this via prompts 1 and 2). Confirm the three READMEs cross-link.
 - [ ] 11.5 Performance and battery pass: idle CPU < 1 % with the visualizer off and < ~5 % on;
@@ -804,6 +873,13 @@ Requires Sonar installed and running (`brew install --cask kathir-d/tap/sonar`) 
 - [ ] 11.6 Accessibility / robustness pass: works with `NO_COLOR`, 16-colour terminals, light
       themes, very small and very large terminals, non-ASCII titles, right-to-left text does not break
       layout.
+      > Done in code: `NO_COLOR` (CLI -> plain; TUI strips fg/bg per frame, keeps reverse/bold),
+      > RGB downgraded to 256/16 colours by `COLORTERM`/`TERM` (`tui/colour.rs`, applied once on the
+      > finished buffer, so no widget knows), a draw sweep over CJK / RTL / emoji / combining / 500-char
+      > titles x every tab x 1x1..250x70 never panics, and the setup panel has the same too-small floor
+      > as the checklist. **Not verifiable here — [owner]:** a *light-background* theme (dim text may
+      > be hard to read), real RTL rendering order in cmux, and `NO_COLOR=1 trak` in a real terminal.
+      > Kept open until those are looked at.
 - [ ] 11.7 Final read-through of `AGENTS.md`, `CLAUDE.md`, and the docs so they match the shipped
       product; remove stale TODOs.
 

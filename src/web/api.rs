@@ -337,6 +337,15 @@ pub struct Playlist {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Continuation(String);
 
+#[cfg(test)]
+impl Continuation {
+    /// A continuation for a test that needs a list with more to come. Real ones
+    /// only come back from a response, which is the point of the private field.
+    pub fn for_test(token: &str) -> Self {
+        Self(token.to_string())
+    }
+}
+
 /// One page of a list, and the continuation that follows it.
 ///
 /// `next: None` is the end of the list. Every paged method takes

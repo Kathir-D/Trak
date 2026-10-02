@@ -77,13 +77,17 @@ Rules:
   to the compact strip (title, artist, progress, controls).
 - **Art vs visualizer** is a toggle (`a`). When the visualizer is shown there is **no art anywhere**,
   but the accent colour still comes from the cover (fetch it invisibly).
-- **Version B** right-pane tabs: `[1] History`, `[2] Info`, `[3] Lyrics`.
+- **Right-pane tabs** are one strip in both versions (built in 7.13; the earlier "B has three,
+  A has six" wording was dropped because a second strip is a second place for `1`-`6` to mean
+  different things): `[1] Search`, `[2] Playlists`, `[3] Queue`, `[4] Liked`, `[5] Library`,
+  `[6] Lyrics`, then `History` and `Info`, reachable with `Tab` and not numbered. `default_tab`
+  (config) picks the one shown at start; the default is `history`, which works with no Client ID.
   - History: tracks played this session. `↑/↓`/`j/k` to move, `enter` plays it again (by URI).
   - Info: everything AppleScript exposes (see section 5).
-- **Version A** right-pane tabs: `[1] Search`, `[2] Playlists`, `[3] Queue`, `[4] Liked`,
-  `[5] Library`, `[6] Lyrics`, plus `History` and `Info` reachable via `Tab`. Exact tab order is a
-  tab-order task (TODO 7.13), but all of these must exist.
-- Version B shows a one-line hint that a Client ID unlocks more (`trak config`).
+  - The five Web API tabs are drawn in Version B too, so the layout never changes shape when a
+    Client ID is added: each one opens with a one-line notice (`Connection::notice`) saying what
+    is missing and where to fix it (`trak config`, then `s` for the guided setup), and is otherwise
+    empty. (The first-ever launch also shows the one-time hint about `,` and the Client ID.)
 - Spotify not running: centered idle card, `enter` launches it in the background.
 
 ## 4. Keys
@@ -111,6 +115,8 @@ Rules:
 | `f` | Like / unlike current track ("favourite"; `l` is seek-right) | A |
 | `A` (shift-a) | Add selected to queue | A |
 | `o` | Open artist or album page of the selection | A |
+| `P` (shift-p) | Add the selected (or playing) track to a playlist; `n` in the picker makes a new one | A |
+| `X` (shift-x) | Remove the selected track from the open playlist (asks `y`/`n`) | A |
 | `esc` | Back / close overlay | both |
 
 Keep this table and the `?` help overlay in sync.
@@ -252,6 +258,13 @@ trak toggle shuffle|repeat
 `play <song>` etc. need search, so they need a Client ID (shpotify needed one too). Without it,
 print a friendly explanation and how to get one; exit code 2. Exit codes: 0 ok, 1 runtime failure,
 2 usage / missing setup. Never launch Spotify from a one-shot command (see COMPAT).
+
+**Colour.** `NO_COLOR` set to anything non-empty (<https://no-color.org>) means no colour in the CLI
+(same as `--plain`) and none in the TUI: foreground and background colours are stripped from every
+frame, while bold, dim and reverse stay (the cursor row is reverse). Without 24-bit support
+(`COLORTERM` not `truecolor`/`24bit`) RGB colours are mapped to the 256 palette when `TERM` says
+`256color`/kitty/ghostty, and to the 16 named colours otherwise (`tui/colour.rs`). Album art is a
+picture, not a text colour, and is governed by `[display] art`.
 
 ## 10. Open questions
 

@@ -25,7 +25,7 @@
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use crate::tui::app::{App, LibrarySection, Open, Tab};
+use crate::tui::app::{App, LibrarySection, Open, PlaylistEdit, Tab};
 use crate::tui::theme::Theme;
 use crate::web::api::{Page, Queue, SearchResults};
 
@@ -38,6 +38,10 @@ const GROUPS: [&str; 4] = ["Tracks", "Albums", "Artists", "Playlists"];
 /// The lines for whichever Web API tab is showing. Called from `render.rs` in
 /// place of the History/Info/Lyrics lines.
 pub fn lines(app: &App, theme: &Theme) -> Vec<Line<'static>> {
+    // The playlist modal replaces the body, like an opened page does (7.11).
+    if let Some(edit) = &app.web.edit {
+        return edit_lines(app, theme, edit);
+    }
     let mut out = Vec::new();
     if let Some(notice) = app.web.connection.notice() {
         // First, bold, and in the tab itself. `update` toasts this too, but a
@@ -219,6 +223,56 @@ fn playlist_lines(app: &App) -> Vec<Line<'static>> {
         ));
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// Playlist editing (7.11)
+// ---------------------------------------------------------------------------
+
+/// What the modal says. Plain lines so a test can read them.
+fn edit_lines(app: &App, theme: &Theme, edit: &PlaylistEdit) -> Vec<Line<'static>> {
+    let bold = theme.accent_style().add_modifier(Modifier::BOLD);
+    match edit {
+        PlaylistEdit::Pick { uri, cursor } => {
+            let what = app
+                .track()
+                .filter(|t| t.uri.as_deref() == Some(uri.as_str()))
+                .map(|t| format!("{} — {}", t.artist, t.title))
+                .unwrap_or_else(|| "the selected track".to_string());
+            let mut out = vec![
+                Line::from(Span::styled(format!("Add {what} to which playlist?"), bold)),
+                hint("  enter adds · n makes a new playlist · esc cancels"),
+                Line::from(""),
+            ];
+            let page = &app.web.playlists;
+            if page.items.is_empty() {
+                out.push(hint("  loading your playlists... (or n to make the first)"));
+            }
+            for (i, p) in page.items.iter().enumerate() {
+                let text = if p.contents.is_some() {
+                    p.to_string()
+                } else {
+                    format!("{p}  (not yours — read only)")
+                };
+                out.push(row_line(&text, i == *cursor));
+            }
+            out
+        }
+        PlaylistEdit::Name(text) => vec![
+            Line::from(Span::styled("New playlist name", bold)),
+            Line::from(format!("  {text}▏")),
+            Line::from(""),
+            hint("  enter creates it (private) · esc cancels"),
+        ],
+        PlaylistEdit::ConfirmRemove { playlist_name, .. } => vec![
+            Line::from(Span::styled(
+                format!("Remove this track from \"{playlist_name}\"?"),
+                bold,
+            )),
+            Line::from(""),
+            hint("  y removes it · n or esc keeps it"),
+        ],
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1381,5 +1435,43 @@ mod tests {
             ("an artist page".to_string(), artist),
             ("an album page".to_string(), album),
         ]
+    }
+
+    /// 7.11: the modal replaces the tab body and says what each key does.
+    #[test]
+    fn the_playlist_modal_says_what_it_is_asking() {
+        let mut app = app_on(Tab::Liked);
+        app.web.playlists = Page {
+            items: vec![],
+            next: None,
+        };
+        app.web.edit = Some(PlaylistEdit::Pick {
+            uri: "u".into(),
+            cursor: 0,
+        });
+        let text = shown(&app);
+        assert!(
+            text.contains("to which playlist?") && text.contains("n makes a new"),
+            "{text}"
+        );
+        assert!(text.contains("loading your playlists"), "{text}");
+
+        app.web.edit = Some(PlaylistEdit::Name("Road".into()));
+        let text = shown(&app);
+        assert!(
+            text.contains("Road▏") && text.contains("esc cancels"),
+            "{text}"
+        );
+
+        app.web.edit = Some(PlaylistEdit::ConfirmRemove {
+            playlist: "p".into(),
+            playlist_name: "Gym".into(),
+            uri: "u".into(),
+        });
+        let text = shown(&app);
+        assert!(
+            text.contains("Remove this track from \"Gym\"?") && text.contains("y removes"),
+            "{text}"
+        );
     }
 }

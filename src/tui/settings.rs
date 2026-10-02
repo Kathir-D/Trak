@@ -59,6 +59,10 @@ const MIN_HEIGHT: u16 = 8;
 /// every other keypress.
 const LOOKAHEAD: usize = 2;
 
+/// The group the guided Spotify setup belongs to, and what its heading says.
+const SPOTIFY_GROUP: &str = "Spotify API";
+const HINT_SETUP: &str = "  ·  s: guided setup";
+
 thread_local! {
     /// The line being typed into, or `None` when the screen is not in text mode.
     ///
@@ -88,6 +92,10 @@ pub fn open(app: &mut App) {
 /// their vim equivalents (`loop_.rs`'s `char_for`), so `h`/`l` is `←`/`→` and
 /// `j`/`k` is `↓`/`↑` and one match covers both.
 pub fn key(app: &mut App, c: char) {
+    if app.setup.open {
+        crate::tui::setup::key(app, c);
+        return;
+    }
     if is_typing() {
         type_key(app, c);
         return;
@@ -99,6 +107,10 @@ pub fn key(app: &mut App, c: char) {
         'h' => change(app, Way::Left),
         'l' => change(app, Way::Right),
         '\n' => begin_typing(app),
+        's' | 'S' => {
+            let connected = app.web.connection.connected();
+            app.setup.open(&app.config.spotify.client_id, connected);
+        }
         // `Q` as well as `q`, because that is what every other screen in trak
         // takes, and a user with caps lock on expects `q` to close this too.
         'q' | 'Q' | '\x1b' => save_and_close(app, &config_path()),
@@ -109,6 +121,10 @@ pub fn key(app: &mut App, c: char) {
 /// Draw the screen. The area is the caller's: the whole frame for `trak config`,
 /// and a rectangle over the dashboard for `,`.
 pub fn render(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+    if app.setup.open {
+        crate::tui::setup::render(f, area, app, theme);
+        return;
+    }
     if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
         f.render_widget(
             Paragraph::new("terminal too small — resize")
@@ -767,7 +783,17 @@ fn hints(width: usize, typing: bool) -> String {
 fn line_for(item: &Item, app: &App, theme: &Theme) -> Line<'static> {
     match item {
         Item::Group(name) => {
-            Line::from(*name).patch_style(theme.accent_style().add_modifier(Modifier::BOLD))
+            let mut spans = vec![Span::styled(
+                *name,
+                theme.accent_style().add_modifier(Modifier::BOLD),
+            )];
+            // The guided setup (TODO 7.3) has no row of its own, and the hints
+            // row has no room for another key, so the heading it belongs to says
+            // how to reach it.
+            if *name == SPOTIFY_GROUP {
+                spans.push(Span::styled(HINT_SETUP, Theme::dim()));
+            }
+            Line::from(spans)
         }
         Item::Row { index, row } => {
             let (label, _) = *row;
@@ -1113,7 +1139,7 @@ mod tests {
             "│control          spotify                                          │\n",
             "│Notifications                                                     │\n",
             "│song_change      off                                              │\n",
-            "│Spotify API                                                       │\n",
+            "│Spotify API  ·  s: guided setup                                   │\n",
             "│client_id        not set                                          │\n",
             "│ space toggle  ←/→ change  enter edit  j/k move  q save & close   │\n",
             "╰──────────────────────────────────────────────────────────────────╯",

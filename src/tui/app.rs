@@ -17,7 +17,9 @@ use crate::player::actions::{CommandOutcome, PlayerCommand};
 use crate::player::{PlaybackState, PlayerState, RepeatMode, TrackInfo};
 use crate::tui::theme::{Accent, Border};
 use crate::visualizer::AudioSource;
-use crate::web::api::{Album, Artist, Page, Playlist, Queue, SearchResults, Track, TrackItem};
+use crate::web::api::{
+    Album, Artist, Continuation, Page, Playlist, Queue, SearchResults, Track, TrackItem,
+};
 
 /// A track played this session. Session-only, cleared on exit (SPEC §2).
 #[derive(Debug, Clone, PartialEq)]
@@ -184,8 +186,19 @@ pub enum Event {
         what: PageWhat,
         result: Result<PageLoaded, crate::web::api::ApiError>,
     },
+    /// The next page of a list tab loaded, to be appended to what is shown.
+    MorePage {
+        what: PageWhat,
+        result: Result<PageLoaded, crate::web::api::ApiError>,
+    },
     /// The queue loaded (7.8).
     Queue(Result<Queue, crate::web::api::ApiError>),
+    /// Whether the playing track is liked (7.7). `uri` is what was asked, so an
+    /// answer about a track that has since changed is dropped.
+    LikedHere {
+        uri: String,
+        result: Result<bool, crate::web::api::ApiError>,
+    },
     /// A write to the library landed or did not (7.7's `f`, 7.8's `A`).
     WebWrote(Result<(), crate::web::api::ApiError>),
     /// The connection state changed, from the token store or from a login.
@@ -378,6 +391,25 @@ pub enum WebJob {
     },
     /// Whether the playing track is liked, which is `GET /me/library/contains`.
     IsLiked(String),
+    /// The page of a list tab after the one on screen (7.9).
+    More(PageWhat, Continuation),
+}
+
+/// A modal over the Web tabs for editing a playlist (7.11). One at a time, and
+/// while one is up it owns the keyboard, because `y` and `n` there are answers
+/// rather than the transport keys they are everywhere else.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PlaylistEdit {
+    /// Choosing which playlist to add a track to.
+    Pick { uri: String, cursor: usize },
+    /// Typing the name of a new playlist.
+    Name(String),
+    /// Waiting for `y` before a track leaves a playlist. Destructive, so it asks.
+    ConfirmRemove {
+        playlist: String,
+        playlist_name: String,
+        uri: String,
+    },
 }
 
 /// Which volume trak changes (TODO 4.4, R2).
@@ -429,6 +461,14 @@ pub struct WebState {
     pub library: LibrarySections,
     pub queue: Queue,
     pub liked_here: Option<bool>,
+    /// The track `liked_here` was last asked about, so one track is one check
+    /// rather than one per frame.
+    pub liked_checked: Option<String>,
+    /// The playlist-editing modal, if one is up (7.11).
+    pub edit: Option<PlaylistEdit>,
+    /// A next page is on its way, so the cursor sitting near the end does not
+    /// ask for the same page every frame.
+    pub loading_more: bool,
 
     // -- The pages you open something into (7.10)
     /// A navigation stack, so `esc` from an album inside an artist returns to the
@@ -566,6 +606,9 @@ impl Default for WebState {
             library: LibrarySections::default(),
             queue: Queue::default(),
             liked_here: None,
+            liked_checked: None,
+            loading_more: false,
+            edit: None,
             pages: Vec::new(),
             open: None,
             open_tracks: Vec::new(),
@@ -658,6 +701,11 @@ impl Page_ {
         }
     }
 }
+
+/// How many rows from the end of a list the cursor is when the next page is
+/// asked for (TODO 7.9). Five is a screenful of lead: the page lands before the
+/// cursor reaches the bottom, so the list never visibly stops.
+pub const MORE_AHEAD: usize = 5;
 
 /// How long a keystroke waits before a search goes out (TODO 7.6).
 ///
@@ -1048,6 +1096,8 @@ pub struct App {
     pub settings_open: bool,
     /// Which row of the settings overlay has the cursor (TODO 5.2).
     pub settings_cursor: usize,
+    /// The guided Spotify setup panel inside the settings screen (TODO 7.3).
+    pub setup: crate::tui::setup::Setup,
     /// The visualizer's bars and where they come from (TODO 8.4). The source is
     /// seeded from the track so a new song visibly looks different, and the
     /// spectrum is kept on the app because the render path must not block.
@@ -1112,6 +1162,7 @@ impl App {
             hint: None,
             settings_open: false,
             settings_cursor: 0,
+            setup: crate::tui::setup::Setup::default(),
             // Seeded from the clock rather than a constant so two trak processes
             // do not draw in lockstep, and so a snapshot test can pin it.
             viz: crate::visualizer::SimulatedSource::new(0),
@@ -1291,6 +1342,25 @@ pub fn update(mut app: App, event: Event) -> Updated {
             // A command in flight is still running. Do not stack a poll behind it
             // or the queue grows without bound.
             app.poll_due = app.busy.is_none();
+            // The live search (7.6): once the typing has paused for the debounce,
+            // send what is in the box. Only while it has focus -- enter and
+            // escape have already said what to do with it -- and never for a
+            // query that is already on screen or already on its way, because
+            // the quota is per developer account.
+            let w = &mut app.web;
+            if w.search_focus
+                && w.connection.connected()
+                && !w.searching
+                && !w.query.trim().is_empty()
+                && w.query.trim() != w.search_shown
+            {
+                w.search_debounce += 0.1;
+                if w.search_debounce >= SEARCH_DEBOUNCE_SECS {
+                    w.search_debounce = 0.0;
+                    w.searching = true;
+                    web.push(WebJob::Search(w.query.trim().to_string()));
+                }
+            }
         }
 
         Event::Searched { for_query, result } => {
@@ -1316,10 +1386,36 @@ pub fn update(mut app: App, event: Event) -> Updated {
             Err(e) => app.toast(e.notice()),
         },
 
+        Event::MorePage { what, result } => {
+            app.web.loading_more = false;
+            match result {
+                Ok(loaded) => append_page(&mut app, loaded),
+                Err(e) => {
+                    // The rest of the list is given up rather than retried: a
+                    // failing page asked for every frame is a request storm
+                    // against a per-account quota.
+                    drop_continuation(&mut app, what);
+                    app.toast(e.notice());
+                }
+            }
+        }
+
         Event::Queue(result) => match result {
             Ok(q) => app.web.queue = q,
             Err(e) => app.toast(e.notice()),
         },
+
+        Event::LikedHere { uri, result } => {
+            let playing = app.track().and_then(|t| t.uri.clone());
+            if playing.as_deref() == Some(uri.as_str()) {
+                match result {
+                    Ok(liked) => app.web.liked_here = Some(liked),
+                    // Not a toast: this runs on every track change, and a
+                    // failing check should not talk over the music every song.
+                    Err(_) => app.web.liked_here = None,
+                }
+            }
+        }
 
         Event::WebWrote(result) => {
             if let Err(e) = result {
@@ -1328,6 +1424,11 @@ pub fn update(mut app: App, event: Event) -> Updated {
                 // The write landed, so the check is stale: re-read it rather than
                 // leaving the row saying the old thing.
                 app.web.liked_here = None;
+                app.web.liked_checked = None;
+                // An add-to-queue is a write too, and the Queue tab is lazy: an
+                // emptied queue is fetched again the next time it is shown, so
+                // the track just added is there rather than hiding until restart.
+                app.web.queue = Queue::default();
             }
         }
 
@@ -1524,6 +1625,108 @@ fn web_search_key(app: &mut App, c: char, web: &mut Vec<WebJob>) {
     }
 }
 
+/// One key while the playlist modal is up (7.11).
+fn web_edit_key(app: &mut App, c: char, web: &mut Vec<WebJob>) {
+    let Some(edit) = app.web.edit.take() else {
+        return;
+    };
+    // Put back unless the key finished or cancelled it.
+    app.web.edit = match edit {
+        PlaylistEdit::Pick { uri, cursor } => {
+            let len = app.web.playlists.items.len();
+            match c {
+                '\x1b' => None,
+                'j' => Some(PlaylistEdit::Pick {
+                    uri,
+                    cursor: (cursor + 1).min(len.saturating_sub(1)),
+                }),
+                'k' => Some(PlaylistEdit::Pick {
+                    uri,
+                    cursor: cursor.saturating_sub(1),
+                }),
+                'n' => Some(PlaylistEdit::Name(String::new())),
+                '\n' => match app
+                    .web
+                    .playlists
+                    .items
+                    .get(cursor)
+                    .map(|p| (p.id.clone(), p.name.clone(), p.contents.is_some()))
+                {
+                    // `items` is absent for a playlist the user neither owns nor
+                    // collaborates on, and Spotify refuses a write to one -- so
+                    // say so here rather than send a request that will 403.
+                    Some((_, _, false)) => {
+                        app.toast("you can only add to playlists you own or collaborate on");
+                        Some(PlaylistEdit::Pick { uri, cursor })
+                    }
+                    Some((id, name, true)) => {
+                        app.toast(format!("adding to {name}..."));
+                        web.push(WebJob::AddToPlaylist { playlist: id, uri });
+                        None
+                    }
+                    // Still loading, or an empty account: nothing to choose yet.
+                    None => Some(PlaylistEdit::Pick { uri, cursor }),
+                },
+                _ => Some(PlaylistEdit::Pick { uri, cursor }),
+            }
+        }
+        PlaylistEdit::Name(mut text) => match c {
+            '\x1b' => None,
+            '\n' => {
+                let name = text.trim().to_string();
+                if name.is_empty() {
+                    Some(PlaylistEdit::Name(text))
+                } else {
+                    // The Playlists tab is lazy, so emptying it is what makes it
+                    // fetch again and show the new one.
+                    app.web.playlists = Page::empty();
+                    app.web.playlist_cursor = 0;
+                    web.push(WebJob::CreatePlaylist(name));
+                    None
+                }
+            }
+            '\x7f' | '\x08' => {
+                text.pop();
+                Some(PlaylistEdit::Name(text))
+            }
+            ch if !ch.is_control() => {
+                text.push(ch);
+                Some(PlaylistEdit::Name(text))
+            }
+            _ => Some(PlaylistEdit::Name(text)),
+        },
+        PlaylistEdit::ConfirmRemove {
+            playlist,
+            playlist_name,
+            uri,
+        } => {
+            if matches!(c, 'y' | 'Y') {
+                app.toast(format!("removing from {playlist_name}..."));
+                // The rows go now, so the list is already what it is about to be;
+                // a failed write says so in a toast, and reopening shows the truth.
+                app.web
+                    .open_tracks
+                    .retain(|i| i.track.as_ref().is_none_or(|t| t.uri != uri));
+                app.web.open_cursor = app
+                    .web
+                    .open_cursor
+                    .min(app.web.open_tracks.len().saturating_sub(1));
+                web.push(WebJob::RemoveFromPlaylist { playlist, uri });
+                None
+            } else if matches!(c, 'n' | 'N' | '\x1b') {
+                None
+            } else {
+                // Any other key is not an answer.
+                Some(PlaylistEdit::ConfirmRemove {
+                    playlist,
+                    playlist_name,
+                    uri,
+                })
+            }
+        }
+    };
+}
+
 /// One key on a Web API tab. `true` means the key was consumed.
 ///
 /// Playback of a result is `PlayUri`, which is `play track "<uri>"` through
@@ -1600,6 +1803,41 @@ fn web_tab_key(
             }
             true
         }
+        // Add to a playlist (7.11): the selected track, or the playing one when
+        // the cursor is not on a track.
+        'P' => {
+            let uri = queue_uri(app).or_else(|| app.track().and_then(|t| t.uri.clone()));
+            if let Some(uri) = uri {
+                // The picker draws from the Playlists list, which is lazy: from
+                // another tab it may never have been fetched.
+                if app.web.playlists.items.is_empty() {
+                    web.push(WebJob::Playlists);
+                }
+                app.web.edit = Some(PlaylistEdit::Pick { uri, cursor: 0 });
+            }
+            true
+        }
+        // Remove the selected track from the playlist that is open (7.11).
+        'X' => {
+            if let Some(Open::Playlist(id)) = &app.web.open
+                && let Some(uri) = app.web.open_row_uri()
+            {
+                let playlist_name = app
+                    .web
+                    .playlists
+                    .items
+                    .iter()
+                    .find(|p| &p.id == id)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| "this playlist".to_string());
+                app.web.edit = Some(PlaylistEdit::ConfirmRemove {
+                    playlist: id.clone(),
+                    playlist_name,
+                    uri,
+                });
+            }
+            true
+        }
         'f' => {
             // Like or unlike the *playing* track, not the selected row: a like is
             // a statement about a song, and the one the user can hear is the one
@@ -1627,6 +1865,77 @@ fn web_tab_key(
 /// Web tabs, and a second copy of "which one is open" is a second thing to fall
 /// out of step.
 impl WebState {
+    /// The like check the playing track needs, if it has not had one (7.7).
+    ///
+    /// Marks the track as asked, so the loop can call this every iteration. A new
+    /// track clears the old answer first: showing the last song's heart on this
+    /// one is worse than showing none.
+    pub fn next_liked_check(&mut self, playing: Option<&str>, connected: bool) -> Option<WebJob> {
+        let Some(uri) = playing else {
+            self.liked_here = None;
+            self.liked_checked = None;
+            return None;
+        };
+        if !connected || self.liked_checked.as_deref() == Some(uri) {
+            return None;
+        }
+        self.liked_here = None;
+        self.liked_checked = Some(uri.to_string());
+        Some(WebJob::IsLiked(uri.to_string()))
+    }
+
+    /// The next page the cursor is about to need, if there is one (7.9).
+    ///
+    /// Lists load lazily: the first page when a tab is first shown, and each
+    /// later page when the cursor comes within [`MORE_AHEAD`] rows of the end, so
+    /// a long library costs requests in proportion to how far it is read.
+    pub fn next_more(&mut self, tab: Tab) -> Option<WebJob> {
+        if self.loading_more || self.open.is_some() {
+            return None;
+        }
+        let (cursor, len, next, what) = match tab {
+            Tab::Playlists => (
+                self.playlist_cursor,
+                self.playlists.items.len(),
+                self.playlists.next.clone(),
+                PageWhat::Playlists,
+            ),
+            Tab::Liked => (
+                self.liked_cursor,
+                self.liked.items.len(),
+                self.liked.next.clone(),
+                PageWhat::Liked,
+            ),
+            Tab::Library => match self.library.section {
+                LibrarySection::Albums => (
+                    self.library_cursor,
+                    self.library.albums.items.len(),
+                    self.library.albums.next.clone(),
+                    PageWhat::LibraryAlbums,
+                ),
+                LibrarySection::Artists => (
+                    self.library_cursor,
+                    self.library.artists.items.len(),
+                    self.library.artists.next.clone(),
+                    PageWhat::LibraryArtists,
+                ),
+                LibrarySection::Recent => (
+                    self.library_cursor,
+                    self.library.recent.items.len(),
+                    self.library.recent.next.clone(),
+                    PageWhat::LibraryRecent,
+                ),
+            },
+            _ => return None,
+        };
+        let after = next?;
+        if len == 0 || cursor + MORE_AHEAD < len {
+            return None;
+        }
+        self.loading_more = true;
+        Some(WebJob::More(what, after))
+    }
+
     pub fn row_uri(&self, tab: Tab) -> Option<String> {
         if self.open.is_some() {
             return self.open_row_uri();
@@ -1788,6 +2097,12 @@ fn handle_key(app: &mut App, c: char, commands: &mut Vec<PlayerCommand>, web: &m
     // focused input is modal in a way an overlay is not.
     if app.web.search_focus {
         web_search_key(app, c, web);
+        return;
+    }
+
+    // The playlist modal (7.11) is modal in the same way.
+    if app.web.edit.is_some() {
+        web_edit_key(app, c, web);
         return;
     }
 
@@ -2053,6 +2368,36 @@ fn push(app: &mut App, commands: &mut Vec<PlayerCommand>, cmd: PlayerCommand) {
 /// not have to go and fetch again -- but a page for a *page* that has since been
 /// left is dropped, because opening an album and going back to the list must not
 /// leave the list showing the album.
+/// Add a continuation page to the end of the list it belongs to. Only the five
+/// top-level lists are paged this way; the opened pages are one request each.
+fn append_page(app: &mut App, loaded: PageLoaded) {
+    fn extend<T>(list: &mut Page<T>, page: Page<T>) {
+        list.items.extend(page.items);
+        list.next = page.next;
+    }
+    let w = &mut app.web;
+    match loaded {
+        PageLoaded::Playlists(p) => extend(&mut w.playlists, p),
+        PageLoaded::Liked(p) => extend(&mut w.liked, p),
+        PageLoaded::LibraryAlbums(p) => extend(&mut w.library.albums, p),
+        PageLoaded::LibraryArtists(p) => extend(&mut w.library.artists, p),
+        PageLoaded::LibraryRecent(p) => extend(&mut w.library.recent, p),
+        _ => {}
+    }
+}
+
+fn drop_continuation(app: &mut App, what: PageWhat) {
+    let w = &mut app.web;
+    match what {
+        PageWhat::Playlists => w.playlists.next = None,
+        PageWhat::Liked => w.liked.next = None,
+        PageWhat::LibraryAlbums => w.library.albums.next = None,
+        PageWhat::LibraryArtists => w.library.artists.next = None,
+        PageWhat::LibraryRecent => w.library.recent.next = None,
+        _ => {}
+    }
+}
+
 fn apply_page(app: &mut App, _what: PageWhat, loaded: PageLoaded) {
     // A page for a *page* that has since been left is dropped: opening an album
     // and going back to the list must not leave the list showing the album.
@@ -3675,6 +4020,69 @@ mod tests {
         );
     }
 
+    fn ticks(mut app: App, n: usize) -> (App, Vec<WebJob>) {
+        let mut sent = Vec::new();
+        for _ in 0..n {
+            let u = update(app, Event::Tick);
+            app = u.app;
+            sent.extend(u.web);
+        }
+        (app, sent)
+    }
+
+    fn typing_connected(text: &str) -> App {
+        let mut app = on(Tab::Search);
+        app.web.connection = Connection::Connected;
+        let app = key(app, '/').0;
+        text.chars().fold(app, |a, c| key(a, c).0)
+    }
+
+    /// The point of the debounce: nothing goes out while the typing is still
+    /// going, one request goes out when it stops.
+    #[test]
+    fn a_pause_in_typing_sends_one_search() {
+        let (app, sent) = ticks(typing_connected("massive"), 2);
+        assert!(sent.is_empty(), "still inside the debounce: {sent:?}");
+        let (app, sent) = ticks(app, 1);
+        assert_eq!(sent, vec![WebJob::Search("massive".into())]);
+        assert!(app.web.searching);
+        let (_, sent) = ticks(app, 10);
+        assert!(sent.is_empty(), "one query is one request: {sent:?}");
+    }
+
+    /// A keystroke inside the window pushes the send back, so the word is one
+    /// request and the stale half of it is never asked.
+    #[test]
+    fn typing_on_restarts_the_wait() {
+        let (app, sent) = ticks(typing_connected("mass"), 2);
+        assert!(sent.is_empty());
+        let app = key(app, 'i').0;
+        let (app, sent) = ticks(app, 2);
+        assert!(sent.is_empty(), "the wait restarted: {sent:?}");
+        let (_, sent) = ticks(app, 1);
+        assert_eq!(sent, vec![WebJob::Search("massi".into())]);
+    }
+
+    /// Without a connection a search can only fail, and `searching` would stay
+    /// set with nothing coming to clear it.
+    #[test]
+    fn a_disconnected_search_box_sends_nothing() {
+        let mut app = typing_connected("massive");
+        app.web.connection = Connection::LoggedOut;
+        let (app, sent) = ticks(app, 10);
+        assert!(sent.is_empty() && !app.web.searching);
+    }
+
+    /// What is already on screen is not asked for again, nor is a blank box.
+    #[test]
+    fn a_shown_or_blank_query_is_not_resent() {
+        let mut app = typing_connected("massive");
+        app.web.search_shown = "massive".into();
+        assert!(ticks(app, 10).1.is_empty());
+        let blank = typing_connected("  ");
+        assert!(ticks(blank, 10).1.is_empty());
+    }
+
     /// Groups move with `[` and `]`, and `Tab` keeps changing tabs everywhere --
     /// including on Search, which is where 7.6 wanted to take it.
     #[test]
@@ -3786,6 +4194,328 @@ mod tests {
         let (app, cmds, web) = key(advert, 'f');
         assert!(cmds.is_empty() && web.is_empty());
         assert_eq!(app.web.liked_here, None, "and says nothing either way");
+    }
+
+    #[test]
+    fn a_playing_track_is_checked_once_and_a_new_one_clears_the_answer() {
+        let mut w = WebState::default();
+        assert_eq!(w.next_liked_check(Some("a"), false), None, "not connected");
+        assert_eq!(
+            w.next_liked_check(Some("a"), true),
+            Some(WebJob::IsLiked("a".into()))
+        );
+        assert_eq!(w.next_liked_check(Some("a"), true), None, "once per track");
+        w.liked_here = Some(true);
+        assert_eq!(
+            w.next_liked_check(Some("b"), true),
+            Some(WebJob::IsLiked("b".into()))
+        );
+        assert_eq!(w.liked_here, None, "the last song's heart is gone");
+        assert_eq!(w.next_liked_check(None, true), None);
+        assert_eq!(w.liked_checked, None, "so a replay is checked again");
+    }
+
+    #[test]
+    fn the_answer_applies_only_to_the_track_still_playing() {
+        let app = on(Tab::Liked);
+        let uri = app.track().and_then(|t| t.uri.clone()).expect("a uri");
+        let stale = update(
+            app.clone(),
+            Event::LikedHere {
+                uri: "spotify:track:other".into(),
+                result: Ok(true),
+            },
+        )
+        .app;
+        assert_eq!(stale.web.liked_here, None);
+        let fresh = update(
+            app,
+            Event::LikedHere {
+                uri,
+                result: Ok(true),
+            },
+        )
+        .app;
+        assert_eq!(fresh.web.liked_here, Some(true));
+    }
+
+    #[test]
+    fn a_landed_write_makes_the_queue_tab_fetch_again() {
+        let mut app = on(Tab::Queue);
+        app.web.queue.upcoming = vec![a_track("1", "Teardrop")];
+        let app = update(app, Event::WebWrote(Ok(()))).app;
+        assert!(app.web.queue.upcoming.is_empty());
+    }
+
+    #[test]
+    fn a_landed_write_asks_again() {
+        let mut app = on(Tab::Liked);
+        app.web.liked_checked = Some("x".into());
+        app.web.liked_here = Some(true);
+        let app = update(app, Event::WebWrote(Ok(()))).app;
+        assert_eq!((app.web.liked_here, app.web.liked_checked), (None, None));
+    }
+
+    fn playlist(id: &str) -> Playlist {
+        Playlist {
+            id: id.into(),
+            name: id.into(),
+            uri: String::new(),
+            description: None,
+            images: Vec::new(),
+            contents: None,
+        }
+    }
+
+    fn owned(id: &str) -> Playlist {
+        Playlist {
+            contents: Some(crate::web::api::PlaylistContents {
+                total: None,
+                items: Vec::new(),
+            }),
+            ..playlist(id)
+        }
+    }
+
+    fn picking(app: &mut App) {
+        app.web.playlists = Page {
+            items: vec![owned("mine"), playlist("theirs")],
+            next: None,
+        };
+    }
+
+    #[test]
+    fn shift_p_opens_the_picker_for_the_selected_track_and_loads_the_list_if_needed() {
+        let mut app = on(Tab::Search);
+        app.web.results.tracks = vec![a_track("1", "Teardrop")];
+        let (app, _, web) = key(app, 'P');
+        assert_eq!(
+            app.web.edit,
+            Some(PlaylistEdit::Pick {
+                uri: "spotify:track:1".into(),
+                cursor: 0
+            })
+        );
+        assert_eq!(web, vec![WebJob::Playlists], "the list was never fetched");
+    }
+
+    #[test]
+    fn with_no_track_selected_the_playing_one_is_added() {
+        let app = on(Tab::Playlists);
+        let uri = app.track().and_then(|t| t.uri.clone()).expect("a uri");
+        let (app, _, _) = key(app, 'P');
+        assert_eq!(app.web.edit, Some(PlaylistEdit::Pick { uri, cursor: 0 }));
+    }
+
+    #[test]
+    fn enter_in_the_picker_adds_to_the_chosen_playlist() {
+        let mut app = on(Tab::Liked);
+        picking(&mut app);
+        app.web.edit = Some(PlaylistEdit::Pick {
+            uri: "spotify:track:1".into(),
+            cursor: 0,
+        });
+        let (app, cmds, web) = key(app, '\n');
+        assert_eq!(
+            web,
+            vec![WebJob::AddToPlaylist {
+                playlist: "mine".into(),
+                uri: "spotify:track:1".into()
+            }]
+        );
+        assert!(cmds.is_empty() && app.web.edit.is_none());
+    }
+
+    #[test]
+    fn a_playlist_you_cannot_edit_is_refused_before_a_request_is_sent() {
+        let mut app = on(Tab::Liked);
+        picking(&mut app);
+        app.web.edit = Some(PlaylistEdit::Pick {
+            uri: "spotify:track:1".into(),
+            cursor: 0,
+        });
+        let (app, _, _) = key(app, 'j');
+        let (app, _, web) = key(app, '\n');
+        assert!(web.is_empty(), "no write to a read-only playlist: {web:?}");
+        assert!(app.web.edit.is_some() && app.toast.is_some());
+    }
+
+    #[test]
+    fn the_picker_keeps_the_keys_that_would_otherwise_skip_a_track() {
+        let mut app = on(Tab::Liked);
+        picking(&mut app);
+        app.web.edit = Some(PlaylistEdit::Pick {
+            uri: "u".into(),
+            cursor: 0,
+        });
+        let (app, cmds, web) = key(app, ' ');
+        assert!(
+            cmds.is_empty() && web.is_empty(),
+            "space is not play/pause here"
+        );
+        let (app, _, _) = key(app, '\x1b');
+        assert!(app.web.edit.is_none());
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn a_new_playlist_is_named_then_created_and_the_list_refetches() {
+        let mut app = on(Tab::Playlists);
+        picking(&mut app);
+        app.web.edit = Some(PlaylistEdit::Pick {
+            uri: "u".into(),
+            cursor: 0,
+        });
+        let app = key(app, 'n').0;
+        assert_eq!(app.web.edit, Some(PlaylistEdit::Name(String::new())));
+        let (app, _, web) = key(app, '\n');
+        assert!(
+            web.is_empty() && app.web.edit.is_some(),
+            "a blank name is not sent"
+        );
+        let app = "Road".chars().fold(app, |a, c| key(a, c).0);
+        let app = key(app, '\x7f').0;
+        let app = key(app, 'd').0;
+        let (app, _, web) = key(app, '\n');
+        assert_eq!(web, vec![WebJob::CreatePlaylist("Road".into())]);
+        assert!(
+            app.web.playlists.items.is_empty(),
+            "so the tab fetches again"
+        );
+        assert!(app.web.edit.is_none());
+    }
+
+    fn in_playlist(app: &mut App) {
+        app.web.playlists = Page {
+            items: vec![owned("mine")],
+            next: None,
+        };
+        app.web.open_playlist("mine".into());
+        app.web.playlist_items(
+            "mine".into(),
+            vec![
+                TrackItem {
+                    track: Some(a_track("1", "Teardrop")),
+                },
+                TrackItem {
+                    track: Some(a_track("2", "Angel")),
+                },
+            ],
+        );
+    }
+
+    #[test]
+    fn removing_asks_first_and_only_y_removes() {
+        let mut app = on(Tab::Playlists);
+        in_playlist(&mut app);
+        let (app, _, web) = key(app, 'X');
+        assert!(web.is_empty(), "nothing is sent before the answer");
+        assert!(matches!(
+            app.web.edit,
+            Some(PlaylistEdit::ConfirmRemove { .. })
+        ));
+        let (declined, _, web) = key(app.clone(), 'n');
+        assert!(web.is_empty() && declined.web.edit.is_none());
+        assert_eq!(declined.web.open_tracks.len(), 2, "n keeps it");
+        let (stray, _, web) = key(app.clone(), 'x');
+        assert!(web.is_empty() && stray.web.edit.is_some(), "not an answer");
+        let (done, _, web) = key(app, 'y');
+        assert_eq!(
+            web,
+            vec![WebJob::RemoveFromPlaylist {
+                playlist: "mine".into(),
+                uri: "spotify:track:1".into()
+            }]
+        );
+        assert_eq!(done.web.open_tracks.len(), 1, "the row is gone at once");
+    }
+
+    #[test]
+    fn x_outside_an_open_playlist_does_nothing() {
+        let (app, _, web) = key(on(Tab::Liked), 'X');
+        assert!(app.web.edit.is_none() && web.is_empty());
+    }
+
+    #[test]
+    fn the_next_page_is_asked_for_only_near_the_end_and_only_once() {
+        let mut w = WebState {
+            playlists: Page {
+                items: (0..20).map(|i| playlist(&i.to_string())).collect(),
+                next: Some(Continuation::for_test("20")),
+            },
+            playlist_cursor: 3,
+            ..WebState::default()
+        };
+        assert_eq!(w.next_more(Tab::Playlists), None, "far from the end");
+        w.playlist_cursor = 15;
+        assert_eq!(
+            w.next_more(Tab::Playlists),
+            Some(WebJob::More(
+                PageWhat::Playlists,
+                Continuation::for_test("20")
+            ))
+        );
+        assert_eq!(w.next_more(Tab::Playlists), None, "already on its way");
+        assert_eq!(w.next_more(Tab::Search), None, "Search is not paged");
+    }
+
+    #[test]
+    fn the_end_of_a_list_asks_for_nothing() {
+        let mut w = WebState {
+            playlists: Page {
+                items: vec![playlist("a")],
+                next: None,
+            },
+            ..WebState::default()
+        };
+        assert_eq!(w.next_more(Tab::Playlists), None);
+    }
+
+    #[test]
+    fn a_continuation_page_is_appended_and_hands_over_the_cursor_to_the_next() {
+        let mut app = on(Tab::Playlists);
+        app.web.loading_more = true;
+        app.web.playlists = Page {
+            items: vec![playlist("a")],
+            next: Some(Continuation::for_test("1")),
+        };
+        let app = update(
+            app,
+            Event::MorePage {
+                what: PageWhat::Playlists,
+                result: Ok(PageLoaded::Playlists(Page {
+                    items: vec![playlist("b"), playlist("c")],
+                    next: None,
+                })),
+            },
+        )
+        .app;
+        let names: Vec<_> = app
+            .web
+            .playlists
+            .items
+            .iter()
+            .map(|p| p.id.as_str())
+            .collect();
+        assert_eq!(names, ["a", "b", "c"]);
+        assert!(app.web.playlists.next.is_none() && !app.web.loading_more);
+    }
+
+    #[test]
+    fn a_failed_next_page_gives_up_on_the_rest_and_says_why() {
+        let mut app = on(Tab::Liked);
+        app.web.loading_more = true;
+        app.web.liked.next = Some(Continuation::for_test("1"));
+        let app = update(
+            app,
+            Event::MorePage {
+                what: PageWhat::Liked,
+                result: Err(crate::web::api::ApiError::NotFound),
+            },
+        )
+        .app;
+        assert!(!app.web.loading_more && app.web.liked.next.is_none());
+        assert!(app.toast.is_some());
     }
 
     /// A page that arrives after the user has left it is dropped, so opening an
