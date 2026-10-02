@@ -674,14 +674,26 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
       > no-op fallback was `WebWrote(Ok)`, which now re-asks the like check and would have looped on
       > a failing client — it is `Resize` now. Opened pages (playlist items, artist albums, album
       > tracks) are still one request each.
-- [ ] 7.10 **Artist page** and **album page** (tracklist, play from track). Back with `esc`. >
+- [x] 7.10 **Artist page** and **album page** (tracklist, play from track). Back with `esc`. >
       **Albums only — `GET /artists/{id}/top-tracks` was removed in dev mode with no replacement**, so
       the top-tracks half of this task is dead. `GET /artists/{id}/albums` still works. SPEC §6 is
       updated. Done when: navigation stack tests; manual.
-- [ ] 7.11 **Playlist editing**: add current/selected track to a playlist (picker), remove from a
+      > Audited: `o` opens, `esc` walks the stack (`escape_walks_the_navigation_stack`), `enter` on
+      > a track row plays it (`PlayUri`); an artist page lists albums only. Nothing to add.
+- [x] 7.11 **Playlist editing**: add current/selected track to a playlist (picker), remove from a
       playlist, create playlist. > Use `POST`/`DELETE /me/playlists/{id}/items` (the `/tracks`
       variants are removed), and `POST /me/playlists` to create. Same unverified-in-dev-mode caveat as
       7.7. Done when: confirmation on destructive actions; tests with fakes.
+      > The three write jobs and the client calls existed; **no key reached them**. Now: `P` opens
+      > a picker (`PlaylistEdit::Pick`) for the selected track, or the playing one when the cursor
+      > is not on a track, and fetches the playlist list if it was never loaded; `n` in the picker
+      > names and creates a private playlist; `X` in an open playlist asks `y`/`n` before removing
+      > (the row leaves the list at once, a failed write toasts). The modal owns the keyboard, so
+      > `space`/`n`/`p` there are answers, not transport keys. A playlist with no `items` (not
+      > yours) is shown read-only and refused with a toast rather than sent to 403. Keys are in
+      > SPEC §4 and the `?` overlay (its height clamp went 24 -> 28 to fit two rows). **[owner]**
+      > with a real login: add, create and remove once, and report whether dev mode 403s the item
+      > writes (the caveat is unchanged).
 - [x] 7.12 **`trak play <song|album|artist|list>`** (finish 2.7) using search; pick the best match
       like shpotify; print what it chose. Done when: `assert_cmd` tests with `FakeLibrary`.
       > The pick is shpotify's first-result rule plus one tiebreak: the first row whose

@@ -395,6 +395,23 @@ pub enum WebJob {
     More(PageWhat, Continuation),
 }
 
+/// A modal over the Web tabs for editing a playlist (7.11). One at a time, and
+/// while one is up it owns the keyboard, because `y` and `n` there are answers
+/// rather than the transport keys they are everywhere else.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PlaylistEdit {
+    /// Choosing which playlist to add a track to.
+    Pick { uri: String, cursor: usize },
+    /// Typing the name of a new playlist.
+    Name(String),
+    /// Waiting for `y` before a track leaves a playlist. Destructive, so it asks.
+    ConfirmRemove {
+        playlist: String,
+        playlist_name: String,
+        uri: String,
+    },
+}
+
 /// Which volume trak changes (TODO 4.4, R2).
 /// Everything the Web API tabs hold (TODO 7.6-7.11).
 ///
@@ -447,6 +464,8 @@ pub struct WebState {
     /// The track `liked_here` was last asked about, so one track is one check
     /// rather than one per frame.
     pub liked_checked: Option<String>,
+    /// The playlist-editing modal, if one is up (7.11).
+    pub edit: Option<PlaylistEdit>,
     /// A next page is on its way, so the cursor sitting near the end does not
     /// ask for the same page every frame.
     pub loading_more: bool,
@@ -589,6 +608,7 @@ impl Default for WebState {
             liked_here: None,
             liked_checked: None,
             loading_more: false,
+            edit: None,
             pages: Vec::new(),
             open: None,
             open_tracks: Vec::new(),
@@ -1605,6 +1625,108 @@ fn web_search_key(app: &mut App, c: char, web: &mut Vec<WebJob>) {
     }
 }
 
+/// One key while the playlist modal is up (7.11).
+fn web_edit_key(app: &mut App, c: char, web: &mut Vec<WebJob>) {
+    let Some(edit) = app.web.edit.take() else {
+        return;
+    };
+    // Put back unless the key finished or cancelled it.
+    app.web.edit = match edit {
+        PlaylistEdit::Pick { uri, cursor } => {
+            let len = app.web.playlists.items.len();
+            match c {
+                '\x1b' => None,
+                'j' => Some(PlaylistEdit::Pick {
+                    uri,
+                    cursor: (cursor + 1).min(len.saturating_sub(1)),
+                }),
+                'k' => Some(PlaylistEdit::Pick {
+                    uri,
+                    cursor: cursor.saturating_sub(1),
+                }),
+                'n' => Some(PlaylistEdit::Name(String::new())),
+                '\n' => match app
+                    .web
+                    .playlists
+                    .items
+                    .get(cursor)
+                    .map(|p| (p.id.clone(), p.name.clone(), p.contents.is_some()))
+                {
+                    // `items` is absent for a playlist the user neither owns nor
+                    // collaborates on, and Spotify refuses a write to one -- so
+                    // say so here rather than send a request that will 403.
+                    Some((_, _, false)) => {
+                        app.toast("you can only add to playlists you own or collaborate on");
+                        Some(PlaylistEdit::Pick { uri, cursor })
+                    }
+                    Some((id, name, true)) => {
+                        app.toast(format!("adding to {name}..."));
+                        web.push(WebJob::AddToPlaylist { playlist: id, uri });
+                        None
+                    }
+                    // Still loading, or an empty account: nothing to choose yet.
+                    None => Some(PlaylistEdit::Pick { uri, cursor }),
+                },
+                _ => Some(PlaylistEdit::Pick { uri, cursor }),
+            }
+        }
+        PlaylistEdit::Name(mut text) => match c {
+            '\x1b' => None,
+            '\n' => {
+                let name = text.trim().to_string();
+                if name.is_empty() {
+                    Some(PlaylistEdit::Name(text))
+                } else {
+                    // The Playlists tab is lazy, so emptying it is what makes it
+                    // fetch again and show the new one.
+                    app.web.playlists = Page::empty();
+                    app.web.playlist_cursor = 0;
+                    web.push(WebJob::CreatePlaylist(name));
+                    None
+                }
+            }
+            '\x7f' | '\x08' => {
+                text.pop();
+                Some(PlaylistEdit::Name(text))
+            }
+            ch if !ch.is_control() => {
+                text.push(ch);
+                Some(PlaylistEdit::Name(text))
+            }
+            _ => Some(PlaylistEdit::Name(text)),
+        },
+        PlaylistEdit::ConfirmRemove {
+            playlist,
+            playlist_name,
+            uri,
+        } => {
+            if matches!(c, 'y' | 'Y') {
+                app.toast(format!("removing from {playlist_name}..."));
+                // The rows go now, so the list is already what it is about to be;
+                // a failed write says so in a toast, and reopening shows the truth.
+                app.web
+                    .open_tracks
+                    .retain(|i| i.track.as_ref().is_none_or(|t| t.uri != uri));
+                app.web.open_cursor = app
+                    .web
+                    .open_cursor
+                    .min(app.web.open_tracks.len().saturating_sub(1));
+                web.push(WebJob::RemoveFromPlaylist { playlist, uri });
+                None
+            } else if matches!(c, 'n' | 'N' | '\x1b') {
+                None
+            } else {
+                // Any other key is not an answer.
+                Some(PlaylistEdit::ConfirmRemove {
+                    playlist,
+                    playlist_name,
+                    uri,
+                })
+            }
+        }
+    };
+}
+
 /// One key on a Web API tab. `true` means the key was consumed.
 ///
 /// Playback of a result is `PlayUri`, which is `play track "<uri>"` through
@@ -1678,6 +1800,41 @@ fn web_tab_key(
         'A' => {
             if let Some(uri) = queue_uri(app) {
                 web.push(WebJob::Enqueue(uri));
+            }
+            true
+        }
+        // Add to a playlist (7.11): the selected track, or the playing one when
+        // the cursor is not on a track.
+        'P' => {
+            let uri = queue_uri(app).or_else(|| app.track().and_then(|t| t.uri.clone()));
+            if let Some(uri) = uri {
+                // The picker draws from the Playlists list, which is lazy: from
+                // another tab it may never have been fetched.
+                if app.web.playlists.items.is_empty() {
+                    web.push(WebJob::Playlists);
+                }
+                app.web.edit = Some(PlaylistEdit::Pick { uri, cursor: 0 });
+            }
+            true
+        }
+        // Remove the selected track from the playlist that is open (7.11).
+        'X' => {
+            if let Some(Open::Playlist(id)) = &app.web.open
+                && let Some(uri) = app.web.open_row_uri()
+            {
+                let playlist_name = app
+                    .web
+                    .playlists
+                    .items
+                    .iter()
+                    .find(|p| &p.id == id)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| "this playlist".to_string());
+                app.web.edit = Some(PlaylistEdit::ConfirmRemove {
+                    playlist: id.clone(),
+                    playlist_name,
+                    uri,
+                });
             }
             true
         }
@@ -1940,6 +2097,12 @@ fn handle_key(app: &mut App, c: char, commands: &mut Vec<PlayerCommand>, web: &m
     // focused input is modal in a way an overlay is not.
     if app.web.search_focus {
         web_search_key(app, c, web);
+        return;
+    }
+
+    // The playlist modal (7.11) is modal in the same way.
+    if app.web.edit.is_some() {
+        web_edit_key(app, c, web);
         return;
     }
 
@@ -4102,6 +4265,175 @@ mod tests {
             images: Vec::new(),
             contents: None,
         }
+    }
+
+    fn owned(id: &str) -> Playlist {
+        Playlist {
+            contents: Some(crate::web::api::PlaylistContents {
+                total: None,
+                items: Vec::new(),
+            }),
+            ..playlist(id)
+        }
+    }
+
+    fn picking(app: &mut App) {
+        app.web.playlists = Page {
+            items: vec![owned("mine"), playlist("theirs")],
+            next: None,
+        };
+    }
+
+    #[test]
+    fn shift_p_opens_the_picker_for_the_selected_track_and_loads_the_list_if_needed() {
+        let mut app = on(Tab::Search);
+        app.web.results.tracks = vec![a_track("1", "Teardrop")];
+        let (app, _, web) = key(app, 'P');
+        assert_eq!(
+            app.web.edit,
+            Some(PlaylistEdit::Pick {
+                uri: "spotify:track:1".into(),
+                cursor: 0
+            })
+        );
+        assert_eq!(web, vec![WebJob::Playlists], "the list was never fetched");
+    }
+
+    #[test]
+    fn with_no_track_selected_the_playing_one_is_added() {
+        let app = on(Tab::Playlists);
+        let uri = app.track().and_then(|t| t.uri.clone()).expect("a uri");
+        let (app, _, _) = key(app, 'P');
+        assert_eq!(app.web.edit, Some(PlaylistEdit::Pick { uri, cursor: 0 }));
+    }
+
+    #[test]
+    fn enter_in_the_picker_adds_to_the_chosen_playlist() {
+        let mut app = on(Tab::Liked);
+        picking(&mut app);
+        app.web.edit = Some(PlaylistEdit::Pick {
+            uri: "spotify:track:1".into(),
+            cursor: 0,
+        });
+        let (app, cmds, web) = key(app, '\n');
+        assert_eq!(
+            web,
+            vec![WebJob::AddToPlaylist {
+                playlist: "mine".into(),
+                uri: "spotify:track:1".into()
+            }]
+        );
+        assert!(cmds.is_empty() && app.web.edit.is_none());
+    }
+
+    #[test]
+    fn a_playlist_you_cannot_edit_is_refused_before_a_request_is_sent() {
+        let mut app = on(Tab::Liked);
+        picking(&mut app);
+        app.web.edit = Some(PlaylistEdit::Pick {
+            uri: "spotify:track:1".into(),
+            cursor: 0,
+        });
+        let (app, _, _) = key(app, 'j');
+        let (app, _, web) = key(app, '\n');
+        assert!(web.is_empty(), "no write to a read-only playlist: {web:?}");
+        assert!(app.web.edit.is_some() && app.toast.is_some());
+    }
+
+    #[test]
+    fn the_picker_keeps_the_keys_that_would_otherwise_skip_a_track() {
+        let mut app = on(Tab::Liked);
+        picking(&mut app);
+        app.web.edit = Some(PlaylistEdit::Pick {
+            uri: "u".into(),
+            cursor: 0,
+        });
+        let (app, cmds, web) = key(app, ' ');
+        assert!(
+            cmds.is_empty() && web.is_empty(),
+            "space is not play/pause here"
+        );
+        let (app, _, _) = key(app, '\x1b');
+        assert!(app.web.edit.is_none());
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn a_new_playlist_is_named_then_created_and_the_list_refetches() {
+        let mut app = on(Tab::Playlists);
+        picking(&mut app);
+        app.web.edit = Some(PlaylistEdit::Pick {
+            uri: "u".into(),
+            cursor: 0,
+        });
+        let app = key(app, 'n').0;
+        assert_eq!(app.web.edit, Some(PlaylistEdit::Name(String::new())));
+        let (app, _, web) = key(app, '\n');
+        assert!(
+            web.is_empty() && app.web.edit.is_some(),
+            "a blank name is not sent"
+        );
+        let app = "Road".chars().fold(app, |a, c| key(a, c).0);
+        let app = key(app, '\x7f').0;
+        let app = key(app, 'd').0;
+        let (app, _, web) = key(app, '\n');
+        assert_eq!(web, vec![WebJob::CreatePlaylist("Road".into())]);
+        assert!(
+            app.web.playlists.items.is_empty(),
+            "so the tab fetches again"
+        );
+        assert!(app.web.edit.is_none());
+    }
+
+    fn in_playlist(app: &mut App) {
+        app.web.playlists = Page {
+            items: vec![owned("mine")],
+            next: None,
+        };
+        app.web.open_playlist("mine".into());
+        app.web.playlist_items(
+            "mine".into(),
+            vec![
+                TrackItem {
+                    track: Some(a_track("1", "Teardrop")),
+                },
+                TrackItem {
+                    track: Some(a_track("2", "Angel")),
+                },
+            ],
+        );
+    }
+
+    #[test]
+    fn removing_asks_first_and_only_y_removes() {
+        let mut app = on(Tab::Playlists);
+        in_playlist(&mut app);
+        let (app, _, web) = key(app, 'X');
+        assert!(web.is_empty(), "nothing is sent before the answer");
+        assert!(matches!(
+            app.web.edit,
+            Some(PlaylistEdit::ConfirmRemove { .. })
+        ));
+        let (declined, _, web) = key(app.clone(), 'n');
+        assert!(web.is_empty() && declined.web.edit.is_none());
+        assert_eq!(declined.web.open_tracks.len(), 2, "n keeps it");
+        let (stray, _, web) = key(app.clone(), 'x');
+        assert!(web.is_empty() && stray.web.edit.is_some(), "not an answer");
+        let (done, _, web) = key(app, 'y');
+        assert_eq!(
+            web,
+            vec![WebJob::RemoveFromPlaylist {
+                playlist: "mine".into(),
+                uri: "spotify:track:1".into()
+            }]
+        );
+        assert_eq!(done.web.open_tracks.len(), 1, "the row is gone at once");
+    }
+
+    #[test]
+    fn x_outside_an_open_playlist_does_nothing() {
+        let (app, _, web) = key(on(Tab::Liked), 'X');
+        assert!(app.web.edit.is_none() && web.is_empty());
     }
 
     #[test]

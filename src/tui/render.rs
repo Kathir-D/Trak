@@ -1803,6 +1803,8 @@ const HELP_ROWS: &[(&str, &str)] = &[
     ("o", "open the artist or album"),
     ("A", "add the selection to the queue"),
     ("f", "like or unlike the playing track"),
+    ("P", "add the selection to a playlist"),
+    ("X", "remove it from the open playlist"),
     (",", "settings"),
     ("? / esc", "close this"),
     ("q / ctrl-c", "quit"),
@@ -1815,7 +1817,7 @@ fn help_popup(area: Rect) -> Rect {
     // fraction meant every key added to `HELP_ROWS` silently fell off the
     // bottom, and the last rows are the ones people scroll to. It still clamps,
     // because a terminal shorter than the list has to show something.
-    let h = (HELP_ROWS.len().saturating_add(2).min(area.height as usize) as u16).clamp(9, 24);
+    let h = (HELP_ROWS.len().saturating_add(2).min(area.height as usize) as u16).clamp(9, 28);
     Rect {
         x: area.x + (area.width.saturating_sub(w)) / 2,
         y: area.y + (area.height.saturating_sub(h)) / 2,

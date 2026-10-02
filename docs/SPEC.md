@@ -111,6 +111,8 @@ Rules:
 | `f` | Like / unlike current track ("favourite"; `l` is seek-right) | A |
 | `A` (shift-a) | Add selected to queue | A |
 | `o` | Open artist or album page of the selection | A |
+| `P` (shift-p) | Add the selected (or playing) track to a playlist; `n` in the picker makes a new one | A |
+| `X` (shift-x) | Remove the selected track from the open playlist (asks `y`/`n`) | A |
 | `esc` | Back / close overlay | both |
 
 Keep this table and the `?` help overlay in sync.
