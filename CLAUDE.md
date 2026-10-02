@@ -9,7 +9,7 @@
 - Prefer the dedicated Read/Edit/Grep tools over shell one-liners for code changes.
 - You cannot see the TUI. Do not claim a visual result is good from code alone: use `TestBackend`
   snapshots, and list real-terminal checks as **[owner]** steps in your final message.
-- Sub-agents are not needed for normal tasks; delegate only large read-only research (for example a
-  spike from `TODO.md` phase 1).
+- Subagents: follow `AGENTS.md` "Working style" 2–3 (the owner wants them used constantly, each
+  with a strict file boundary or its own worktree, and you keep working while they run).
 - At the end of a task, state plainly what was verified, what was only reasoned about, and which
   **[owner]** steps remain.

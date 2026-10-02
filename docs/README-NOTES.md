@@ -51,16 +51,16 @@ over. The sibling READMEs and two TUI project READMEs are the closer models.
 
 - [ ] Hero: wordmark/icon + bold pitch + anchor row (Sonar), centered.
 - [ ] Badges: one style, linked, alt text; add release and Homebrew badges only once they exist.
-- [ ] Demo GIF/PNG under the badges, captioned, `alt` set, < ~3 MB, in `docs/images/` (spotify-tui).
+- [x] Demo GIF/PNG under the badges, captioned, `alt` set, < ~3 MB, in `docs/images/` (spotify-tui).
       Check it on GitHub in light and dark mode; use `<picture>` only if a variant is needed.
 - [ ] At-a-glance table: release / install / requires / cost (Sonar), after the formula ships.
-- [ ] Why Trak: three bullets; Features: one icon per row (caneco).
+- [x] Why Trak: three bullets; Features: one icon per row (caneco).
 - [ ] Install: Homebrew first, source last (spotify-tui).
 - [ ] Keys: action / key / note table (spotify-player); settings and CLI in `<details>`.
 - [ ] Art: one protocol screenshot + half-block fallback (spotify-player).
 - [ ] "What Trak will not do to Spotify" + Sonar/headless section linking `docs/COMPAT.md`.
 - [ ] Troubleshooting: one `<details>` per symptom, permissions first (Sonar).
-- [ ] Credits and License last.
+- [x] Credits and License last.
 
 ## Not borrowed
 

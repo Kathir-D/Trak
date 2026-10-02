@@ -67,13 +67,16 @@ It is one piece of the owner's music setup, alongside two sibling projects in `.
 **headless-spotify** (hides Spotify from the Dock) and **Sonar** (menu-bar skip/prev + auto-pause).
 Trak must coexist with both. That contract is `docs/COMPAT.md` and is non-negotiable.
 
-**Status:** pre-alpha, and further along than it looks. Phases 1–7 are done (player layer and the
-full shpotify CLI, the TUI, art and accent, config and settings, synced lyrics, and the Web API
-tabs with the guided setup). What remains is what needs the owner's Mac or a live account: the real
-audio tap (8.3/8.5), the Homebrew release (9.4–9.8), the Sonar/headless compatibility matrix
-(phase 10), and screenshots/polish (11.x). The Web API half has **never met a real account**:
-treat it as unverified. `TODO.md` is the truth, and every ticked box carries a note about the
-decisions behind it — read those notes, not just the boxes. `CONTINUATION.md` has the handover.
+**Status:** pre-alpha, and further along than it looks. Phases 1–8 are done (player layer and the
+full shpotify CLI, the TUI, art and accent, config and settings, synced lyrics, the Web API tabs
+with the guided setup, and the visualizer including the real Core Audio tap on Spotify), and so is
+the polish pass (11.0, 11.4–11.6: the real-terminal key sweep, performance, `NO_COLOR`/light
+background/RTL). The first release is in progress (9.4–9.6, 9.8 and the curl installer 9.9). What
+else remains needs the owner: the Sonar/headless rows of the compatibility matrix (10.1–10.3, 10.6,
+10.7) and the owner-only leftovers of 11.1–11.3 (release badges, a Version A screenshot, the social
+preview image). The Web API half has **never met a real account**: treat it as unverified.
+`TODO.md` is the truth, and every ticked box carries a note about the decisions behind it — read
+those notes, not just the boxes. `CONTINUATION.md` has the handover.
 
 ## Start here (read in this order)
 
@@ -118,7 +121,8 @@ Then read the code for the task you picked. Do not start coding from this file a
   launch" on the idle card (`docs/COMPAT.md` rule 2).
 - **Write to Spotify only in direct response to a user key or command** (`docs/COMPAT.md` rule 3),
   or Sonar's auto-pause ownership breaks.
-- No secrets in the repo, in logs, or in the config file. Tokens go to Keychain or a `0600` file.
+- No secrets in the repo, in logs, or in the config file. Tokens go to a `0600` file, not the
+  Keychain (`docs/KEYCHAIN.md` measured why).
 - Optional integrations (Sonar state file, headless-spotify, real-audio visualizer, lyrics, Web
   API) must **fail soft**: degrade to simpler behaviour, explain in one status line, never panic.
 - Do not add the rejected extras: `status --format`, `trak mini`, shell completions, man page.
@@ -167,10 +171,12 @@ All four of fmt / clippy / test / release-build must pass before you commit. CI
 
 ## Architecture in one screen
 
-`main.rs` → `cli/` (one-shot commands) or `tui/` (bare `trak`). All side effects sit behind traits
-(`Player`, `Library`, `AudioSource`, `Lyrics`, `Store`, `Clock`, `Notifier`) with fakes, so the whole
-app runs in tests. State is pure: `update(App, Event) -> App`; `render(&App, Frame)` only draws.
-Slow work runs on worker threads and returns as `Event`s. Details: `docs/ARCHITECTURE.md`.
+`main.rs` → `cli.rs` (one-shot commands) or `tui/` (bare `trak`). Side effects sit behind traits
+(`Player`, `Library`, `AudioSource`, the token `Store`, the login's `TokenEndpoint`/`Browser`) with
+fakes, and the network fetches (lyrics, art) are plain functions run on workers with pure parsers,
+so the whole app runs in tests. State is pure: `update(App, Event)` returns the new `App` plus the
+commands and Web jobs it wants run; `render::draw(Frame, &App, &Theme)` only draws. Slow work runs
+on worker threads and returns as `Event`s. Details: `docs/ARCHITECTURE.md`.
 
 ## Conventions
 
@@ -236,16 +242,16 @@ fixtures under `tests/fixtures/` so future tests are hermetic.
 ## Repo map
 
 ```
-AGENTS.md  CLAUDE.md  README.md  TODO.md  LICENSE  THIRD-PARTY-NOTICES.md  VERSION
-Cargo.toml  rustfmt.toml  src/main.rs
-scripts/          (created by task 9.1: package-release.sh)
-Formula/trak.rb   (created by task 9.3)
-.github/workflows/release.yml  (created by task 9.2)
-docs/  SPEC.md  COMPAT.md  ARCHITECTURE.md  AGENT-PROMPTS.md
-       TERMINALS.md + KEYCHAIN.md + WEB-API.md + AUDIO-TAP.md exist (1.3–1.7)
-       (created by tasks: APPLESCRIPT.md KEYCHAIN.md TERMINALS.md AUDIO-TAP.md README-NOTES.md RELEASING.md)
-.github/workflows/ci.yml
-tests/fixtures/   (created by task 1.1)
-spikes/          (throwaway spike crates: applescript/ notify/ keychain/ images/ viz/ tap/)
-scripts/          (created by task 9.1: package-release.sh)
+AGENTS.md  CLAUDE.md  README.md  TODO.md  CONTINUATION.md  CHANGELOG.md  LICENSE  VERSION
+THIRD-PARTY-NOTICES.md  CONTRIBUTING.md  SECURITY.md  install.sh  Cargo.toml  rustfmt.toml
+src/              main.rs (argv) + lib.rs; module map in docs/ARCHITECTURE.md
+examples/         notify-, accent-, lyrics-, tap-probe (real-Spotify measurements, not tests)
+tests/            cli.rs, install_sh.rs; fixtures/ (applescript/ lyrics/ visualizer/)
+docs/             SPEC.md COMPAT.md ARCHITECTURE.md AGENT-PROMPTS.md RELEASING.md README-NOTES.md
+                  APPLESCRIPT.md TERMINALS.md AUDIO-TAP.md KEYCHAIN.md WEB-API.md (phase 1 spikes)
+                  images/ (README screenshots and demo GIF; how they were recorded: images/NOTES.md)
+scripts/          package-release.sh, with-timeout, screen.py
+Formula/trak.rb   the Homebrew formula (the release workflow writes the tap's copy)
+.github/          workflows/ci.yml, workflows/release.yml, ISSUE_TEMPLATE/
+spikes/           throwaway spike crates (applescript/ notify/ keychain/ images/ viz/ tap/) + verify.sh
 ```

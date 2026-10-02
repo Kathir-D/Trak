@@ -35,9 +35,11 @@ dictionary**. None of them needs the others installed.
    - A pause or play issued from Trak is a manual action; Sonar correctly releases ownership. That
      is the desired behaviour.
 4. **Live updates**: subscribe to the distributed notification
-   `com.spotify.client.PlaybackStateChanged` (verify its userInfo keys in TODO 1.3). It fires for
-   changes made by Sonar's buttons, the Spotify window, media keys, and headless Spotify. A slow
-   poll (1 s while playing, 3 s otherwise) is the backup and also drives the progress bar.
+   `com.spotify.client.PlaybackStateChanged` (its 13 userInfo keys are recorded in
+   `docs/APPLESCRIPT.md` §9). It fires for play/pause/skip from any source — Sonar's buttons, the
+   Spotify window, media keys — but not for seeks, volume, shuffle or repeat. A slow poll (3 s while
+   playing, 5 s otherwise) is the backup and catches those; the progress bar is interpolated
+   locally between reads.
 5. **Read back after every volume write, but compare with a ±1 tolerance.** headless-spotify
    reported on 2026-09-28 that "Spotify ≥ 1.3.x ignores AppleScript volume sets". **That is not true
    on 1.3.1.234** — sets apply, verified 8/8 (see `docs/APPLESCRIPT.md` §5). What *is* true is
@@ -49,7 +51,8 @@ dictionary**. None of them needs the others installed.
    fallback is then a config choice (`volume.control`), not an automatic repair (TODO 4.4).
 6. **Permissions belong to the terminal app**, not to Sonar. The first AppleScript call from
    e.g. cmux triggers a one-time "control Spotify" prompt for that terminal. The visualizer's tap
-   needs "System Audio Recording" for the terminal, once. Denied → simulated visualizer.
+   is attributed to the terminal's "Screen & System Audio Recording"; on the Macs measured so far
+   no prompt appears at all (`docs/AUDIO-TAP.md`). Denied → simulated visualizer and one toast.
 7. **AppleScript path**: call `/usr/bin/osascript` by absolute path, overridable with the env var
    `TRAK_OSASCRIPT`. (On the owner's dev machine, plain `osascript` from an agent session is
    routed through a shim; see `AGENTS.md` "Dev machine".)
@@ -58,28 +61,34 @@ dictionary**. None of them needs the others installed.
 
 ### Sonar state file
 
-Sonar (once its agent implements `docs/AGENT-PROMPTS.md` prompt 1) writes
+Sonar (per `docs/AGENT-PROMPTS.md` prompt 1) writes
 `~/Library/Application Support/Sonar/state.json` atomically:
 
 ```json
 {"v":1,"state":"idle|ducking|ducked|resuming","pid":12345,"since":1790000000}
 ```
 
-Trak watches it (FSEvents or a 500 ms stat poll) and, when `state` is `ducking|ducked|resuming`
-**and** `pid` matches Spotify's pid **and** the file is fresh (mtime within 10 minutes, or Sonar's
-process is alive), shows `⏸ auto-paused by Sonar` in the header and treats the pause as Sonar's.
-Missing file, unknown `v`, bad JSON, or stale data ⇒ ignore silently and show plain "paused".
+Trak re-reads it every 2 s (`src/sonar.rs`; `SONAR_STATE` overrides the path). `pid` is
+**Spotify's** pid, not Sonar's. When `state` is `ducking|ducked|resuming` **and** `pid` matches
+Spotify's pid **and** the file is fresh (mtime within 10 minutes, or Sonar's process is alive),
+Trak shows a one-time toast as the duck begins (e.g. `sonar: ducked, auto-paused`), refuses `m`,
+`+` and `-` with a one-line reason until it ends, and treats the pause as Sonar's. A believed file
+should also put a `sonar` badge in the header: `SonarState::badge` computes it, but as of
+2026-10-02 the renderer does not draw it yet. Missing file, unknown `v`, bad JSON, or stale data ⇒
+ignore silently: no badge, plain "paused".
 
 ### headless-spotify
 
 If `headless-spotify` is on `PATH`:
 
-- `headless-spotify status --json` → show a `headless` badge (schema is pinned by prompt 2; read
-  only fields you know; ignore extras).
+- `headless-spotify status --json`, run once at startup on the worker → a `headless` badge when
+  Spotify is hidden (read only fields you know; ignore extras; the real output has no `schema`
+  field and exits 1, both pinned as fixtures). Like Sonar's, the badge is computed
+  (`Headless::badge`) but not drawn yet; the footer hint below is.
 - `headless-spotify launch` → used by the idle card.
 
-If Spotify has no window / Dock icon, Trak is the only display, so surface more (full Info tab, a key
-to open the Spotify window via `open -a Spotify`).
+If Spotify has no window / Dock icon, Trak is the only display, so it says how to get one back: a
+footer hint, `open -a Spotify to show its window`.
 
 ## Status of the shared platform
 
@@ -101,7 +110,7 @@ to open the Spotify window via `open -a Spotify`).
 | --- | --- | --- |
 | Trak skip while Sonar running | Sonar's title updates within ~1 s | |
 | Sonar skip button while Trak open | Trak updates within ~1 s | |
-| Other app makes noise → Sonar ducks | Trak shows `auto-paused by Sonar`, volume meter not corrupted | |
+| Other app makes noise → Sonar ducks | Trak shows the duck toast, volume meter not corrupted | |
 | Noise stops → Sonar resumes | Trak returns to `playing` | |
 | User pauses in Trak, then noise starts/stops | Sonar does **not** resume it | |
 | User presses `m` during a duck | ignored with a hint | |

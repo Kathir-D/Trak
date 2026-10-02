@@ -166,7 +166,9 @@ Authoritative source: the "Endpoints still available" list in
   `GET /episodes`, `GET /shows`, `GET /audiobooks`, `GET /chapters`. Replaced by
   one request per item. **This is the one most likely to break `rspotify`
   silently**, because the crate's convenience methods take a list of ids and are
-  built on the batch endpoints. `web/api.rs` must avoid them and loop.
+  built on the batch endpoints. `web/api.rs` must avoid them and loop. (In the
+  end rspotify was not used at all: TODO 7.5 wrote a small blocking `ureq`
+  client instead.)
 - `GET /markets`, `GET /browse/new-releases`, `GET /browse/categories`,
   `GET /browse/categories/{id}`, `GET /users/{id}`, `GET /users/{id}/playlists`,
   `POST /users/{user_id}/playlists`.
@@ -303,7 +305,7 @@ re-signed binary blocks on read *and* on store, and because
 first launch after every `brew upgrade`. Full experiment in
 `docs/KEYCHAIN.md`.
 
-So the refresh token lives in a `0600` file at `~/.config/Trak/token.json`
+So the refresh token lives in a `0600` file at `~/.config/trak/token.json`
 (respecting `XDG_CONFIG_HOME`), written atomically, and trak refuses to read it
 if the mode is looser than `0600`. The `Store` trait still exists (TODO 7.4) so
 tests can fake it, but there is one real backend.
@@ -317,8 +319,9 @@ Concretely, for the next agent building Phase 7:
 
 1. **Redirect URI is `http://127.0.0.1`, no port, no path**, registered once in
    the dashboard. Bind an ephemeral port per login. Never send `localhost`.
-2. **Do not use `rspotify`'s batch helpers** (`tracks(ids)`, `artists(ids)`,
-   `albums(ids)`) — those call removed endpoints. Loop one id per request, and
+2. **Do not call the batch endpoints** (`rspotify`'s `tracks(ids)`, `artists(ids)`,
+   `albums(ids)` helpers are built on them; rspotify was rejected in TODO 7.5 and
+   `web/api.rs` is a `ureq` client). Loop one id per request, and
    cache aggressively: the dev-mode quota is per developer account and shared by
    every Client ID.
 3. **Library writes go through `/me/library`**, not `/me/tracks`. `f` (like) is

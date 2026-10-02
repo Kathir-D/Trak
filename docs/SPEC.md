@@ -40,7 +40,7 @@ See `docs/COMPAT.md` for how the three coexist. Trak's look and feel is intentio
 | Version B history | Session-only (in memory, cleared when the TUI exits) |
 | Keys | Arrows **and** vim keys. Not user-rebindable in v1 |
 | Mouse | A setting, on by default |
-| Volume keys | Spotify's volume only (10 % step, a setting). `m` mutes |
+| Volume keys | Spotify's volume only (10 % step, a setting). `m` mutes. `[volume] control = "system"` is the fallback for a Spotify that ignores volume writes: the keys then say they would change every sound on the Mac, and write nothing |
 | No Spotify running | Idle card "Spotify isn't running — press enter to launch". Never auto-launch |
 | Small terminals | Adapt: side-by-side → stacked → compact strip. Art shrinks/hides first |
 | Accent colour | Setting: `art` (default, dominant cover colour), `green` (#1DB954), `terminal` (ANSI palette) |
@@ -66,7 +66,7 @@ Full dashboard: rounded panes, header, two columns, footer. Left = Now Playing, 
 ││  1:42 ━━━━━━━━━━●──────────────────── 5:07    ││                                            ││
 ││       ⏮     ⏸     ⏭        🔊 ▰▰▰▰▰▰▰▱▱▱ 70%  ││                                            ││
 │╰───────────────────────────────────────────────╯╰────────────────────────────────────────────╯│
-│ space play/pause  n/p next/prev  h/l seek  +/- vol  s shuffle  r repeat  / search  ? help     │
+│ space play/pause  n/p next/prev  h/l seek  ←/→ tab  +/- vol  s shuffle  r repeat  ? settings  │
 ╰────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
@@ -80,7 +80,9 @@ Rules:
 - **Right-pane tabs** are one strip in both versions (built in 7.13; the earlier "B has three,
   A has six" wording was dropped because a second strip is a second place for `1`-`6` to mean
   different things): `[1] Search`, `[2] Playlists`, `[3] Queue`, `[4] Liked`, `[5] Library`,
-  `[6] Lyrics`, then `History` and `Info`, reachable with `Tab` and not numbered. `default_tab`
+  `[6] Lyrics`, then `History` and `Info`, reachable with `Tab`/`←`/`→` and not numbered. When the
+  strip is too narrow for every tab, the selected one is kept centred and the strip scrolls
+  (it sits at an end only at the first and last tabs). `default_tab`
   (config) picks the one shown at start; the default is `history`, which works with no Client ID.
   - History: tracks played this session. `↑/↓`/`j/k` to move, `enter` plays it again (by URI).
   - Info: everything AppleScript exposes (see section 5).
@@ -88,6 +90,12 @@ Rules:
     Client ID is added: each one opens with a one-line notice (`Connection::notice`) saying what
     is missing and where to fix it (`trak config`, then `s` for the guided setup), and is otherwise
     empty. (The first-ever launch also shows the one-time hint about `,` and the Client ID.)
+- Full-screen lyrics (`L`) draw over the album cover, darkened so the words stay readable; with no
+  cover (or art turned off) they draw on the plain background.
+- Settings (`,` or `?`) open over the dashboard, with a Keys panel beside them listing every key;
+  there is no separate help overlay.
+- Right-to-left titles are fenced (`tui/bidi.rs`) so the terminal's bidi pass cannot pull digits or
+  the clock across them.
 - Spotify not running: centered idle card, `enter` launches it in the background.
 
 ## 4. Keys
@@ -101,16 +109,17 @@ Rules:
 | `+` `-` | Spotify volume ±10 (a setting) | both |
 | `m` | Mute / unmute (disabled while Sonar is fading, see COMPAT) | both |
 | `s` / `r` | Toggle shuffle / cycle repeat | both |
+| `R` | Replay the current track from the start | both |
 | `a` | Toggle art ↔ visualizer | both |
 | `v` | Cycle visualizer style | both |
 | `↑` `↓` / `j` `k` | Move in a list | both |
 | `enter` | Play the selected item | both |
-| `Tab` / `Shift-Tab` | Cycle focus between panes / tabs | both |
+| `Tab` / `Shift-Tab` | Next / previous tab | both |
 | `1`–`6` | Jump to tab | both |
 | `c` | Copy the current track's share URL | both |
 | `L` | Full-screen lyrics, over the darkened cover when there is one | both |
-| `,` | Open settings (`trak config`) | both |
-| `?` | Help overlay | both |
+| `,` | Open settings (`trak config`), with every key listed beside them | both |
+| `?` | Same as `,` (owner, 2026-10-01: the help overlay was folded into settings) | both |
 | `q` / `ctrl-c` | Quit | both |
 | `/` | Search (live, grouped) | A |
 | `f` | Like / unlike current track ("favourite"; `l` is seek-right) | A |
@@ -118,9 +127,14 @@ Rules:
 | `o` | Open artist or album page of the selection | A |
 | `P` (shift-p) | Add the selected (or playing) track to a playlist; `n` in the picker makes a new one | A |
 | `X` (shift-x) | Remove the selected track from the open playlist (asks `y`/`n`) | A |
+| `[` `]` | Previous / next result group (Tracks, Albums, Artists, Playlists) on the Search tab | A |
 | `esc` | Back / close overlay | both |
 
-Keep this table and the `?` help overlay in sync.
+The A keys act on tabs 1–5. Pressed anywhere else they show a toast saying why (the missing
+Client ID or login, or "works on the Spotify tabs, 1 to 5") rather than silently doing nothing.
+
+Keep this table and the Keys panel of the settings screen (`HELP_ROWS` in `tui/render.rs`) in sync;
+`the_help_overlay_matches_the_spec_table` reads this table and fails the build if they drift.
 
 ## 5. What AppleScript can give us (Version B feature ceiling)
 
@@ -132,7 +146,7 @@ The Spotify scripting dictionary exposes, for `current track`: `name`, `artist`,
 `set sound volume`, `set shuffling`, `set repeating`.
 
 It **cannot** list a queue, playlists, the library, or search. That is exactly the A/B split.
-(Verify each field on this machine in TODO 1.1 and write the real output into `docs/APPLESCRIPT.md`.)
+(Each field was verified in TODO 1.1; the real output is in `docs/APPLESCRIPT.md`.)
 
 ## 6. Version A (Web API)
 
@@ -226,6 +240,9 @@ mouse = true
 volume_step = 10
 seek_step = 5
 
+[volume]
+control = "spotify"        # spotify | system (see "Volume keys" in section 2)
+
 [notifications]
 song_change = false
 
@@ -238,7 +255,7 @@ client_id = ""             # empty = Version B
 
 Toggles in the settings screen: show art, visualizer on/off + style, progress bar, volume meter,
 popularity, key hints, clock, side pane, default tab, art protocol, accent, border style, mouse,
-step sizes, notifications, lyrics, and the guided Client ID setup.
+step sizes, volume control, notifications, lyrics, the Client ID, and the guided setup (`s`).
 
 ## 9. CLI (shpotify parity)
 
@@ -282,8 +299,10 @@ print a friendly explanation and how to get one; exit code 2. Exit codes: 0 ok, 
 (same as `--plain`) and none in the TUI: foreground and background colours are stripped from every
 frame, while bold, dim and reverse stay (the cursor row is reverse). Without 24-bit support
 (`COLORTERM` not `truecolor`/`24bit`) RGB colours are mapped to the 256 palette when `TERM` says
-`256color`/kitty/ghostty, and to the 16 named colours otherwise (`tui/colour.rs`). Album art is a
-picture, not a text colour, and is governed by `[display] art`.
+`256color`/kitty/ghostty, and to the 16 named colours otherwise (`tui/colour.rs`). On a light
+terminal background (asked once at startup with OSC 11; a terminal that does not answer counts as
+dark) pale RGB foregrounds are darkened to 3:1 against white and lose DIM, so a pale cover accent
+stays readable. Album art is a picture, not a text colour, and is governed by `[display] art`.
 
 ## 10. Open questions
 
