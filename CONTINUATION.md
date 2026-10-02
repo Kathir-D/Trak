@@ -82,8 +82,9 @@ worked, and what to expect:
   (needs `pbcopy`) — that one failing on Linux is expected, not a regression. The script that
   builds the copy lived in the session scratchpad and is not in the repo; rewriting it takes
   minutes.
-- A newer clippy than the owner's flags nothing in the gate now; two `manual_range_contains` lints
-  in `accent.rs` were fixed for it.
+- **Run `rustup update stable` first.** CI (`macos-15`) uses the latest stable; the container's
+  older clippy passed a `useless_format` that CI then rejected on `main`. Two `manual_range_contains`
+  lints in `accent.rs` were fixed for the same reason.
 
 ---
 
