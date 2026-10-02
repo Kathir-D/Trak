@@ -608,6 +608,17 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
       > `web_client()` (worker only) now renews and saves it via `Session::access`, and the UI
       > thread asks the no-network `web_ready()` instead. `esc` while the browser is open closes the panel but
       > cannot cancel the wait; it ends at the login timeout. **[owner]** walk through it once.
+      > **Checked in real cmux (2026-10-01, 100×40 and a 46-column split):** all four steps render
+      > and the copy/open keys work (enter on step 1 opened the dashboard). **Bug found and fixed:**
+      > `Paragraph`'s own wrap started a continued explanation flush against the panel's left border,
+      > and cmux then lost the border cells on exactly those rows; explanations and titles are now
+      > word-wrapped by display width with a hanging indent and the URI is its own line
+      > (`explanations_wrap_at_words_and_never_reach_the_border`, which failed before the fix). **Still
+      > [owner]:** no `~/.config/trak/token.json` exists and the developer site is not signed in on
+      > this Mac, so the login itself, whether the dashboard accepts `http://127.0.0.1` with no port,
+      > and every live Web API check (search, `f`, `A`, `P`/`n`/`X`, paging, `trak play`) wait on it.
+      > The fixed-port fallback is not built: it is only needed if the dashboard refuses the no-port
+      > form, and nobody has seen that happen.
 - [x] 7.4 **Token storage**: the `0600` file decided in 1.8 (`~/.config/trak/token.json`, `XDG_CONFIG_HOME`
       respected, directory `0700`, atomic temp-then-rename write). **Refuse to read a token whose mode
       is looser than `0600`** rather than proceeding, and assert that in a test. Never logged, never in

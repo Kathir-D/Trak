@@ -308,15 +308,27 @@ pub fn render(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         } else {
             Style::default()
         };
-        lines.push(Line::from(Span::styled(
-            format!(" {mark} {}  {title}", i + 1),
-            style,
-        )));
+        // One column is kept clear on the right as well, so no word touches
+        // either border.
+        let room = usize::from(parts[0].width).saturating_sub(EXPLAIN_INDENT.len() + 1);
+        for (n, row) in word_wrap(title, room).into_iter().enumerate() {
+            let head = if n == 0 {
+                format!(" {mark} {}  ", i + 1)
+            } else {
+                EXPLAIN_INDENT.to_string()
+            };
+            lines.push(Line::from(Span::styled(format!("{head}{row}"), style)));
+        }
         // Every step explains itself; in a short terminal only the one the
         // cursor is on does, so the screen is never torn.
         if !compact || here {
             for text in explain(i, app) {
-                lines.push(Line::from(Span::styled(format!("      {text}"), dim)));
+                for row in word_wrap(&text, room) {
+                    lines.push(Line::from(Span::styled(
+                        format!("{EXPLAIN_INDENT}{row}"),
+                        dim,
+                    )));
+                }
             }
         }
         if !compact {
@@ -343,13 +355,54 @@ pub fn render(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     f.render_widget(Paragraph::new(footer).alignment(Alignment::Left), parts[1]);
 }
 
+/// Where an explanation starts, under its step's title.
+const EXPLAIN_INDENT: &str = "      ";
+
+/// Wrap at spaces to a display width, so a continued explanation keeps its
+/// indent. Left to `Paragraph`'s own wrap, the continuation started flush
+/// against the panel's border, and in cmux the border cells on exactly those
+/// rows went missing (seen 2026-10-01). A word wider than the row is cut by
+/// width rather than allowed to run past it.
+fn word_wrap(text: &str, width: usize) -> Vec<String> {
+    use unicode_width::UnicodeWidthStr;
+
+    let width = width.max(1);
+    let mut rows: Vec<String> = Vec::new();
+    let mut row = String::new();
+    for word in text.split(' ').filter(|w| !w.is_empty()) {
+        let needed = if row.is_empty() {
+            word.width()
+        } else {
+            row.width() + 1 + word.width()
+        };
+        if needed <= width {
+            if !row.is_empty() {
+                row.push(' ');
+            }
+            row.push_str(word);
+            continue;
+        }
+        if !row.is_empty() {
+            rows.push(std::mem::take(&mut row));
+        }
+        let mut pieces = crate::tui::render::wrap_by_width(word, width);
+        row = pieces.pop().unwrap_or_default();
+        rows.extend(pieces);
+    }
+    if !row.is_empty() || rows.is_empty() {
+        rows.push(row);
+    }
+    rows
+}
+
 /// The lines under one step. Plain strings so a test can read them.
 pub fn explain(step: usize, app: &App) -> Vec<String> {
     let s = &app.setup;
     match step {
         0 => vec!["enter opens it. Log in and press \"Create app\".".into()],
         1 => vec![
-            format!("Redirect URI (exactly, no port, never localhost):  {REGISTERED_REDIRECT_URI}"),
+            "Redirect URI (exactly, no port, never localhost):".into(),
+            format!("  {REGISTERED_REDIRECT_URI}"),
             "enter or c copies it. Tick \"Web API\" and save.".into(),
         ],
         2 => {
@@ -572,6 +625,39 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn explanations_wrap_at_words_and_never_reach_the_border() {
+        let mut app = App::new();
+        app.setup.open("", false);
+        for width in [40u16, 52, 70, 100] {
+            let text = drawn(width, 30, &app);
+            for row in text.lines() {
+                let inner: String = row.chars().skip(1).collect();
+                // Every row inside the panel starts with the border, then a
+                // space: nothing is drawn flush against it.
+                if row.starts_with('│') {
+                    assert!(inner.starts_with(' '), "{width}: {row}\n{text}");
+                }
+            }
+            // The URI is never split across rows, so it can be read and typed.
+            assert!(text.contains("http://127.0.0.1"), "{width}\n{text}");
+        }
+    }
+
+    #[test]
+    fn word_wrap_keeps_words_whole_and_cuts_only_a_word_too_wide() {
+        assert_eq!(word_wrap("one two three", 7), ["one two", "three"]);
+        assert_eq!(word_wrap("abcdefghij", 4), ["abcd", "efgh", "ij"]);
+        assert_eq!(word_wrap("", 10), [""]);
+        assert_eq!(word_wrap("a  b", 10), ["a b"]);
+        for row in word_wrap("enter to type or paste it (the 32 characters)", 9) {
+            assert!(
+                unicode_width::UnicodeWidthStr::width(row.as_str()) <= 9,
+                "{row}"
+            );
+        }
     }
 
     #[test]
