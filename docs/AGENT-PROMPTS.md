@@ -9,7 +9,7 @@ Record here when each prompt has been run (`Status:` line).
 
 ## Prompt 1 — Sonar (`projects/Sonar`)
 
-Status: not yet run.
+Status: run (checked 2026-10-02: `SonarStatePublisher.swift` writes `state.json`; the README has "Works with Trak" and documents the file).
 
 ```
 Add a small, additive integration for a new companion tool, "Trak"
@@ -34,7 +34,7 @@ Commit in small conventional commits and push, per the global CLAUDE.md.
 
 ## Prompt 2 — headless-spotify (`projects/headless-spotify`)
 
-Status: not yet run.
+Status: run (checked 2026-10-02: `launch` and the versioned `status --json` (`"schema": 1`) are documented, and the README has "Works with Trak" and a Companions table).
 
 ```
 Add compatibility support for a new companion tool, "Trak"

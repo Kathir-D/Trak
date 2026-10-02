@@ -46,8 +46,9 @@ Legend: `[ ]` todo · `[x]` done · **A/B** = with / without a Spotify Client ID
       `docs/COMPAT.md`, `docs/ARCHITECTURE.md`, `docs/AGENT-PROMPTS.md`, `THIRD-PARTY-NOTICES.md`.
 - [x] 0.3 CI (`.github/workflows/ci.yml`): fmt, clippy `-D warnings`, test, release build,
       VERSION == Cargo.toml version check, on `macos-15`.
-- [ ] 0.4 **[owner]** Run the sibling agent prompts in `docs/AGENT-PROMPTS.md` (1 = Sonar,
+- [x] 0.4 **[owner]** Run the sibling agent prompts in `docs/AGENT-PROMPTS.md` (1 = Sonar,
       2 = headless-spotify) whenever convenient. Not blocking. Update their `Status:` lines when done.
+      > Both had been run; confirmed from the sibling repos on 2026-10-02.
 - [x] 0.5 Confirm CI is green on GitHub after the first push; add the badge to the README. (green on first push, badge is in the README)
       Needs: 0.3. Done when: Actions tab shows a green run on `main`.
 
@@ -978,8 +979,12 @@ Requires Sonar installed and running (`brew install --cask kathir-d/tap/sonar`) 
       > vulnerability reporting are set (`viewerPermission: ADMIN`). Only the social preview
       > image is left: it has no API, so it is a web-UI upload **[owner]** (Settings → General →
       > Social preview; `docs/images/dashboard.png` cropped to 1280×640 would do).
-- [ ] 11.4 Add a "Works with Trak" mention in Sonar's and headless-spotify's READMEs (their agents do
+- [x] 11.4 Add a "Works with Trak" mention in Sonar's and headless-spotify's READMEs (their agents do
       this via prompts 1 and 2). Confirm the three READMEs cross-link.
+      > Confirmed 2026-10-02 after a `git pull` of both: Sonar's README links Trak in Features
+      > and a "Works with Trak" note; headless-spotify has a "Works with Trak" section and a
+      > Companions table; Trak's README links both. Prompt 3 (the tap) is superseded by the
+      > release workflow, which writes the formula itself.
 - [x] 11.5 Performance and battery pass: idle CPU < 1 % with the visualizer off and < ~5 % on;
       wake-ups minimised when paused; measure and record.
       > Measured 2026-10-02 in cmux, release build, Kitty art on, `top -l 31 -s 1` averages:
