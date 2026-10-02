@@ -238,6 +238,7 @@ pub fn config_screen() -> i32 {
     crate::tui::settings::open(&mut app);
     app.web.connection = connection_at_start(&app.config.spotify.client_id);
     let mut setup = SetupRunner::default();
+    let depth = crate::tui::colour::Depth::from_env();
 
     let mut guard = match TerminalGuard::enter() {
         Ok(g) => g,
@@ -285,7 +286,10 @@ pub fn config_screen() -> i32 {
         theme.accent = app.settings.accent;
         theme.border = app.settings.border;
         if terminal
-            .draw(|f| crate::tui::settings::render(f, f.area(), &app, &theme))
+            .draw(|f| {
+                crate::tui::settings::render(f, f.area(), &app, &theme);
+                crate::tui::colour::apply(f.buffer_mut(), depth);
+            })
             .is_err()
         {
             break 1;
@@ -342,6 +346,7 @@ fn event_loop<B: ratatui::backend::Backend>(
     }
     app.web.connection = connection_at_start(&app.config.spotify.client_id);
     let mut setup = SetupRunner::default();
+    let depth = crate::tui::colour::Depth::from_env();
     if first_run {
         app.hint = Some(FIRST_RUN_HINT.to_string());
     }
@@ -665,6 +670,9 @@ fn event_loop<B: ratatui::backend::Backend>(
                 if settings_open {
                     crate::tui::settings::render(f, f.area(), &app, &theme);
                 }
+                // Last, so it sees every cell: NO_COLOR and 16/256-colour
+                // terminals are handled once here, not by each widget (11.6).
+                crate::tui::colour::apply(f.buffer_mut(), depth);
             })
             .is_err()
         {

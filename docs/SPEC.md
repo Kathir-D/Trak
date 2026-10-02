@@ -259,6 +259,13 @@ trak toggle shuffle|repeat
 print a friendly explanation and how to get one; exit code 2. Exit codes: 0 ok, 1 runtime failure,
 2 usage / missing setup. Never launch Spotify from a one-shot command (see COMPAT).
 
+**Colour.** `NO_COLOR` set to anything non-empty (<https://no-color.org>) means no colour in the CLI
+(same as `--plain`) and none in the TUI: foreground and background colours are stripped from every
+frame, while bold, dim and reverse stay (the cursor row is reverse). Without 24-bit support
+(`COLORTERM` not `truecolor`/`24bit`) RGB colours are mapped to the 256 palette when `TERM` says
+`256color`/kitty/ghostty, and to the 16 named colours otherwise (`tui/colour.rs`). Album art is a
+picture, not a text colour, and is governed by `[display] art`.
+
 ## 10. Open questions
 
 _None._ Add items here instead of guessing.

@@ -2260,6 +2260,49 @@ mod tests {
         }
     }
 
+    /// TODO 11.6: nothing a track can be called, and no terminal size, may panic
+    /// the draw. Wide CJK, right-to-left, emoji, combining marks and a title far
+    /// longer than any pane, at every tab and from 1x1 up to a very large window.
+    #[test]
+    fn hostile_titles_and_sizes_never_panic_the_draw() {
+        use crate::tui::app::Tab;
+        let titles = [
+            "日本語のとても長いタイトル、全角文字だけで書かれています",
+            "عنوان طويل جدا من اليمين إلى اليسار — فنان",
+            "שיר בעברית עם מילים ארוכות מאוד",
+            "🎵🎶🎧 emoji 👨\u{200d}👩\u{200d}👧 title",
+            "e\u{301}\u{301}\u{301} combining",
+            &"x".repeat(500),
+            "",
+        ];
+        let theme = Theme::default();
+        for title in titles {
+            for tab in Tab::ALL {
+                for (w, h) in [
+                    (1u16, 1u16),
+                    (3, 2),
+                    (24, 6),
+                    (40, 12),
+                    (80, 24),
+                    (100, 30),
+                    (250, 70),
+                ] {
+                    let mut app = app_at(w, h);
+                    app.tab = tab;
+                    if let Some(st) = app.state.as_mut() {
+                        st.track.title = title.to_string();
+                        st.track.artist = title.to_string();
+                        st.track.album = title.to_string();
+                    }
+                    let backend = ratatui::backend::TestBackend::new(w, h);
+                    let mut term = ratatui::Terminal::new(backend).unwrap();
+                    term.draw(|f| draw(f, &app, &theme))
+                        .unwrap_or_else(|e| panic!("{title:?} on {tab:?} at {w}x{h}: {e}"));
+                }
+            }
+        }
+    }
+
     /// The SPEC §3 layout, checked as a snapshot at the size it was drawn for.
     #[test]
     fn the_wide_layout_looks_like_the_spec() {

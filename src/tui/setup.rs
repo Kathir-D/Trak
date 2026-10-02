@@ -269,6 +269,17 @@ pub fn key(app: &mut App, c: char) {
 
 /// Draw the panel over `area`.
 pub fn render(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+    // The same floor the checklist has: below it the steps cannot be read, and
+    // a word about the terminal is better than something torn (SPEC §3).
+    if area.width < 30 || area.height < 8 {
+        f.render_widget(
+            Paragraph::new("terminal too small — resize")
+                .alignment(Alignment::Center)
+                .wrap(Wrap { trim: true }),
+            area,
+        );
+        return;
+    }
     let s = &app.setup;
     let width = area.width.min(68);
     let panel = Rect {
@@ -587,6 +598,16 @@ mod tests {
             assert!(text.contains(n), "{n}\n{text}");
         }
         assert!(text.contains("enter opens it"), "{text}");
+    }
+
+    #[test]
+    fn no_size_panics_the_panel_and_a_tiny_one_says_so() {
+        let mut app = App::new();
+        app.setup.open("", false);
+        for (w, h) in [(1, 1), (10, 3), (29, 20), (60, 7), (60, 8), (200, 60)] {
+            drawn(w, h, &app);
+        }
+        assert!(drawn(20, 5, &app).contains("too small"));
     }
 
     #[test]

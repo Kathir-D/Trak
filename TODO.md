@@ -857,6 +857,13 @@ Requires Sonar installed and running (`brew install --cask kathir-d/tap/sonar`) 
 - [ ] 11.6 Accessibility / robustness pass: works with `NO_COLOR`, 16-colour terminals, light
       themes, very small and very large terminals, non-ASCII titles, right-to-left text does not break
       layout.
+      > Done in code: `NO_COLOR` (CLI -> plain; TUI strips fg/bg per frame, keeps reverse/bold),
+      > RGB downgraded to 256/16 colours by `COLORTERM`/`TERM` (`tui/colour.rs`, applied once on the
+      > finished buffer, so no widget knows), a draw sweep over CJK / RTL / emoji / combining / 500-char
+      > titles x every tab x 1x1..250x70 never panics, and the setup panel has the same too-small floor
+      > as the checklist. **Not verifiable here — [owner]:** a *light-background* theme (dim text may
+      > be hard to read), real RTL rendering order in cmux, and `NO_COLOR=1 trak` in a real terminal.
+      > Kept open until those are looked at.
 - [ ] 11.7 Final read-through of `AGENTS.md`, `CLAUDE.md`, and the docs so they match the shipped
       product; remove stale TODOs.
 
