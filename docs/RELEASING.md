@@ -12,6 +12,7 @@ What exists today:
 | Automation | `.github/workflows/release.yml` | Runs on `v*` tags: gate, package, release, then the tap commit |
 | Formula | `Formula/trak.rb` | Placeholders until a release; CI rewrites `version`, `url` and `sha256` |
 | Tap | `github.com/Kathir-D/homebrew-tap` | `Formula/trak.rb`, written by this repo's release workflow and nothing else |
+| curl installer | `install.sh` | Installs the same tarball without Homebrew, after a sha256 check (§10, TODO 9.9) |
 
 **No Apple Developer account, no Developer ID, no paid signing, no notarisation.**
 The binary is signed with `codesign -s -`, which is free. See §6 for why that is
@@ -175,7 +176,8 @@ kathir-d/tap/trak` and `brew test trak`.
 | Add the row to the tap README | **[owner]** | TODO 9.4. The workflow owns `Formula/trak.rb` and nothing else, so the README table is a hand edit — or run prompt 3 in `docs/AGENT-PROMPTS.md`. |
 | `brew audit --strict --online kathir-d/tap/trak` and `brew style` | you, before the announcement | TODO 9.5. A checksum complaint on the *unreleased* formula is expected: the placeholders are meant not to install. |
 | Fresh-machine test | you | TODO 9.6, §7. |
-| Approve the release | **[owner]** | TODO 9.8. The first release waits on phases 2–8 and on the phase 10 compatibility rows. |
+| Approve the release | the agent, by owner override | TODO 9.8 (changed 2026-10-01): an agent may tag once phases 2–7 and 9 pass and every pre-tag check in §1 is green; real audio (8.3/8.5) and phase 10 do not block. |
+| Check the curl installer against the real release | you | §10, once the release is up. |
 
 ## 6. Signing, and why bottles are not a problem
 
@@ -271,7 +273,46 @@ For a bad *formula* with a good binary, fix `Formula/trak.rb` here, commit it, a
 have the **[owner]** push that one file to the tap. The workflow only runs on tags,
 and the tap's one-writer rule means the file is not edited from two places.
 
-## 10. Release log
+## 10. The curl installer (TODO 9.9)
+
+`install.sh` at the repository root is the second way in, for people without
+Homebrew. It needs nothing from a release beyond what the workflow already
+publishes: it downloads `trak-<v>-macos.tar.gz` and `SHA256SUMS.txt` from the
+GitHub release, so there is nothing extra to build or upload, and the raw URL on
+`main` is the one people pipe into `sh`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Kathir-D/Trak/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Kathir-D/Trak/main/install.sh | sh -s -- --uninstall
+TRAK_VERSION=0.1.0 TRAK_INSTALL_DIR="$HOME/bin" sh install.sh     # a pinned version, a chosen dir
+```
+
+What it promises, each one covered by `tests/install_sh.rs` against a `file://`
+mirror (`TRAK_BASE_URL` points it there):
+
+- macOS 14.2 or newer, or it stops before downloading anything;
+- the tarball's line in `SHA256SUMS.txt` must verify with `shasum -a 256 -c`, or
+  nothing is installed;
+- `trak` goes to `$TRAK_INSTALL_DIR`, else `/usr/local/bin` if it is already
+  writable, else `~/.local/bin` (with a one-line PATH hint when that is not on
+  `PATH`). **It never runs `sudo`**;
+- it never overwrites a Homebrew-managed `trak` (a symlink into a `Cellar`);
+- `--uninstall` removes the one file named in its receipt
+  (`${XDG_DATA_HOME:-~/.local/share}/trak/install-sh-receipt`) and leaves
+  `~/.config/trak` alone;
+- quarantine: `curl` does not set `com.apple.quarantine`, so there is nothing to
+  strip and the script does not touch it. `xattr -l "$(command -v trak)"` prints
+  nothing after a curl install, the same as after a Homebrew one.
+
+After a release, run it for real once and record the output in §11:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Kathir-D/Trak/main/install.sh | sh
+trak --version && xattr -l "$(command -v trak)" && trak status
+curl -fsSL https://raw.githubusercontent.com/Kathir-D/Trak/main/install.sh | sh -s -- --uninstall
+```
+
+## 11. Release log
 
 One row per release, filled in from §4 and §7. Nothing yet: the first release is
 TODO 9.8, `v0.1.0`, after phases 2–8.

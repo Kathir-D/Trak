@@ -33,7 +33,7 @@ See `docs/COMPAT.md` for how the three coexist. Trak's look and feel is intentio
 | License | MIT. `LICENSE` carries both the Trak and the shpotify copyright lines |
 | Platform | **macOS 14.2+ only** (Core Audio process taps need 14.2). arm64 + x86_64 |
 | Repo | Public `Kathir-D/Trak`, from day one |
-| Distribution | Homebrew **formula** in `Kathir-D/homebrew-tap`: `brew install kathir-d/tap/trak`. Prebuilt binary from a GitHub release tarball. **No paid code signing / notarization** (ad-hoc `codesign -s -` is free and fine) |
+| Distribution | Homebrew **formula** in `Kathir-D/homebrew-tap`: `brew install kathir-d/tap/trak`. Prebuilt binary from a GitHub release tarball. Second path (owner, 2026-10-01): a curl installer, `install.sh` at the repo root, which installs the same tarball after a sha256 check (§9). **No paid code signing / notarization** (ad-hoc `codesign -s -` is free and fine) |
 | CLI compat | Every shpotify subcommand keeps working. Bare `trak` opens the TUI |
 | CLI output | Redesigned but not extravagant. Plain by default when piped. `--plain` and `--json` flags |
 | Extras | **Out of scope:** `status --format`, `trak mini`, shell completions, man page |
@@ -254,6 +254,20 @@ trak toggle shuffle|repeat
         --plain   no colour / no decoration
         --json    machine readable (status)
 ```
+
+**Install** (outside the binary, listed here because it is part of the product):
+
+```
+brew install kathir-d/tap/trak                                                    # first choice
+curl -fsSL https://raw.githubusercontent.com/Kathir-D/Trak/main/install.sh | sh   # no Homebrew
+curl -fsSL https://raw.githubusercontent.com/Kathir-D/Trak/main/install.sh | sh -s -- --uninstall
+```
+
+`install.sh` refuses anything but macOS 14.2+, takes `TRAK_VERSION` (default: the latest release)
+and `TRAK_INSTALL_DIR` (default: `/usr/local/bin` if writable, else `~/.local/bin`), verifies the
+tarball against the release's `SHA256SUMS.txt` and aborts on a mismatch, never uses `sudo`, never
+touches quarantine (curl does not set it), never launches Spotify, and `--uninstall` removes only
+the file its receipt names. Settings and the token in `~/.config/trak` are never removed by it.
 
 `play <song>` etc. need search, so they need a Client ID (shpotify needed one too). Without it,
 print a friendly explanation and how to get one; exit code 2. Exit codes: 0 ok, 1 runtime failure,
