@@ -1519,18 +1519,22 @@ fn tab_strip(app: &App, selected: Style, avail: usize) -> TabStrip {
         tabs + gaps + before + after
     };
 
-    // Grow outwards from the selected tab. The left side is filled first, so the
-    // tabs before the selected one are the ones that get dropped.
+    // Grow outwards from the selected tab, one side then the other, so it sits
+    // in the middle with its neighbours either side of it -- the ones `←`/`→`
+    // go to next. Near either end there is nothing to grow into on that side,
+    // so the other side takes the room and the selected tab ends up at the edge.
     let mut lo = sel;
     let mut hi = sel;
     loop {
-        let after = hi + 1;
-        if lo > 0 && cost(lo - 1, hi) <= avail {
-            lo -= 1;
-        } else if after < Tab::ALL.len() && cost(lo, after) <= avail {
-            hi = after;
-        } else {
-            break;
+        let left = (lo > 0 && cost(lo - 1, hi) <= avail).then(|| lo - 1);
+        let right = (hi + 1 < Tab::ALL.len() && cost(lo, hi + 1) <= avail).then(|| hi + 1);
+        match (left, right) {
+            // The side with fewer tabs so far goes first; a tie goes right, so
+            // an odd count shows one more of what is coming than what is behind.
+            (Some(l), Some(_)) if sel - lo < hi - sel => lo = l,
+            (_, Some(r)) => hi = r,
+            (Some(l), None) => lo = l,
+            (None, None) => break,
         }
     }
     let hidden_before = lo;
@@ -2723,6 +2727,32 @@ mod tests {
             text.contains('‹') || text.contains('›'),
             "eight tabs do not fit in 100 columns and nothing said so: {text}"
         );
+    }
+
+    /// The selected tab sits in the middle of a strip that cannot show them
+    /// all, with as many neighbours before it as after; at the first or last
+    /// tab there are none on one side, so it sits at that edge instead.
+    #[test]
+    fn the_selected_tab_is_centred_until_it_reaches_an_end() {
+        let shown = |tab: Tab| {
+            let mut app = app_at(100, 30);
+            app.tab = tab;
+            let strip = tab_strip(&app, Style::default(), 60);
+            let labels: Vec<String> = strip.segments.iter().map(|(_, t)| t.clone()).collect();
+            let at = labels.iter().position(|l| l.starts_with('[')).unwrap_or(99);
+            (at, labels.len())
+        };
+        let mid = Tab::ALL[Tab::ALL.len() / 2];
+        let (at, n) = shown(mid);
+        assert!(n < Tab::ALL.len(), "60 columns should not fit every tab");
+        let (before, after) = (at, n - 1 - at);
+        assert!(
+            after == before || after == before + 1,
+            "{before} before, {after} after"
+        );
+        assert_eq!(shown(Tab::ALL[0]).0, 0);
+        let (at, n) = shown(Tab::ALL[Tab::ALL.len() - 1]);
+        assert_eq!(at, n - 1);
     }
 
     /// Every tab label the strip draws has to be clickable, and clicking one
