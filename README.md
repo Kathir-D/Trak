@@ -6,6 +6,8 @@
 
 <p align="center">
   <a href="https://github.com/Kathir-D/Trak/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Kathir-D/Trak/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://github.com/Kathir-D/Trak/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/Kathir-D/Trak?include_prereleases&label=release"></a>
+  <a href="#install"><img alt="Homebrew: kathir-d/tap/trak" src="https://img.shields.io/badge/homebrew-kathir--d%2Ftap%2Ftrak-FBB040?logo=homebrew&logoColor=white"></a>
   <img alt="macOS 14.2+" src="https://img.shields.io/badge/macOS-14.2%2B-000000?logo=apple&logoColor=white">
   <img alt="Rust" src="https://img.shields.io/badge/Rust-2024-DEA584?logo=rust&logoColor=white">
   <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
@@ -19,7 +21,7 @@
 
 > **Status: pre-alpha.** Everything below describes what is built and tested. One part has not
 > met a real account yet and is marked **unverified**: the Spotify Web API tabs (they need a
-> Client ID and a first live login). There is no Homebrew release yet; build from source.
+> Client ID and a first live login).
 
 **Contents:** [Why Trak](#why-trak) · [Features](#features) · [Install](#install) ·
 [Screenshots](#screenshots) · [The TUI](#the-tui) · [Version A and B](#version-a-and-b) · [Settings](#settings) ·
@@ -53,15 +55,38 @@
 
 ## Install
 
+Needs macOS 14.2 or newer and the Spotify desktop app. Trak is a command, not an app, so it
+installs as a Homebrew **formula** (no `--cask`):
+
+```sh
+brew install kathir-d/tap/trak
+trak                 # the TUI
+trak status          # one-shot
+```
+
+Upgrade with `brew update && brew upgrade kathir-d/tap/trak`; remove with `brew uninstall trak`.
+
+Without Homebrew, the installer downloads the same release, checks its SHA-256 and puts `trak` in
+`/usr/local/bin` (if writable) or `~/.local/bin`. It never uses `sudo`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Kathir-D/Trak/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Kathir-D/Trak/main/install.sh | sh -s -- --uninstall
+```
+
+The binary is universal (Apple silicon and Intel) and ad-hoc signed, not notarized. Neither path
+sets the quarantine flag, so macOS shows no Gatekeeper prompt. The first command that talks to
+Spotify asks your terminal for Automation permission, once ([Permissions](#permissions)).
+
+From source, with a recent stable Rust:
+
 ```sh
 git clone https://github.com/Kathir-D/Trak && cd Trak
 cargo build --release
-./target/release/trak            # the TUI
-./target/release/trak status     # one-shot
+./target/release/trak
 ```
 
-Needs macOS 14.2 or newer and a recent stable Rust. A Homebrew formula is planned and does not
-exist yet. `cargo test` runs with no Spotify, no network and no audio device.
+`cargo test` runs with no Spotify, no network and no audio device.
 
 ## Screenshots
 
