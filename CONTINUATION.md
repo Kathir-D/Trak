@@ -1,322 +1,89 @@
 # Trak — continuation prompt
 
-Paste everything below into a fresh session. It is written to be self-contained:
-you do not need this conversation, and you should not try to reconstruct it.
+Paste everything below into a fresh session. It is self-contained: you do not need the conversation
+that produced it, and you should not try to reconstruct it.
 
 ---
 
-## CONTEXT: another agent was working in this repo and stopped mid-task
+## How to work
 
-A previous agent was working through Phase 6 (lyrics, 6.1–6.4) and **stalled
-out of context**: it left the tree uncompilable — a stray debug test outside the
-test module in `src/lyrics.rs`, and a real bug where a 404 from the LRCLIB search
-fallback surfaced as `Malformed` ("LRCLIB sent an answer trak could not read")
-instead of `NotFound`, plus a test that served two canned replies to a code path
-that makes four requests. **All of that is now fixed, tested, and committed** (see
-"Phase 6" below). So: the working tree is clean, `main` builds, and the gate
-passes. Nothing is half-edited. You are starting from a green tree.
-
-Before you touch anything, form your own plan from `TODO.md` and treat the notes
-under each ticked box as the real specification — several say what a task
-deliberately did **not** do and why.
-
----
-
-## ⚠ HOW TO WORK — the owner's standing instructions (highest priority)
-
-These are **not** suggestions. They outrank convenience, tidiness, and your own preferences about
-how to sequence a session. The owner has restated each of them repeatedly, across sessions. They are
-also written into `AGENTS.md` under "⚠ Working style — the owner's standing instructions", so they
-survive without this file; read them there too.
-
-1. **Work through `TODO.md` in order, top to bottom.** Take the first unchecked task whose `Needs`
-   are met. The order in that file *is* the plan; do not reorder it because something else looks more
-   interesting or easier. When you reach the very end of `TODO.md`, that is the **only** moment you
-   stop and talk to the owner.
-2. **Use subagents constantly.** The project is big and the modules divide cleanly. Many focused
-   subagents, each with a **strict file boundary** ("you own these files, touch nothing else"), the
-   way Phase 6 (6.1–6.4) was done. Parallel agents share one working tree, so overlapping files
-   collide: either hand each subagent disjoint files, or give each its own `git worktree` and merge
-   the branch when it reports done.
-3. **Never idle while a subagent is running.** Start the next piece of work in parallel, on files
-   that subagent does not own. Sitting and waiting is wasted time.
-4. **Commit and push constantly.** After every coherent piece of work:
-   `git add -A && git commit && git push`. Saving progress is part of the task, not a finishing step
-   — a context loss or a crash must never cost more than the last few minutes of work. Never leave a
-   session's worth of work uncommitted.
-5. **Do not stop to ask the owner anything.** You are an unattended agent with full permissions on
-   their machine. Finish the task. The one exception is the end of `TODO.md`; also list the `[owner]`
-   items you could not do (a browser login, a paid step, a macOS permission click, a GitHub secret)
-   in your final message instead of asking for them mid-flight.
-6. **Test extensively, and re-read your own work.** Run the whole suite, not just the tests you
-   added. Read your diff before you commit, and read it again after. Look for the failure classes
-   listed under "Things that will bite you" — they are the ones that have actually bitten this
-   codebase, and every one of them got through to a "looks fine" moment first.
-7. **You may be continuing someone else's mid-task work.** The previous agent stalled mid-Phase 6
-   and left the repo uncompilable; the session after it found the cause by reading the diff, not by
-   being told. Check `git status`, `git log --oneline -20`, and whether the suite compiles before
-   assuming the tree is sane. If you find broken work, finish or revert it deliberately — never
-   assume a half-edited file is intentional.
-8. **Manage your context deliberately.** If you are compacted or your context fills, do **not** fish
-   through history. Re-read, in this order: `git log --oneline -20`, `git status`, the ticked notes
-   in `TODO.md`, `AGENTS.md`, then this file. Everything worth keeping is written into the repo on
-   purpose — that is why every ticked task carries a note and why this file exists. When you stop at
-   the end of the TODO, **rewrite `CONTINUATION.md`** so the next agent inherits the plan, the
-   decisions and the traps instead of rediscovering them: the next task, every unmerged worktree and
-   its branch, the audit findings, and the traps.
-
----
+The owner's standing instructions are in `AGENTS.md` under "⚠ Working style" (work `TODO.md` in
+order, subagents with strict file boundaries, commit and push constantly, never stall, never ask
+mid-flight, re-read your diff). They outrank your preferences. Read that section first.
 
 ## Start here
 
-1. `AGENTS.md` — the rules. Read it fully: "Hard rules" and "Definition of done".
-2. `TODO.md` — the task list. **First unchecked task whose `Needs` are met is your
-   next task.** Every ticked task carries a note about the *decisions*.
-3. `docs/SPEC.md` — the product. §3 layout/tabs, §4 the key table, §6 Version A,
-   §8 the config schema. **SPEC wins over TODO** where they disagree.
-4. `docs/COMPAT.md` — non-negotiable. Trak shares this machine with
-   `../Sonar` and `../headless-spotify`; the volume/mute rules there are why
-   several keys are refused while Sonar is fading.
-5. `docs/WEB-API.md` — researched authority for the Web API. Four things in the
-   original plan were **removed in dev mode**. Do not use an endpoint, a `limit`
-   cap or a field name it does not list.
+1. `AGENTS.md` — rules and Definition of done.
+2. `TODO.md` — first unchecked task whose `Needs` are met. Every ticked task has a note about the
+   decisions; read the notes, not just the boxes.
+3. `docs/SPEC.md` (wins over TODO), `docs/COMPAT.md` (non-negotiable), `docs/WEB-API.md`.
 
 ---
 
-## Current state
+## Current state (end of the 2026-10-02 session)
 
-Repo: **`github.com/Kathir-D/Trak`** (renamed from `trak` on 2026-10-01; GitHub
-redirects the old URL). Branch `main`, **clean**, pushed, CI green.
+Branch `ccr-529c7134-80scjb` (cloud session; `main` is the owner's merge target), pushed. **Every
+task that can be done without the owner's Mac, a real Spotify login or a paid step is done.**
+Phases 1–7 and 9.1–9.3/9.7 are ticked; this session did 7.3, 7.6–7.11, 7.13 and part of 11.x, and
+found that most of "7.6–7.11 code landed" was not actually wired:
 
-```
-fe525eb chore: rename the project to Trak, everywhere GitHub shows it
-b5f32d0 feat: the lyrics scroll, the offset tag, and the full-screen lyrics page (6.2, 6.3, 6.4)
-afbaa85 feat: the LRCLIB client, its disk cache, and recorded fixtures (6.1)
-eb70a20 docs: the usage table carries the real output of every command (2.9)
-538354c feat: the objc2 tap bypass finds the pid->AudioObjectID translation (1.5)
-```
+- 7.3 guided setup (`src/tui/setup.rs`, `s` on the settings screen); startup now derives the Web
+  connection (`connection_at_start`) — nothing set it before, so no Web tab could ever load.
+- A stale Web **access** token is renewed on the worker (`web_client`); the UI thread asks the
+  no-network `web_ready`. Before this a login would have died after an hour.
+- 7.6 the debounced search never fired (nothing advanced `search_debounce`); 7.7 nothing asked
+  whether the playing track is liked; 7.9 every list stopped at its first page (`more ↓` was
+  unreachable); 7.11 no key reached the playlist writes. All wired and tested.
+- 11.6 `NO_COLOR` + 256/16-colour downgrade (`src/tui/colour.rs`); 11.3 CONTRIBUTING / SECURITY /
+  issue templates; 11.1 README rewritten (partial).
+- Fixed a real bug: a broken pipe writing the script to osascript hid osascript's own error.
 
-Gate on `main` as of `fe525eb`: `cargo fmt --all -- --check`,
-`cargo clippy --all-targets -- -D warnings`, **661 lib + 27 CLI tests**,
-`cargo build --release`. Run all four before every commit.
+### What is left, and why you cannot do it here
 
-### The rename, and what deliberately did NOT change
-
-The project is **Trak** in display: repo name, README hero, docs prose, LICENSE
-lines, the in-app wordmark in the header and the idle card, the LRCLIB/other
-`User-Agent` repo URLs, and the URLs in the two sibling READMEs (both pushed).
-
-It is **still `trak` lowercase** where it is a command or a path, and that is
-deliberate:
-
-- the binary and the CLI command (`trak status`),
-- `~/.config/trak/`, `~/Library/Caches/trak/`,
-- the release artifacts `trak-<version>-macos.tar.gz`,
-- **the Homebrew formula name `trak` and the class `Trak`** — Homebrew *requires*
-  lowercase formula names and `brew audit` fails otherwise,
-- diagnostic prefixes in errors (`trak: config line 7: …`) — CLI convention.
-
-Renaming the binary would break the formula, the config path and muscle memory for
-zero gain. If a future owner asks to rename the binary, that is a real change with
-a migration, not a find-and-replace.
-
-### Phase 6 — lyrics — COMPLETE this session
-
-- **6.1** LRCLIB client, disk cache next to the art cache (`~/Library/Caches/trak/<fnv>.json`,
-  64 entries, temp+rename, zero-length and non-deserialising files are misses,
-  misses are never cached), real recorded replies committed under
-  `tests/fixtures/lyrics/` and read at compile time. No live network in tests.
-  *The bug the stall was chasing:* a 404 from the search fallback must be
-  `NotFound`, not `Malformed` — the miss body is a JSON **object**
-  (`TrackNotFound`), so without a status check in `search()` a double miss said
-  "LRCLIB sent an answer trak could not read", blaming the service for a song that
-  simply is not there.
-- **6.2** LRC parser: multi-tag lines → one line per tag, a bare tag is a musical
-  rest, unsynced lines carry `f64::NAN` that `index_at` can never select,
-  malformed lines dropped rather than guessed. `[offset:±ms]` applies to the whole
-  file including lines *before* the tag, positive shifts **earlier**, a
-  shifted-before-zero line is **clamped to 0.0 not dropped**, last tag wins,
-  unparseable offset shifts nothing.
-- **6.3** `j`/`k` and the wheel take the scroll from the song for **4 s**, counted
-  down by `Event::Tick` (never a wall clock, so the resume is tested by ticking),
-  and the pane says "following paused — it resumes on its own" while it lasts. On
-  the Lyrics tab `j`/`k` move the *words*, never a history selection the tab
-  cannot show; a click on a lyric row plays nothing. The sung line keeps its
-  gradient wherever it lands in the window.
-- **6.4** Full-screen lyrics on `L` (any tab), `L`/`esc` leave, transport keys
-  still answer while it is up. Centred anchor line, bold, accent colour, dim
-  neighbours, renders 100×30 down to 10×1. `wrap_by_width` wraps by **display
-  width** (`unicode-width`, moved from dev-deps to deps and re-recorded in
-  THIRD-PARTY-NOTICES) so 40 CJK glyphs fill an 80-column row.
-  `NOT_YET` is now **empty** — every key SPEC §4 promises to both versions is
-  bound — and 3.8's "the excuse list should not be empty" assertion was replaced,
-  because empty is the finished state.
-- Real-song check (2026-10-01, "Beauty Sleep — Jane Remover): live LRCLIB lookup
-  returned synced lyrics, wrote the cache, and the line-at-position resolved
-  correctly at pos 48 s against the playing Spotify. Screenshots committed:
-  `docs/images/tui-6.3-tab.png`, `docs/images/tui-6.4-fullscreen.png`.
-
-### Phases finished before that
-
-- **1–5** complete (spikes, player + CLI parity, TUI shell, art/accent/now-playing
-  richness, config + settings screen).
-- **7.2, 7.4, 7.5** complete: PKCE, the `0600` token file, `Library` trait +
-  `ureq` client + `FakeLibrary`.
-- **7.6–7.11** code landed (state machine, rendering, keys, worker calls) but the
-  boxes are unticked and, per the audit below, several gaps are real.
-- **8.1, 8.2, 8.4** complete: `AudioSource` trait, four pure renderers, `v` cycles,
-  30 fps only while on screen.
-- **9.1, 9.2, 9.3, 9.7** complete: release script, workflow, formula, runbook.
-
----
-
-## WORKTREES — one has finished work that is NOT merged yet
-
-```sh
-git worktree list
-git log --oneline main..wt/7.12-play-search     # 4 commits, pushed, not merged
-```
-
-### `../trak-wt-7.12` (branch `wt/7.12-play-search`) — DONE, needs merging
-
-Four commits on top of `main`, all pushed to origin:
-
-```
-f13fdb6 docs: the usage table carries the real output of the play spellings (7.12)
-6ca8465 feat: `trak play <name>` searches and plays the best match (7.12, 2.7)
-cc1ba13 feat(cli): the match a play spelling chose, and the line that says it (7.12)
-2cdc503 feat(web): the rule for what a play-by-name search picks (7.12)
-```
-
-It implements **7.12 / 2.7**: `trak play <name>`, `trak play album|artist|list <name>`,
-best-match rule (`web::api::best_match` — first row whose *name* contains the
-whole query case-insensitively, else the first row outright, mirroring shpotify's
-`limit=1` behaviour), prints the choice after the play lands, and a hidden
-`--fake-library` flag for tests. It reports **687 → 710 tests** and found and fixed
-a real pre-existing defect (the "you need a Client ID" message hard-coded
-`` `trak play "{query}"` ``, so `trak play album mezzanine` was told to run a
-different command). It also found doc drift it deliberately did not fix:
-**`docs/ARCHITECTURE.md:123` says the CLI test flag is `--fake-player`; the code
-has always used `--fake`.**
-
-**Your first action:** review `git diff main..wt/7.12-play-search`, run the gate in
-that worktree, merge to `main` (`git merge --no-ff wt/7.12-play-search`), push,
-tick **7.12** and **2.7** in `TODO.md` with notes, then `git worktree remove
-../trak-wt-7.12`.
-
-### `../trak-wt-8.3` (branch `wt/8.3-real-audio`) — EMPTY, re-run the subagent
-
-A subagent was spawned for 8.3/8.5 and was cancelled before writing anything (the
-branch is still at `fe525eb`). The brief was written and is worth reusing — see
-"Next: 8.3/8.5" below.
-
----
-
-## Next, in TODO order
-
-### 1. Merge the 7.12 branch (above) and tick 2.7 + 7.12
-
-### 2. **7.3 — guided setup in `trak config`** (the real next build)
-
-MISSING entirely today. The `client_id` text row exists (`settings.rs:222-231`) and
-is editable; nothing around it is. To build, per the task text:
-
-1. a screen with **numbered steps**: open `https://developer.spotify.com/dashboard`
-   (via `open`), create an app, add the redirect URI — **exactly
-   `http://127.0.0.1`, no port, no path, never `localhost`** (Spotify bans
-   `localhost`; dynamic ports are allowed only for loopback IP literals) — shown
-   **copyable**,
-2. paste the Client ID (**validate the shape**; 5.2 deliberately left validation
-   out because 7.3 owns it),
-3. press enter → browser login → success screen,
-4. `Log out` clears the token (`Store::clear` exists and is tested; unused),
-5. errors handled with retry: bad ID, denied consent, port busy.
-
-The machinery is all built and tested: `web::auth::Login::run` (`auth.rs:547`) and
-`Session::refresh` (`auth.rs:614`). **`docs/WEB-API.md` §1's open question — does
-the dashboard accept the bare no-path form? — is confirmed at the owner's first
-real login** (`[owner]`); fall back to a fixed `http://127.0.0.1:<port>/callback`
-if not.
-
-### 3. The three systemic Phase 7 gaps (the audit's G1–G3)
-
-These are why 7.6–7.11 are unticked despite existing code. Fix them and much of
-7.6–7.11 becomes verifiable:
-
-- **G1 — `Event::Connection` is never emitted.** The handler exists
-  (`app.rs:1334-1340`); **no producer exists anywhere**. So
-  `WebState.connection` stays `NoClientId` forever ⇒ (a) the per-tab auto-fetch
-  gated on `web.connection.connected()` (`loop_.rs:452-453`) **never fires** — the
-  Playlists/Liked/Queue/Library lists never load on tab entry — and (b) the "add a
-  Client ID" notice shows even when a token exists. `web::token::Connection`
-  (`LoggedOut`/`Connected`/`ExpiringSoon`/`NeedsReconnect`) is never mapped to
-  `app::Connection`. `hint_shown` is dead for the same reason.
-- **G2 — nothing ever writes a token file.** Only doc comments outside `src/web/`
-  reference `web::auth`. Version A is unreachable in a live session without a
-  hand-made `token.json`. *This is exactly what 7.3 fixes.*
-- **G3 — no token refresh in the loop.** `web_client()` (`loop_.rs:686-700`) reads
-  the token file fresh and never refreshes; after the 1-hour access-token life,
-  jobs 401, and `submit_web` (`loop_.rs:804-806`) **silently drops jobs** when
-  there is no client — a stale token means keys do nothing with no message.
-
-### 4. The per-task gaps the audit found
-
-| Task | State | What is missing |
+| Task | State | Needs |
 | --- | --- | --- |
-| 7.6 Search | partly | `SEARCH_DEBOUNCE_SECS` (`app.rs:666`) is referenced **nowhere**: nothing counts it down, nothing fires — search runs **only on Enter**, so "live results" do not exist. Stale-answer guard exists and is tested (`app.rs:1300-1302`). `[`/`]` jump groups instead of `Tab` — deliberate, with a written rationale at `app.rs:1550-1565`; **TODO's text was never amended**. |
-| 7.7 Playlists/Liked | partly | `WebJob::IsLiked` is **never pushed**, so `liked_here` starts `None` and the first `f` always assumes *not liked* — `f` on an already-liked track re-likes it. The Liked tab's rows have **no cursor marker** although `j`/`k` move `liked_cursor` and `enter` plays it. |
-| 7.8 Queue | partly | Renders; Premium 403 maps to a clear message. Never loads live (G1); no periodic refresh. |
-| 7.9 Library | partly | Three lazy sections. **No load-more path**: every `run_web` call passes `after: None` (`loop_.rs:717-761`), nothing follows a continuation, and the `more ↓` row (`web_tabs.rs:511-513`) is **inert** — nothing can ever make it true. |
-| 7.10 Artist/album | partly | Pages + `esc` stack work. `row_id` returns `None` whenever a page is open (`app.rs:1677-1679`), so **enter/`o` on an album row inside an artist page does nothing — an artist page is a dead end**. The 2-level test builds its stack by calling `open_album` directly, not through `update`. |
-| 7.11 Playlist editing | partly | Backend **complete** (`POST /me/playlists`, `POST`/`DELETE /playlists/{id}/items`, all three tested). **Zero UI**: no key pushes those jobs, no picker, no create flow, and **no confirmation on destructive actions** — a stated done-when criterion. |
-| 7.12 | **done, unmerged** | see above |
-| 7.13 | partly | `Tab::ALL` order matches SPEC §3's A-mode list, but **SPEC §3 was never updated** (its own done-when). **`default_tab` is parsed, saved, round-tripped — and never applied**: `App::new` hardcodes History and the loop never assigns `app.tab` (`loop_.rs:323-324`). |
+| 0.4 | open | **[owner]** run the sibling prompts in `docs/AGENT-PROMPTS.md` |
+| 8.3, 8.5 | blocked | real audio tap; 1.5 found no process-only tap (see 8.1's note). Needs the owner's Mac |
+| 9.4–9.6, 9.8 | open | sibling tap repo, `brew audit`, fresh-machine install, release approval — **[owner]** |
+| 10.1–10.7 | open | run `docs/COMPAT.md`'s matrix with Sonar and real Spotify — **[owner]** |
+| 11.1 | partial | demo GIF, release badges, `docs/README-NOTES.md`, light/dark render check |
+| 11.2 | open | screenshots/GIF from a real terminal |
+| 11.3 | partial | **[owner]** repo description/topics/social preview, enable private vulnerability reporting |
+| 11.4 | open | the sibling READMEs, via prompts |
+| 11.5 | open | idle CPU / battery measurement on a Mac |
+| 11.6 | code done | **[owner]** check a light-background theme, RTL order, `NO_COLOR=1 trak` live |
+| 11.7 | open | final read-through; do it last, when the above are settled |
 
-Also worth fixing while you are in there: **mouse is not wired to web lists** — no
-`Hit` variant for a web row, so a click or wheel on a web tab resolves to
-`HistoryPane` and *silently moves the history cursor*.
+**Never verified against a live account (so say "unverified" until the owner has):** every Web API
+tab, playlist item reads/writes in dev mode (docs contradict themselves), the login itself
+(whether the dashboard accepts the no-path redirect `http://127.0.0.1`), add-to-queue's Premium 403.
+`[owner]` steps for each are in the 7.x notes in `TODO.md`.
 
-### 5. **8.3 + 8.5 — the real audio tap**
+**Privacy:** `docs/images/tui-6.4-fullscreen.png` is a whole-desktop screenshot (other windows, an
+API-key page). The README does not reference it; the owner should remove it and re-shoot.
 
-**The old continuation note claiming 8.3 is blocked is WRONG — it was written
-before 1.5 landed. `docs/AUDIO-TAP.md` §3b/§3c records it working:** the fault was
-the missing pid→AudioObjectID translation, not the OS. Translating with
-`kAudioHardwarePropertyTranslatePIDToProcessObject` (`'id2p'`) makes every
-process-specific shape work, and `spikes/tap/src/bin/tap-objc2.rs` (~60 lines)
-builds `CATapDescription` directly. 575 488 float samples in 12 s ≈ 47 957/s of
-**real Spotify audio from Spotify's process only**, **no permission prompt at all**,
-clean teardown.
+---
 
-Traps recorded for 8.3/8.5 (take them literally):
+## Working in the Linux cloud container (this is not a Mac)
 
-- (a) the tap is 48 000 Hz — **read `asbd.sample_rate`**, never hard-code;
-- (b) `ca::device_start` returns a `StartedDevice` that **must be kept alive** —
-  dropping it early stops the device and looks exactly like a hang with 0 samples;
-- (c) `name` on `CATapDescription` is an *instance* method and **objc2 panics** on
-  a class-method send — use `AnyClass::name()`;
-- (d) the `'prs#'` process-list read returns `'nope'` here even though `'id2p'`
-  works — translate the pids you care about, **do not enumerate**;
-- **never fall back to a global tap** — it captures all system audio including
-  Sonar's, which is what COMPAT rule 3 is about;
-- cavacore: `CavaBuilder::default()` (no `new()`), `SampleRate::new(x)` not
-  `SampleRate::Hz(x)`, **one `Cava` per stream** (peak/autosens state lives inside
-  it), output is **not normalised**.
+The project is macOS-only (`objc2`, `osascript`, `pbcopy`), so `cargo test` does not build there. What
+worked, and what to expect:
 
-Re-run the 8.3 subagent with the worktree, owning `src/audio.rs` (new),
-`src/visualizer.rs`, `Cargo.toml`, `THIRD-PARTY-NOTICES.md`, `docs/AUDIO-TAP.md`,
-`examples/` — **not** `src/tui/**`; wire it into `loop_.rs`/`app.rs` yourself.
-8.5's done-when is 10 start/stop cycles leaving no leftover devices — verify with
-`system_profiler SPAudioDataType` before/after.
-
-### 6. The rest
-
-`9.4` tap README row · `9.5` `brew audit --strict --online` · `9.6` fresh-machine
-`brew install` test (needs a release; partly `[owner]`) · `9.8` tag **v0.1.0**
-(`[owner]` approves) · **10.1–10.7** the COMPAT matrix (needs Sonar running —
-check `brew list --cask`; if Sonar is not installed that whole phase is
-`[owner]`, say so rather than faking it) · **11.1–11.7** the README refactor,
-demo GIFs, repo polish, performance/battery pass, accessibility pass, final
-read-through. `0.4` (sibling agent prompts) is `[owner]`, not blocking.
+- `export CARGO_HTTP_CAINFO=/root/.ccr/ca-bundle.crt CARGO_HTTP_MULTIPLEXING=false` or crate
+  downloads die with HTTP/2 broken-pipe errors through the proxy.
+- **Type-check and clippy for the real target:** `rustup target add aarch64-apple-darwin`, then
+  `pip install ziglang`, a wrapper that runs `python3 -m ziglang cc -target aarch64-macos` (strip
+  cc-rs's `--target=`, `-arch`, `-mmacosx-version-min`, `-gfull` args) set as
+  `CC_aarch64_apple_darwin`, then `cargo clippy --all-targets --target aarch64-apple-darwin`.
+  Check/clippy work; nothing can be *run*.
+- **Run the tests on Linux** from a scratch copy of the repo with `objc2` removed from `Cargo.toml`
+  and `src/player/notify.rs` stubbed (delete `define_class!`, `parse`, `subscribe`, `pump_run_loop`;
+  add stubs). 718 lib + 37 CLI tests pass there except `the_clipboard_helper_actually_copies`
+  (needs `pbcopy`) — that one failing on Linux is expected, not a regression. The script that
+  builds the copy lived in the session scratchpad and is not in the repo; rewriting it takes
+  minutes.
+- A newer clippy than the owner's flags nothing in the gate now; two `manual_range_contains` lints
+  in `accent.rs` were fixed for it.
 
 ---
 
