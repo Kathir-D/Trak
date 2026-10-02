@@ -103,9 +103,15 @@ impl AppleScriptPlayer {
         // The script source is written to stdin, so a real script file is never
         // needed on disk and the AppleScript compiler handles it directly.
         if let Some(stdin) = child.stdin.as_mut() {
-            stdin
-                .write_all(script.as_bytes())
-                .map_err(|e| PlayerError::Script(format!("writing script: {e}")))?;
+            match stdin.write_all(script.as_bytes()) {
+                Ok(()) => {}
+                // osascript that exits without reading its stdin (Automation
+                // denied, or a fake in a test) has already said why on stderr;
+                // reporting the broken pipe instead would hide that, and returning
+                // here would leave the child unreaped.
+                Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+                Err(e) => return Err(PlayerError::Script(format!("writing script: {e}"))),
+            }
         }
         // Dropping stdin closes it, which is what tells osascript the script is
         // complete. Without this osascript waits forever and the timeout fires.
