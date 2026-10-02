@@ -375,6 +375,10 @@ fn event_loop<B: ratatui::backend::Backend>(
     let mut last_scroll = Duration::ZERO;
     let mut last_sonar = Instant::now() - SONAR_EVERY;
     let mut last_viz = Instant::now() - VIZ_FPS;
+    // The real-audio source (TODO 8.3). Created idle: nothing touches Core Audio
+    // until the visualizer is on screen, and dropping it at the end of this
+    // function joins the worker, which is what takes the tap down on a normal exit.
+    let mut audio = crate::audio::AudioPipeline::new(app.settings.visualizer_source);
 
     loop {
         // 1. Finished writes first, so a completed command is applied before the
@@ -626,9 +630,23 @@ fn event_loop<B: ratatui::backend::Backend>(
         //     bars need thirty frames a second and the clock needs one, and
         //     because a tap (TODO 8.3) has to be able to stop without the clock
         //     noticing (TODO 8.5).
+        //
+        //     The tap follows the same test as the frame rate (TODO 8.5): on
+        //     screen and Spotify running means attached, anything else means
+        //     released. The setting is re-read every frame because the settings
+        //     screen can change it under us.
+        audio.set_source(app.settings.visualizer_source);
+        audio.set_wanted(visualizer_visible(&app));
+        if let Some(line) = audio.take_notice() {
+            app = update(app, Event::TapNotice(line)).app;
+        }
         if visualizer_visible(&app) && last_viz.elapsed() >= VIZ_FPS {
             last_viz = Instant::now();
-            app = update(app, Event::VizTick).app;
+            let frame = match audio.live_spectrum() {
+                Some(bars) => Event::LiveSpectrum(bars),
+                None => Event::VizTick,
+            };
+            app = update(app, frame).app;
         }
 
         if last_clock_tick.elapsed() >= Duration::from_secs(1) {

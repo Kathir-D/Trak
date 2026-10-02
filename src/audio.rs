@@ -1,5 +1,5 @@
 //! Real audio for the visualizer: a Core Audio **process tap on Spotify only**,
-//! a lock-free ring buffer, and `cavacore` on a worker thread (TODO 8.3, 8.5).
+//! a lock-free ring buffer, and an FFT on a worker thread (TODO 8.3, 8.5).
 //!
 //! Three parts, in the order the audio flows.
 //!
@@ -12,7 +12,7 @@
 //!   does nothing but copy samples into a single-producer/single-consumer ring,
 //!   so nothing there allocates, locks or panics.
 //! - The **analysis** half: [`Analyser`] on a worker thread, which drains the
-//!   ring, runs one `cavacore` pass per tick and publishes band magnitudes the
+//!   ring, runs one transform per tick and publishes band magnitudes the
 //!   render thread can read without waiting for anything.
 //!
 //! Everything above that is [`AudioPipeline`], which decides between the tap and
@@ -57,7 +57,7 @@
 use std::cell::UnsafeCell;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, AtomicU32, AtomicUsize, Ordering};
-use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError, channel};
 use std::thread::{JoinHandle, sleep, spawn};
 use std::time::{Duration, Instant};
 
@@ -85,6 +85,16 @@ const SILENT_TICKS: u32 = 3;
 /// that a restart is invisible, and long enough that a machine where the tap will
 /// never work is not spinning.
 const RETRY: Duration = Duration::from_secs(2);
+
+/// How often a live tap checks that Spotify is still running. Once a second is
+/// fast enough that a quit is noticed before anyone looks back at the pane, and
+/// `kill(pid, 0)` once a second is nothing.
+const LIVENESS: Duration = Duration::from_secs(1);
+
+/// The longest an idle worker blocks before looking for a signal again. Only a
+/// signal that arrives with no tap up waits this long, and then nothing needs
+/// tearing down.
+const IDLE_WAIT: Duration = Duration::from_millis(250);
 
 /// The ring buffer's depth, in samples. 32 768 is a power of two — the ring masks
 /// rather than divides, on the audio thread — and 0.68 s at the tap's 48 kHz:
@@ -139,11 +149,11 @@ pub enum TapError {
     #[error("the tap delivers {0}, which is not 32-bit float audio")]
     UnsupportedFormat(String),
 
-    /// The tap's rate is not one `cavacore` accepts.
+    /// The tap's rate is not one the analyser accepts.
     #[error("the tap runs at {0} Hz, which is not a rate the analyser accepts")]
     BadSampleRate(String),
 
-    /// `cavacore` refused the configuration the tap's format implies.
+    /// The analyser refused the configuration the tap's format implies.
     #[error("the analyser rejected the tap's format: {0}")]
     Analyser(String),
 }
@@ -973,6 +983,8 @@ struct TapSession {
     _started: StartedDevice,
     io: Box<TapIo>,
     _tap: ca::TapGuard,
+    /// The Spotify processes the tap was built for, watched by [`TapSession::alive`].
+    pids: Vec<i32>,
 }
 
 /// A started Core Audio device, kept alive. See `TapSession::_started`.
@@ -983,12 +995,29 @@ struct TapSession {
 #[allow(dead_code)]
 struct StartedDevice(Box<dyn std::any::Any>);
 
-impl TapSession {
-    /// Take everything the callback has delivered since the last call.
-    fn drain(&self, out: &mut Vec<f32>) -> usize {
-        self.io.ring.drain(out, self.io.ring.capacity())
+impl Capture for TapSession {
+    fn drain(&mut self, out: &mut Vec<f32>) {
+        self.io.ring.drain(out, self.io.ring.capacity());
+    }
+
+    /// Whether any process the tap was built for still exists.
+    ///
+    /// A tap whose processes have all exited is not an error to Core Audio: the
+    /// device keeps running and the callback simply stops, which from here is
+    /// indistinguishable from a pause. So quitting Spotify has to be *noticed*, and
+    /// `kill(pid, 0)` is the cheapest question that tells the two apart — it sends
+    /// nothing, and `EPERM` still means the process is there.
+    fn alive(&self) -> bool {
+        self.pids.iter().any(|pid| {
+            // SAFETY: signal 0 is the documented existence check: no signal is sent.
+            let found = unsafe { kill(*pid, 0) } == 0;
+            found || std::io::Error::last_os_error().raw_os_error() == Some(EPERM)
+        })
     }
 }
+
+/// `EPERM`: the process exists, it just is not ours to signal.
+const EPERM: i32 = 1;
 
 /// Core Audio's property addressing, which cidre does not expose for the one
 /// property the tap needs: the pid translation.
@@ -1070,7 +1099,10 @@ fn process_object_for_pid(pid: i32) -> Result<u32, TapError> {
 /// enumerate. It returns `'nope'` on the machine this was built on
 /// (`docs/AUDIO-TAP.md` §3b), so the pids Trak cares about are translated one at a
 /// time and nothing depends on a listing that may never come.
-fn spotify_process_objects() -> Result<Vec<u32>, TapError> {
+///
+/// Returns the object ids and the pids they came from: the ids go into the tap, and
+/// the pids are what [`TapSession::alive`] watches.
+fn spotify_process_objects() -> Result<(Vec<u32>, Vec<i32>), TapError> {
     let pids: Vec<i32> = ns::RunningApp::with_bundle_id(&ns::String::with_str(SPOTIFY_BUNDLE_ID))
         .iter()
         .map(|app| app.pid())
@@ -1079,17 +1111,17 @@ fn spotify_process_objects() -> Result<Vec<u32>, TapError> {
     if pids.is_empty() {
         return Err(TapError::SpotifyNotRunning);
     }
-    let objects: Vec<u32> = pids
+    let (objects, tapped): (Vec<u32>, Vec<i32>) = pids
         .iter()
-        .filter_map(|pid| process_object_for_pid(*pid).ok())
-        .filter(|object| *object != 0)
-        .collect();
+        .filter_map(|pid| Some((process_object_for_pid(*pid).ok()?, *pid)))
+        .filter(|(object, _)| *object != 0)
+        .unzip();
     if objects.is_empty() {
         // Running, but not an audio client: it has just launched, or it has no output
         // open. Either way there is nothing to tap yet.
         return Err(TapError::NoAudioProcess);
     }
-    Ok(objects)
+    Ok((objects, tapped))
 }
 
 /// The object id of the output device the aggregate device hangs off.
@@ -1113,7 +1145,7 @@ fn default_output_uid() -> Result<cidre::arc::R<cf::String>, TapError> {
 /// Returns the tap and the rate it reported, in that order, because the rate is what
 /// the analyser has to be built from.
 fn open_tap() -> Result<(TapSession, f64), TapError> {
-    let objects = spotify_process_objects()?;
+    let (objects, pids) = spotify_process_objects()?;
     let output_uid = default_output_uid()?;
 
     let numbers: Vec<_> = objects
@@ -1193,6 +1225,7 @@ fn open_tap() -> Result<(TapSession, f64), TapError> {
             _started: started,
             io,
             _tap: tap,
+            pids,
         },
         asbd.sample_rate,
     ))
@@ -1202,7 +1235,65 @@ fn open_tap() -> Result<(TapSession, f64), TapError> {
 // The worker
 // ---------------------------------------------------------------------------
 
-/// What the TUI asks of the worker. Both are cheap and neither is worth a lock.
+/// A tap that is up, as the worker sees it.
+///
+/// The seam between the lifecycle and Core Audio, so the lifecycle — attach on
+/// demand, release when hidden, notice Spotify quitting, reattach when it comes back
+/// — runs in tests against a fake with no Spotify, no permission and no device.
+/// Not `Send`: a capture is opened, read and dropped on the worker thread and never
+/// leaves it, which is also why `TapSession` can hold cidre handles that are not
+/// `Send` either.
+trait Capture {
+    /// Everything delivered since the last call, appended to `out`.
+    fn drain(&mut self, out: &mut Vec<f32>);
+    /// Whether the processes being tapped still exist.
+    fn alive(&self) -> bool;
+}
+
+/// What opens a [`Capture`]: Core Audio in the binary, a fake in the tests.
+///
+/// `Sync` because one backend is shared by every worker a pipeline ever starts, and
+/// `&self` because a fake needs to count what it was asked through a shared handle.
+trait Backend: Send + Sync + std::fmt::Debug {
+    /// Open a capture and say what rate it delivers at.
+    fn open(&self) -> Result<(Box<dyn Capture>, f64), TapError>;
+}
+
+/// The real backend: a process tap on Spotify.
+#[derive(Debug)]
+struct CoreAudio;
+
+impl Backend for CoreAudio {
+    fn open(&self) -> Result<(Box<dyn Capture>, f64), TapError> {
+        let (session, rate) = open_tap()?;
+        Ok((Box::new(session), rate))
+    }
+}
+
+/// The worker's clock. Its own type so a test can run the lifecycle in milliseconds
+/// rather than at the real backoff.
+#[derive(Debug, Clone, Copy)]
+struct Timing {
+    /// Between analyses while a tap is up.
+    tick: Duration,
+    /// Before trying again after a failure.
+    retry: Duration,
+    /// Between checks that Spotify is still there.
+    liveness: Duration,
+    /// The longest an idle worker sleeps before looking at signals again.
+    idle_wait: Duration,
+}
+
+impl Timing {
+    const REAL: Self = Self {
+        tick: TICK,
+        retry: RETRY,
+        liveness: LIVENESS,
+        idle_wait: IDLE_WAIT,
+    };
+}
+
+/// What the TUI asks of the worker. All cheap, and none worth a lock.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Command {
     /// The visualizer is on screen: attach.
@@ -1219,16 +1310,16 @@ enum Command {
 enum TapEvent {
     /// A tap is up and delivering samples, at this rate.
     Started { sample_rate: f64 },
-    /// The tap could not be started. Carried even for a state that is not worth a
-    /// message, because the state is what the TUI draws.
+    /// The tap could not be started, or the process it tapped has gone. Carried even
+    /// for a state that is not worth a message, because the state is what decides
+    /// the bars.
     Failed(TapError),
-    /// The tap was released. Not an error: it is what hiding the visualizer and
-    /// quitting Spotify both look like from in here.
+    /// The tap was released because it was no longer wanted. Not an error.
     Released,
 }
 
 /// The TUI's half of a live tap: the published bars, the command channel, and the
-/// thread that owns the `TapSession`.
+/// thread that owns the capture.
 #[derive(Debug)]
 struct RealTap {
     bars: Arc<BarCell>,
@@ -1254,7 +1345,7 @@ impl Drop for RealTap {
         self.send(Command::Stop);
         if let Some(worker) = self.worker.take() {
             // Joining is the whole of "never leave a tap behind": the worker's
-            // `TapSession` is dropped before this returns, and dropping it stops the
+            // capture is dropped before this returns, and dropping it stops the
             // device, destroys the aggregate device and destroys the tap.
             let _ = worker.join();
         }
@@ -1263,20 +1354,45 @@ impl Drop for RealTap {
 
 /// The worker thread.
 ///
-/// One loop, one tick long, holding at most one `TapSession` and one `Analyser`.
-/// Every exit — `Stop`, a signal, a lost TUI — leaves through the same place, so
-/// there is one teardown to get right rather than several.
-fn run(commands: Receiver<Command>, outbox: Sender<TapEvent>, bars: Arc<BarCell>) {
+/// One loop holding at most one capture and one `Analyser`. Every exit — `Stop`, a
+/// signal, a lost TUI — leaves through the same place, so there is one teardown to
+/// get right rather than several.
+///
+/// It only spins at [`TICK`] while a tap is up. Otherwise it blocks on the command
+/// channel, waking at most every [`IDLE_WAIT`] to look for a signal or a retry that
+/// is due, so a hidden visualizer costs nothing measurable.
+fn run(
+    backend: Arc<dyn Backend>,
+    timing: Timing,
+    commands: Receiver<Command>,
+    outbox: Sender<TapEvent>,
+    bars: Arc<BarCell>,
+) {
     let _signals = SignalGuard::install();
 
     let mut wanted = false;
     let mut next_try: Option<Instant> = None;
-    let mut session: Option<(TapSession, Analyser)> = None;
+    let mut session: Option<(Box<dyn Capture>, Analyser)> = None;
+    let mut checked = Instant::now();
     let mut scratch: Vec<f32> = Vec::new();
     let mut quiet: u32 = 0;
 
     loop {
-        match commands.try_recv() {
+        let command = if session.is_some() {
+            commands.try_recv()
+        } else {
+            let wait = match (wanted, next_try) {
+                (true, Some(at)) => at.saturating_duration_since(Instant::now()),
+                (true, None) => Duration::ZERO,
+                (false, _) => timing.idle_wait,
+            };
+            match commands.recv_timeout(wait.min(timing.idle_wait)) {
+                Ok(c) => Ok(c),
+                Err(RecvTimeoutError::Timeout) => Err(TryRecvError::Empty),
+                Err(RecvTimeoutError::Disconnected) => Err(TryRecvError::Disconnected),
+            }
+        };
+        match command {
             Ok(Command::Run) => {
                 wanted = true;
                 // Coming back on screen is a fresh request: the owner should not wait
@@ -1300,7 +1416,7 @@ fn run(commands: Receiver<Command>, outbox: Sender<TapEvent>, bars: Arc<BarCell>
         }
 
         if wanted && session.is_none() && next_try.is_none_or(|at| Instant::now() >= at) {
-            match attach() {
+            match attach(backend.as_ref()) {
                 Ok((tap, analyser)) => {
                     // The bars start at silence rather than at whatever the last tap
                     // left behind: a reattach mid-song should not draw the previous
@@ -1311,11 +1427,29 @@ fn run(commands: Receiver<Command>, outbox: Sender<TapEvent>, bars: Arc<BarCell>
                     });
                     session = Some((tap, analyser));
                     next_try = None;
+                    checked = Instant::now();
+                    quiet = 0;
                 }
                 Err(error) => {
-                    next_try = Some(Instant::now() + RETRY);
+                    next_try = Some(Instant::now() + timing.retry);
                     let _ = outbox.send(TapEvent::Failed(error));
                 }
+            }
+        }
+
+        // Spotify quitting is the one way a tap goes away without anybody asking,
+        // and it does not say so (see `TapSession::alive`). Checked once a second
+        // rather than every tick, because the answer changes once a session at most.
+        if session.is_some() && checked.elapsed() >= timing.liveness {
+            checked = Instant::now();
+            if session.as_ref().is_some_and(|(tap, _)| !tap.alive()) {
+                session = None;
+                bars.store(&[0.0; BARS]);
+                // Waiting rather than released: this is "Spotify went", which is
+                // what the retry is for, and the retry is what reattaches the tap
+                // when Spotify is launched again.
+                next_try = Some(Instant::now() + timing.retry);
+                let _ = outbox.send(TapEvent::Failed(TapError::SpotifyNotRunning));
             }
         }
 
@@ -1323,15 +1457,15 @@ fn run(commands: Receiver<Command>, outbox: Sender<TapEvent>, bars: Arc<BarCell>
             // Everything the callback has delivered since the last tick, analysed as
             // one window. Anything older than the window is already gone, so the ring
             // cannot end up permanently ahead of the analysis.
+            scratch.clear();
             tap.drain(&mut scratch);
             quiet = if scratch.is_empty() { quiet + 1 } else { 0 };
             if !scratch.is_empty() || quiet >= SILENT_TICKS {
                 analyser.push(&scratch);
                 bars.store(analyser.bars());
             }
+            sleep(timing.tick);
         }
-
-        sleep(TICK);
     }
 
     // The teardown, however this loop ended.
@@ -1347,8 +1481,8 @@ fn run(commands: Receiver<Command>, outbox: Sender<TapEvent>, bars: Arc<BarCell>
 }
 
 /// A started tap and the analyser built from the rate that tap reported.
-fn attach() -> Result<(TapSession, Analyser), TapError> {
-    let (tap, sample_rate) = open_tap()?;
+fn attach(backend: &dyn Backend) -> Result<(Box<dyn Capture>, Analyser), TapError> {
+    let (tap, sample_rate) = backend.open()?;
     // A rate the analyser refuses must not leave the tap running: this is the one
     // place a started tap is handed back before it is stored, and the `?` here drops
     // it, which is the whole teardown.
@@ -1382,6 +1516,7 @@ const EXIT_SIGNALLED: i32 = 128;
 unsafe extern "C" {
     fn signal(signum: i32, handler: Handler) -> Handler;
     fn raise(signum: i32) -> i32;
+    fn kill(pid: i32, signum: i32) -> i32;
 }
 
 /// Set by the handler, read by the worker. A signal handler may touch nothing but a
@@ -1557,6 +1692,9 @@ pub struct AudioPipeline {
     want: VisualizerSource,
     state: TapState,
     tap: Option<RealTap>,
+    /// What the last [`set_wanted`](Self::set_wanted) said, so a call every frame is
+    /// a comparison and not a channel send.
+    wanted: bool,
     events: Receiver<TapEvent>,
     /// Whether a notice has already been raised this session.
     warned: bool,
@@ -1564,6 +1702,8 @@ pub struct AudioPipeline {
     /// not lost.
     pending_notice: Option<String>,
     simulated: SimulatedSource,
+    backend: Arc<dyn Backend>,
+    timing: Timing,
 }
 
 impl AudioPipeline {
@@ -1573,6 +1713,10 @@ impl AudioPipeline {
     /// returns immediately too, holding a simulated spectrum until
     /// [`set_wanted`](Self::set_wanted) says the visualizer is on screen.
     pub fn new(want: VisualizerSource) -> Self {
+        Self::with_backend(want, Arc::new(CoreAudio), Timing::REAL)
+    }
+
+    fn with_backend(want: VisualizerSource, backend: Arc<dyn Backend>, timing: Timing) -> Self {
         Self {
             want,
             state: match want {
@@ -1580,38 +1724,67 @@ impl AudioPipeline {
                 VisualizerSource::Auto => TapState::Idle,
             },
             tap: None,
+            wanted: false,
             events: channel().1,
             warned: false,
             pending_notice: None,
             simulated: SimulatedSource::new(0),
+            backend,
+            timing,
         }
+    }
+
+    /// Follow `[visualizer] source`, which the settings screen can change live.
+    ///
+    /// Going to `simulated` drops the worker, and with it any tap, before this
+    /// returns: the setting is the owner saying "do not tap", and a tap that outlives
+    /// it by a tick is a tap they did not ask for. Going back to `auto` attaches again
+    /// on the next [`set_wanted`](Self::set_wanted) that says the pane is visible.
+    pub fn set_source(&mut self, want: VisualizerSource) {
+        if want == self.want {
+            return;
+        }
+        self.want = want;
+        self.tap = None;
+        self.wanted = false;
+        self.events = channel().1;
+        self.state = match want {
+            VisualizerSource::Simulated => TapState::Forced,
+            VisualizerSource::Auto => TapState::Idle,
+        };
     }
 
     /// Whether the tap should exist right now.
     ///
-    /// The TUI calls this once per frame, next to whatever decides the visualizer is
-    /// visible: `true` on screen, `false` hidden. Going false releases the tap within
-    /// one worker tick, which is what keeps a hidden visualizer from holding an audio
-    /// device open.
+    /// The TUI calls this once per frame with whatever decides the visualizer is
+    /// visible: `true` on screen, `false` hidden or Spotify gone. Going false releases
+    /// the tap within one worker tick, which is what keeps a hidden visualizer from
+    /// holding an audio device open. Calling it again with the same answer does
+    /// nothing at all.
     pub fn set_wanted(&mut self, wanted: bool) {
-        if self.want == VisualizerSource::Simulated {
+        if self.want == VisualizerSource::Simulated || wanted == self.wanted {
             return;
         }
-        match (&mut self.tap, wanted) {
+        self.wanted = wanted;
+        match (&self.tap, wanted) {
             (None, true) => {
                 let (outbox, events) = channel();
                 let (commands, inbox) = channel();
                 let bars = Arc::new(BarCell::new());
                 let published = Arc::clone(&bars);
+                let backend = Arc::clone(&self.backend);
+                let timing = self.timing;
                 let tap = RealTap {
                     bars,
                     commands,
-                    worker: Some(spawn(move || run(inbox, outbox, published))),
+                    worker: Some(spawn(move || {
+                        run(backend, timing, inbox, outbox, published)
+                    })),
                 };
                 // The first `Run` has to be sent here rather than left to the next
                 // call: the worker starts with nothing wanted, and a caller that asks
-                // once at startup and then leaves it alone — which is exactly what the
-                // TUI does — would get a live worker and a tap that never attaches.
+                // once and then leaves it alone would get a live worker and a tap that
+                // never attaches.
                 tap.send(Command::Run);
                 self.tap = Some(tap);
                 self.events = events;
@@ -1620,6 +1793,19 @@ impl AudioPipeline {
             (Some(tap), true) => tap.send(Command::Run),
             (Some(tap), false) => tap.send(Command::Idle),
             (None, false) => {}
+        }
+    }
+
+    /// The real bars, when a tap is up; `None` when the caller should draw its own
+    /// simulated ones.
+    ///
+    /// This is what the TUI reads: it keeps its own [`SimulatedSource`] on the app
+    /// state, so all it needs from here is whether there is something better.
+    pub fn live_spectrum(&mut self) -> Option<Vec<f32>> {
+        self.drain_events();
+        match self.state {
+            TapState::Tapping { .. } => self.tap.as_ref().map(RealTap::spectrum),
+            _ => None,
         }
     }
 
@@ -1684,24 +1870,14 @@ impl AudioPipeline {
 
 impl AudioSource for AudioPipeline {
     fn spectrum(&mut self) -> Vec<f32> {
-        self.drain_events();
-        match self.state {
-            // A tap that has not started yet draws silence rather than simulated bars:
-            // the two would disagree for the fraction of a second before the first real
-            // frame, and a spectrum that jumps is the thing this whole file exists to
-            // avoid.
-            TapState::Tapping { .. } => self
-                .tap
-                .as_ref()
-                .map(RealTap::spectrum)
-                .unwrap_or_else(|| vec![0.0; BARS]),
-            _ => self.simulated.spectrum(),
-        }
+        self.live_spectrum()
+            .unwrap_or_else(|| self.simulated.spectrum())
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicBool;
 
     /// One second of a sine at `freq`, as the tap would deliver it.
     fn sine(rate: f64, freq: f64, secs: f64) -> Vec<f32> {
@@ -2737,30 +2913,262 @@ mod tests {
         assert_eq!(viz.sample_rate(), None);
     }
 
-    #[test]
-    fn asking_once_starts_the_tap_and_leaving_it_alone_keeps_it() {
-        // The worker starts with nothing wanted, so the `Run` that makes it attach has
-        // to be sent by the call that *creates* it. The TUI asks once at startup and
-        // then only reads, which is why nothing that polled a second time would ever
-        // notice: the state stayed `Idle` and the bars were silently simulated.
-        //
-        // What comes back depends on the machine — `Tapping` where there is a Spotify
-        // and a permission, `WaitingForSpotify` where there is not — and both prove the
-        // command arrived. Only `Idle` means nothing happened. On a CI box with no
-        // Spotify there is nothing to tap, so no device is ever created.
-        let mut viz = AudioPipeline::new(VisualizerSource::Auto);
-        viz.set_wanted(true);
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while *viz.state() == TapState::Idle && Instant::now() < deadline {
-            let _ = viz.spectrum();
-            sleep(Duration::from_millis(20));
+    // -- the lifecycle, against a fake Core Audio ----------------------------
+
+    /// The machine as the fake backend sees it: whether Spotify is running, whether
+    /// macOS says no, and how many captures exist right now. `live` is the fake's
+    /// `system_profiler`: it goes up on open and down on drop, so "nothing left
+    /// behind" is a number that has to come back to zero.
+    #[derive(Debug, Default)]
+    struct World {
+        spotify: AtomicBool,
+        deny: AtomicBool,
+        opened: AtomicUsize,
+        live: AtomicUsize,
+    }
+
+    #[derive(Debug)]
+    struct Fake(Arc<World>);
+
+    struct FakeCapture(Arc<World>);
+
+    impl Capture for FakeCapture {
+        fn drain(&mut self, out: &mut Vec<f32>) {
+            // A loud low tone, a tick's worth at a time, while Spotify is there.
+            if self.0.spotify.load(Ordering::SeqCst) {
+                out.extend(sine(48_000.0, 80.0, 0.02));
+            }
         }
-        assert_ne!(
-            *viz.state(),
-            TapState::Idle,
-            "the tap was asked for once and the worker never heard about it"
+
+        fn alive(&self) -> bool {
+            self.0.spotify.load(Ordering::SeqCst)
+        }
+    }
+
+    impl Drop for FakeCapture {
+        fn drop(&mut self) {
+            self.0.live.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    impl Backend for Fake {
+        fn open(&self) -> Result<(Box<dyn Capture>, f64), TapError> {
+            if !self.0.spotify.load(Ordering::SeqCst) {
+                return Err(TapError::SpotifyNotRunning);
+            }
+            if self.0.deny.load(Ordering::SeqCst) {
+                return Err(TapError::PermissionDenied("'!hog'"));
+            }
+            self.0.opened.fetch_add(1, Ordering::SeqCst);
+            self.0.live.fetch_add(1, Ordering::SeqCst);
+            Ok((Box::new(FakeCapture(Arc::clone(&self.0))), 48_000.0))
+        }
+    }
+
+    const FAST: Timing = Timing {
+        tick: Duration::from_millis(2),
+        retry: Duration::from_millis(10),
+        liveness: Duration::from_millis(5),
+        idle_wait: Duration::from_millis(5),
+    };
+
+    fn fake(want: VisualizerSource) -> (AudioPipeline, Arc<World>) {
+        let world = Arc::new(World::default());
+        world.spotify.store(true, Ordering::SeqCst);
+        let viz = AudioPipeline::with_backend(want, Arc::new(Fake(Arc::clone(&world))), FAST);
+        (viz, world)
+    }
+
+    /// Read frames the way the TUI does until `done` holds, or fail after 2 s. Every
+    /// notice that came up on the way is returned, so a test can count them.
+    fn frames_until(viz: &mut AudioPipeline, done: impl Fn(&AudioPipeline) -> bool) -> Vec<String> {
+        let mut notices = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let _ = viz.live_spectrum();
+            notices.extend(viz.take_notice());
+            if done(viz) {
+                return notices;
+            }
+            assert!(Instant::now() < deadline, "stuck in {:?}", viz.state());
+            sleep(Duration::from_millis(1));
+        }
+    }
+
+    fn tapping(viz: &AudioPipeline) -> bool {
+        matches!(viz.state(), TapState::Tapping { .. })
+    }
+
+    #[test]
+    fn the_tap_starts_only_when_the_visualizer_is_on_screen() {
+        let (mut viz, world) = fake(VisualizerSource::Auto);
+        sleep(Duration::from_millis(30));
+        let _ = viz.live_spectrum();
+        assert_eq!(world.opened.load(Ordering::SeqCst), 0, "nobody asked yet");
+        assert_eq!(viz.live_spectrum(), None);
+
+        viz.set_wanted(true);
+        frames_until(&mut viz, tapping);
+        assert_eq!(
+            viz.sample_rate(),
+            Some(48_000.0),
+            "the rate the tap reported"
         );
+        assert_eq!(world.live.load(Ordering::SeqCst), 1);
+        frames_until(&mut viz, |v| {
+            v.tap.as_ref().is_some_and(|t| loudest(&t.spectrum()) > 0.5)
+        });
+    }
+
+    #[test]
+    fn asking_every_frame_opens_one_tap() {
+        // The TUI says "wanted" thirty times a second. Only the first of those is news.
+        let (mut viz, world) = fake(VisualizerSource::Auto);
+        for _ in 0..100 {
+            viz.set_wanted(true);
+            let _ = viz.live_spectrum();
+        }
+        frames_until(&mut viz, tapping);
+        sleep(Duration::from_millis(30));
+        assert_eq!(world.opened.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn hiding_the_visualizer_releases_the_tap_and_showing_it_reattaches() {
+        let (mut viz, world) = fake(VisualizerSource::Auto);
+        viz.set_wanted(true);
+        frames_until(&mut viz, tapping);
+
         viz.set_wanted(false);
+        frames_until(&mut viz, |v| *v.state() == TapState::Idle);
+        assert_eq!(
+            world.live.load(Ordering::SeqCst),
+            0,
+            "a hidden pane holds no tap"
+        );
+        assert_eq!(viz.live_spectrum(), None, "and draws the simulated bars");
+
+        viz.set_wanted(true);
+        frames_until(&mut viz, tapping);
+        assert_eq!(world.opened.load(Ordering::SeqCst), 2);
+        assert_eq!(world.live.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn spotify_quitting_drops_the_tap_and_relaunching_it_reattaches() {
+        let (mut viz, world) = fake(VisualizerSource::Auto);
+        viz.set_wanted(true);
+        frames_until(&mut viz, tapping);
+
+        world.spotify.store(false, Ordering::SeqCst);
+        let notices = frames_until(&mut viz, |v| *v.state() == TapState::WaitingForSpotify);
+        assert_eq!(
+            world.live.load(Ordering::SeqCst),
+            0,
+            "a tap on nothing is let go"
+        );
+        assert_eq!(viz.live_spectrum(), None);
+        // Several retries happen while it is gone, and none of them is news.
+        sleep(Duration::from_millis(50));
+        let _ = viz.live_spectrum();
+        assert!(notices.is_empty() && viz.take_notice().is_none());
+        assert_eq!(
+            world.opened.load(Ordering::SeqCst),
+            1,
+            "nothing to tap, nothing opened"
+        );
+
+        world.spotify.store(true, Ordering::SeqCst);
+        frames_until(&mut viz, tapping);
+        assert_eq!(
+            world.opened.load(Ordering::SeqCst),
+            2,
+            "and it came back on its own"
+        );
+    }
+
+    #[test]
+    fn a_denied_tap_falls_back_to_simulated_bars_and_says_so_once() {
+        let (mut viz, world) = fake(VisualizerSource::Auto);
+        world.deny.store(true, Ordering::SeqCst);
+        viz.set_track("spotify:track:abc");
+        viz.set_playing(true);
+        viz.set_position(30.0);
+        viz.set_wanted(true);
+
+        let mut notices = frames_until(&mut viz, |v| {
+            matches!(v.state(), TapState::Simulated { .. })
+        });
+        // The worker keeps retrying every `retry` — that is how a grant made with trak
+        // open is picked up — and every retry fails the same way.
+        for _ in 0..3 {
+            sleep(Duration::from_millis(40));
+            notices.extend(viz.take_notice());
+            let _ = viz.live_spectrum();
+            notices.extend(viz.take_notice());
+            viz.set_wanted(false);
+            viz.set_wanted(true);
+        }
+        assert_eq!(
+            notices.len(),
+            1,
+            "one toast, not one per retry: {notices:?}"
+        );
+        assert!(
+            notices[0].contains("Screen & System Audio Recording"),
+            "{}",
+            notices[0]
+        );
+        assert_eq!(world.live.load(Ordering::SeqCst), 0);
+
+        // And the bars are the simulated ones: moving, never the tap's.
+        assert_eq!(viz.live_spectrum(), None);
+        let frames: Vec<Vec<f32>> = (0..10)
+            .map(|i| {
+                viz.set_position(30.0 + f64::from(i) * 0.1);
+                viz.spectrum()
+            })
+            .collect();
+        assert!(
+            frames.iter().any(|f| loudest(f) > 0.0),
+            "simulated bars move"
+        );
+
+        // Granting it with trak still open is picked up by the retry.
+        world.deny.store(false, Ordering::SeqCst);
+        viz.set_wanted(true);
+        frames_until(&mut viz, tapping);
+    }
+
+    #[test]
+    fn the_simulated_setting_never_taps_and_switching_to_it_lets_go_at_once() {
+        let (mut viz, world) = fake(VisualizerSource::Simulated);
+        viz.set_wanted(true);
+        sleep(Duration::from_millis(30));
+        assert_eq!(*viz.state(), TapState::Forced);
+        assert_eq!(viz.live_spectrum(), None);
+        assert_eq!(world.opened.load(Ordering::SeqCst), 0);
+
+        viz.set_source(VisualizerSource::Auto);
+        viz.set_wanted(true);
+        frames_until(&mut viz, tapping);
+
+        // Changed in the settings screen with the tap up: down before the call returns.
+        viz.set_source(VisualizerSource::Simulated);
+        assert_eq!(world.live.load(Ordering::SeqCst), 0);
+        assert_eq!(*viz.state(), TapState::Forced);
+        viz.set_wanted(true);
+        sleep(Duration::from_millis(30));
+        assert_eq!(world.opened.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn dropping_the_pipeline_takes_the_tap_down_before_it_returns() {
+        let (mut viz, world) = fake(VisualizerSource::Auto);
+        viz.set_wanted(true);
+        frames_until(&mut viz, tapping);
+        drop(viz);
+        assert_eq!(world.live.load(Ordering::SeqCst), 0);
     }
 
     #[test]
