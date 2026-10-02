@@ -659,20 +659,6 @@ pub fn spaced_caps(text: &str) -> String {
     out
 }
 
-/// A vertical gradient bar, used as the spine beside the cover art.
-///
-/// Two columns of colour running down the side of the artwork: it ties the cover
-/// to the text below it, which is the whole reason the accent exists.
-pub fn spine(height: usize, palette: &crate::accent::Palette) -> Vec<Span<'static>> {
-    let ramp = palette.ramp(height.max(2));
-    (0..height)
-        .map(|i| {
-            let c = ramp[i % ramp.len()];
-            Span::styled("██", Style::default().fg(c))
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod whimsy_tests {
     use super::*;
@@ -829,17 +815,5 @@ mod whimsy_tests {
         let spans = gradient_meter(0.5, 20, &p, false);
         assert!(spans.iter().take(10).all(|s| s.content == "▰"));
         assert!(spans.iter().skip(10).all(|s| s.content == "▱"));
-    }
-
-    #[test]
-    fn the_spine_is_two_cells_wide_and_as_tall_as_asked() {
-        let p = crate::accent::Palette::from_accent(SPOTIFY_GREEN);
-        let spine = spine(10, &p);
-        assert_eq!(spine.len(), 10);
-        assert!(spine.iter().all(|s| s.content == "██"));
-        // And it is a gradient down its length, not one colour repeated.
-        let colours: std::collections::HashSet<_> =
-            spine.iter().map(|s| s.style.fg.unwrap()).collect();
-        assert!(colours.len() > 4, "got {} colours", colours.len());
     }
 }

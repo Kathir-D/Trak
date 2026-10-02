@@ -74,6 +74,51 @@ pub fn layout_for(width: u16, height: u16) -> Layout_ {
     Layout_::Compact
 }
 
+/// How wide the Now Playing pane is, in a pane row of `body_rows` usable height.
+///
+/// The cover is square and a cell is about twice as tall as it is wide, so a cover
+/// `h` rows tall is `2h` cells across: the width at which the cover exactly fills
+/// the height it is given. Below that the pane has empty columns beside the
+/// picture; above it, empty rows under it. So the pane is sized to that width,
+/// within [`NOW_PLAYING_SHARE`] and [`NOW_PLAYING_MIN`].
+///
+/// This is what makes the dashboard look the same on a 24-inch monitor and on a
+/// laptop: before, the pane was always 46 % of the width, so a wide terminal gave
+/// a small cover in a large empty box and a tall one gave a cover with a third of
+/// the screen under it (owner, 2026-10-02).
+fn now_playing_width(total: u16, body_rows: u16, cell: (u16, u16), text: u16) -> u16 {
+    let rows = body_rows.saturating_sub(text);
+    let (cw, ch) = cell;
+    // Rows of cover that the pane's width implies, turned back into a width.
+    let square = (u32::from(rows) * u32::from(ch) / u32::from(cw.max(1))) as u16;
+    let ideal = square.saturating_add(4).max(NOW_PLAYING_MIN);
+    ideal.min((u32::from(total) * u32::from(NOW_PLAYING_SHARE) / 100) as u16)
+}
+
+/// The most rows the text under the cover can need: artist, title, album, a
+/// spacer, the bar, the times, a spacer, the controls and the meter.
+///
+/// The upper bound on purpose: it is used to size the pane, and a pane sized for
+/// text that is not there is a pane with a gap in it. `text_rows` is the exact
+/// answer for a given app; a test pins the two together.
+const TEXT_ROWS_MAX: u16 = 10;
+
+/// The rows the text block under the cover actually takes, for this app.
+fn text_rows(app: &App, track: &crate::player::TrackInfo) -> u16 {
+    let mut n = 1 // artist
+        + 1 // title
+        + u16::from(!track.album.is_empty() && !track.album.eq_ignore_ascii_case(&track.title))
+        + 1 // spacer
+        + u16::from(app.settings.show_progress)
+        + 1 // times
+        + 1 // spacer
+        + 1; // controls
+    if app.settings.show_volume && !app.volume_hidden {
+        n += 1;
+    }
+    n
+}
+
 /// The transport buttons, two cells each. Every glyph is one cell wide in
 /// every terminal font tried, which the media symbols are not.
 const TRANSPORT_PREV: &str = "◀◀";
@@ -86,19 +131,19 @@ const TRANSPORT_NEXT: &str = "▶▶";
 /// terminal shrinks).
 const MIN_ART: (u16, u16) = (6, 4);
 
-/// How many rows must be left for the artist, the title, the bar, the times and
-/// the controls. The cover gets whatever is left over, and the cover is what gets
-/// dropped when there is not enough for both -- a TUI with no track title is not
-/// a music player, a TUI with a small cover still is.
-const MIN_TEXT_ROWS: u16 = 9;
-
 /// The cell size halfblocks assume when nothing has queried the terminal.
 /// TODO 1.4 measured (10, 20) in Terminal.app; a cell is about twice as tall as
 /// it is wide, which is the assumption the art sizing rests on.
 const HALF_BLOCK_CELL: (u16, u16) = (10, 20);
 
-/// How much room the Now Playing pane gets, as a share of the width.
-const NOW_PLAYING_SHARE: u16 = 46;
+/// The most the Now Playing pane may have, as a share of the width, and the least
+/// it may have in cells.
+///
+/// The pane is sized to what it has to show (see [`now_playing_width`]), and these
+/// are the two ends of that: never so wide that the cover is a small picture in a
+/// large empty box, never so narrow that it stops being a pane.
+const NOW_PLAYING_SHARE: u16 = 50;
+const NOW_PLAYING_MIN: u16 = 30;
 
 /// The image state, and the protocol it draws with.
 ///
@@ -778,10 +823,18 @@ fn draw_wide(
     if !app.settings.side_pane {
         draw_now_playing(f, rows[1], app, theme, regions, images);
     } else {
+        // The pane's own height decides its width: the cover is square, so the
+        // width at which it fills the height is the width the pane should have.
+        let want = now_playing_width(
+            rows[1].width,
+            rows[1].height.saturating_sub(2),
+            images.cell_size(),
+            app.track().map_or(TEXT_ROWS_MAX, |t| text_rows(app, t)),
+        );
         let cols = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Percentage(NOW_PLAYING_SHARE),
+                Constraint::Length(want.clamp(24, rows[1].width.saturating_sub(24))),
                 Constraint::Min(24),
             ])
             .split(rows[1]);
@@ -1002,91 +1055,13 @@ fn draw_now_playing(
     let dur = track.duration_secs() as f64;
     let muted_style = app.is_idle();
     let mut lines: Vec<Line> = Vec::new();
-    let mut art_lines = 0u16;
+    // Which line of the block each row belongs to, so the clickable rectangles
+    // follow the block wherever it is put rather than assuming it starts at the
+    // top of the pane.
+    let mut volume_row: Option<usize> = None;
 
-    // The cover owns the top of the pane. It is drawn large and hard against the
-    // left edge rather than centred in a frame: the artwork *is* the visual, and
-    // a box around it says "placeholder here" when nothing could be more certain.
-    // The cover takes 45% of the pane, but never at the cost of the text: on a
-    // short pane the cover goes and the title stays.
-    let art_h = (body.height * 55 / 100)
-        .min(body.height.saturating_sub(MIN_TEXT_ROWS))
-        .clamp(0, 20);
-    let hole_w = body.width;
-    let hole_h = art_h;
-    if hole_h >= MIN_ART.1 && hole_w >= MIN_ART.0 {
-        // The visualizer takes the same rectangle (TODO 4.3). The cover is still
-        // fetched and still drives the accent: a visualizer tinted by the album
-        // is the entire point of having one.
-        let show_visualizer = app.settings.display_mode == DisplayMode::Visualizer;
-        // Only the visualizer gets the gradient spine, inset past its first two
-        // columns. Beside the cover the owner read it as a stray bar of colour,
-        // so the cover takes the full width (and drawing the spine over the
-        // artwork looks like a rendering fault).
-        let inset = if show_visualizer { 2 } else { 0 };
-        let hole = Rect {
-            x: body.x + inset,
-            y: body.y,
-            width: hole_w.saturating_sub(inset),
-            height: hole_h,
-        };
-        let drawn = app
-            .settings
-            .show_art
-            .then(|| app.art.drawable(track))
-            .flatten()
-            .filter(|_| app.art.error.is_none());
-        if show_visualizer {
-            draw_visualizer(f, hole, app, theme);
-        } else if let Some(art) = drawn {
-            f.render_widget(ratatui::widgets::Clear, hole);
-            images.draw(f, &art.path, &art.image, hole);
-        } else if app.art.loading {
-            let hint = Rect { height: 1, ..hole };
-            f.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    "fetching the cover…",
-                    Style::default().add_modifier(Modifier::ITALIC),
-                )))
-                .alignment(Alignment::Center),
-                hint,
-            );
-        }
-        regions.art = Some(hole);
-        // A gradient spine down the left edge of the visualizer, tying the bars
-        // to the type underneath them.
-        let spine_lines = if show_visualizer {
-            crate::tui::theme::spine(hole_h as usize, &theme.palette)
-        } else {
-            Vec::new()
-        };
-        for (i, span) in spine_lines.into_iter().enumerate() {
-            f.render_widget(
-                Paragraph::new(Line::from(span)),
-                Rect {
-                    x: hole.x - 2,
-                    y: hole.y + i as u16,
-                    width: 2,
-                    height: 1,
-                },
-            );
-        }
-        art_lines = hole_h;
-    }
-
-    // Everything below the cover is text, so the row arithmetic below is relative
-    // to this rectangle: measuring from `body` is off by the height of the art,
-    // which is how the progress bar ends up not matching the thing you click.
-    let text_body = Rect {
-        y: body.y + art_lines,
-        height: body.height.saturating_sub(art_lines),
-        ..body
-    };
-    if text_body.height == 0 {
-        return;
-    }
     let dim = Theme::dim();
-    let title_w = text_body.width as usize;
+    let title_w = body.width as usize;
 
     if !track.artist.is_empty() {
         lines.push(Line::from(Span::styled(
@@ -1116,7 +1091,7 @@ fn draw_now_playing(
     //
     // The region is recorded even when the bar is off, so the geometry does not
     // depend on a display setting: a click on a hidden bar must not seek.
-    let bar_row = text_body.y + lines.len() as u16;
+    let bar_index = lines.len();
     if app.settings.show_progress {
         lines.push(Line::from(crate::tui::theme::gradient_bar(
             progress(app),
@@ -1125,12 +1100,6 @@ fn draw_now_playing(
             !app.is_playing(),
         )));
     }
-    regions.progress = Some(Rect {
-        x: text_body.x,
-        y: bar_row,
-        width: text_body.width,
-        height: 1,
-    });
 
     let elapsed = format_time(pos);
     let dur_str = format_time(dur);
@@ -1138,9 +1107,9 @@ fn draw_now_playing(
     // Push the duration to the right edge rather than leaving a gap that the
     // reader has to measure.
     let used = elapsed.chars().count();
-    if text_body.width as usize > used + dur_str.chars().count() + 2 {
+    if body.width as usize > used + dur_str.chars().count() + 2 {
         times.push(Span::raw(
-            " ".repeat(text_body.width as usize - used - dur_str.chars().count()),
+            " ".repeat(body.width as usize - used - dur_str.chars().count()),
         ));
     }
     times.push(Span::styled(
@@ -1156,7 +1125,7 @@ fn draw_now_playing(
     // them. The media glyphs (⏮ ⏸ ⏭) are emoji-capable and cmux/Ghostty draw
     // them wider than ratatui counts them, which squashed the three buttons into
     // one smudge.
-    let ctl_row = text_body.y + lines.len() as u16;
+    let ctl_index = lines.len();
     let accent = Style::default().fg(theme.accent_colour());
     let controls = vec![
         Span::raw(" "),
@@ -1186,6 +1155,113 @@ fn draw_now_playing(
     control_line.push(Span::raw(badges));
     lines.push(Line::from(control_line));
 
+    // The volume meter gets the same treatment as the bar, because it is the same
+    // kind of thing: a quantity, drawn with the album's own colours. Hidden when
+    // Spotify ignored a write (COMPAT rule 5).
+    if app.settings.show_volume && !app.volume_hidden {
+        let v = app.meter_volume();
+        let label = "vol ";
+        // Two cells before the percentage, not one: `▰` is drawn a little
+        // wider than its cell in common fonts, so at 100 % a full last cell ran
+        // into the "1" with only a single space between them.
+        volume_row = Some(lines.len());
+        let meter_w = (body.width as usize).saturating_sub(label.len() + 6).max(1);
+        let mut row = vec![Span::styled(label, dim)];
+        row.extend(crate::tui::theme::gradient_meter(
+            f64::from(v) / 100.0,
+            meter_w,
+            &theme.palette,
+            app.muted,
+        ));
+        row.push(Span::raw("  "));
+        row.push(Span::styled(
+            format!("{v:>3}%"),
+            Style::default().fg(theme.accent_colour()),
+        ));
+        lines.push(Line::from(row));
+    }
+
+    // The cover owns the top of the pane. It is drawn large and hard against the
+    // left edge rather than centred in a frame: the artwork *is* the visual, and
+    // a box around it says "placeholder here" when nothing could be more certain.
+    //
+    // It gets every row the text does not need, up to the height at which a
+    // square cover fills the pane's width -- a taller cover than that can only be
+    // narrower than the pane, so the extra rows would be dead space with a picture
+    // in the middle of it. That is what made a tall terminal look empty: a cover
+    // frozen at twenty rows in a fifty-row pane.
+    //
+    // Whatever neither of them fills -- a short, wide pane, or a tall narrow one
+    // where the cover is width-limited -- is split above and below the block
+    // rather than dumped in one gap, so the pane reads as composed at any size.
+    let text_h = (lines.len() as u16).min(body.height);
+    let (cw, ch) = images.cell_size();
+    let fill_h = (u32::from(body.width) * u32::from(cw) / u32::from(ch.max(1))) as u16;
+    let hole_h = body
+        .height
+        .saturating_sub(text_h)
+        .min(fill_h.max(MIN_ART.1));
+    let show_art = hole_h >= MIN_ART.1 && body.width >= MIN_ART.0;
+    let hole_h = if show_art { hole_h } else { 0 };
+    let block_h = (hole_h + text_h).min(body.height);
+    let block_top = body.y + (body.height - block_h) / 2;
+    let text_top = block_top + hole_h;
+
+    if show_art {
+        let hole = Rect {
+            x: body.x,
+            y: block_top,
+            width: body.width,
+            height: hole_h,
+        };
+        // The visualizer takes the same rectangle (TODO 4.3). The cover is still
+        // fetched and still drives the accent: a visualizer tinted by the album
+        // is the entire point of having one.
+        let show_visualizer = app.settings.display_mode == DisplayMode::Visualizer;
+        let drawn = app
+            .settings
+            .show_art
+            .then(|| app.art.drawable(track))
+            .flatten()
+            .filter(|_| app.art.error.is_none());
+        if show_visualizer {
+            draw_visualizer(f, hole, app, theme);
+        } else if let Some(art) = drawn {
+            f.render_widget(ratatui::widgets::Clear, hole);
+            images.draw(f, &art.path, &art.image, hole);
+        } else if app.art.loading {
+            let hint = Rect { height: 1, ..hole };
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    "fetching the cover…",
+                    Style::default().add_modifier(Modifier::ITALIC),
+                )))
+                .alignment(Alignment::Center),
+                hint,
+            );
+        }
+        regions.art = Some(hole);
+    }
+
+    // Everything below the cover is text, so the row arithmetic is relative to
+    // this rectangle: measuring from `body` is off by the height of the art,
+    // which is how the progress bar ends up not matching the thing you click.
+    let text_body = Rect {
+        y: text_top,
+        height: body.y + body.height - text_top,
+        ..body
+    };
+    if text_body.height == 0 {
+        return;
+    }
+    let bar_row = text_body.y + bar_index as u16;
+    let ctl_row = text_body.y + ctl_index as u16;
+    regions.progress = Some(Rect {
+        x: text_body.x,
+        y: bar_row,
+        width: text_body.width,
+        height: 1,
+    });
     // The buttons sit at columns 1, 5 and 9, two cells each; the target takes
     // the gap on either side too, so a click a cell off still lands.
     regions.controls = [(0, Control::Prev), (4, Control::Toggle), (8, Control::Next)]
@@ -1202,38 +1278,17 @@ fn draw_now_playing(
             )
         })
         .collect();
-
-    // The volume meter gets the same treatment as the bar, because it is the same
-    // kind of thing: a quantity, drawn with the album's own colours. Hidden when
-    // Spotify ignored a write (COMPAT rule 5).
-    if app.settings.show_volume && !app.volume_hidden {
-        let v = app.meter_volume();
+    if let Some(meter_row) = volume_row {
         let label = "vol ";
-        // Two cells before the percentage, not one: `▰` is drawn a little
-        // wider than its cell in common fonts, so at 100 % a full last cell ran
-        // into the "1" with only a single space between them.
         let meter_w = (text_body.width as usize)
             .saturating_sub(label.len() + 6)
             .max(1);
         regions.volume = Some(Rect {
             x: text_body.x + label.len() as u16,
-            y: text_body.y + lines.len() as u16,
+            y: text_body.y + meter_row as u16,
             width: meter_w as u16,
             height: 1,
         });
-        let mut row = vec![Span::styled(label, dim)];
-        row.extend(crate::tui::theme::gradient_meter(
-            f64::from(v) / 100.0,
-            meter_w,
-            &theme.palette,
-            app.muted,
-        ));
-        row.push(Span::raw("  "));
-        row.push(Span::styled(
-            format!("{v:>3}%"),
-            Style::default().fg(theme.accent_colour()),
-        ));
-        lines.push(Line::from(row));
     }
 
     let shown = lines.len().min(text_body.height as usize);
@@ -1244,13 +1299,14 @@ fn draw_now_playing(
         );
     }
 
-    // A gradient rule along the bottom of the pane. On a tall terminal there is
-    // always space left over, and a bare gap at the foot of a panel reads as an
-    // oversight; a rule reads as a deliberate edge, and it is the last thing the
-    // album's colours get to say.
-    let spare = text_body.height.saturating_sub(shown as u16);
+    // A gradient rule under the block. On a tall terminal there is always space
+    // left over, and a bare gap at the foot of a panel reads as an oversight; a
+    // rule reads as a deliberate edge, and it is the last thing the album's
+    // colours get to say. It follows the block rather than the floor of the
+    // pane, so it stays the same distance from the text at any size.
+    let spare = body.y + body.height - (text_body.y + shown as u16);
     if spare >= 2 {
-        let rule_y = body.y + body.height - 1;
+        let rule_y = text_body.y + shown as u16;
         f.render_widget(
             Paragraph::new(crate::tui::theme::gradient_line(
                 &"─".repeat(text_body.width as usize),
@@ -1413,7 +1469,27 @@ fn draw_tabs(f: &mut Frame, area: Rect, app: &App, theme: &Theme, regions: &mut 
             crate::tui::web_tabs::lines(app, theme)
         }
     };
-    f.render_widget(Paragraph::new(lines), body);
+    let lines_len = lines.len();
+    f.render_widget(Paragraph::new(lines), body_rect(body, lines_len));
+}
+
+/// Where a pane's lines are drawn when they do not fill it.
+///
+/// Top-anchored, which is right for a list that grows downwards. But a short
+/// block -- a first-run hint, a tab that has nothing in it yet -- at the top of a
+/// sixty-row pane leaves the other fifty-five rows looking like something failed
+/// to draw, so a block with real room to spare is centred instead. Six rows is the
+/// threshold: below that the gap is not worth moving the content for.
+fn body_rect(body: Rect, lines: usize) -> Rect {
+    let spare = (body.height as usize).saturating_sub(lines);
+    if spare < 6 {
+        return body;
+    }
+    Rect {
+        y: body.y + (spare / 2) as u16,
+        height: lines as u16,
+        ..body
+    }
 }
 
 /// The Lyrics tab: the line being sung, the ones coming, and the ones just gone.
@@ -2680,6 +2756,35 @@ mod tests {
         }
     }
 
+    /// As [`render`], but with the cover already loaded, so the art rectangle
+    /// holds a picture rather than the empty hole that reserves the space.
+    fn render_with_art(w: u16, h: u16) -> (ratatui::buffer::Buffer, Regions) {
+        let dir = temp_dir("layout");
+        let path = fixture_image(&dir);
+        let image = crate::art::decode(&path).expect("decoding the fixture");
+        let mut app = app_at(w, h);
+        let url = app.track().unwrap().artwork_url.clone().unwrap();
+        assert!(app.art.begin(&url));
+        let app = update(
+            app.clone(),
+            Event::Art {
+                url,
+                result: Ok(crate::player::actions::LoadedArt { path, image }),
+            },
+        )
+        .app;
+
+        let backend = ratatui::backend::TestBackend::new(w, h);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        let mut regions = Regions::default();
+        let mut images = Images::halfblocks(HALF_BLOCK_CELL);
+        let theme = Theme::default();
+        term.draw(|f| draw_with(f, &app, &theme, &mut regions, &mut images))
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        (term.backend().buffer().clone(), regions)
+    }
+
     /// Draw a frame and hand back both the cells and where things landed, which
     /// is the only way to test a click against what is really on screen.
     fn render(w: u16, h: u16, app: &App) -> (ratatui::buffer::Buffer, Regions) {
@@ -2725,7 +2830,13 @@ mod tests {
         // The bar's own columns, not the whole row: the pane's border is in the
         // way and the bar is drawn with ─ ─ rather than ▰ ▰ until it advances.
         let row = row_text(&buf, bar.y, bar.x, bar.width);
-        assert_eq!(row.chars().count(), 44, "the bar spans the pane's width");
+        // The bar spans the pane's inner width, whatever the pane turned out to
+        // be at this size: it is drawn to `text_body.width` and nothing else.
+        assert_eq!(
+            row.chars().count() as u16,
+            regions.progress.expect("the bar").width,
+            "the bar spans the pane's width"
+        );
         assert!(
             row.chars().all(|c| matches!(c, '─' | '▰' | '█')),
             "the bar should be drawn where the region says: {row:?}"
@@ -3224,15 +3335,168 @@ mod tests {
         assert!(art.width >= MIN_ART.0 && art.height >= MIN_ART.1, "{art:?}");
     }
 
-    /// The visualizer keeps its spine; the cover does not.
+    /// The visualizer gets the whole art rectangle: there is no spine beside it
+    /// any more. A second gradient running down the edge of the bars was noise
+    /// beside a gradient that was already there, and it cost the bars two of the
+    /// pane's columns (owner, 2026-10-02).
     #[test]
-    fn only_the_visualizer_has_a_spine() {
+    fn the_visualizer_takes_the_whole_art_rectangle() {
         let mut app = app_at(100, 30);
         app.settings.display_mode = DisplayMode::Visualizer;
-        let (buf, regions) = render(100, 30, &app);
-        let art = regions.art.expect("the visualizer area");
-        assert_eq!(art.x, 3, "inset past the spine: {art:?}");
-        assert_eq!(row_text(&buf, art.y, art.x - 2, 2), "██");
+        let (_, regions) = render(100, 30, &app);
+        let viz = regions.art.expect("the visualizer area");
+        let cover = render(100, 30, &app_at(100, 30))
+            .1
+            .art
+            .expect("the cover area");
+        assert_eq!(viz, cover, "the visualizer and the cover share one rect");
+        assert_eq!(viz.x, 1, "hard against the pane's edge: {viz:?}");
+    }
+
+    /// The cover and the text together have to fill the pane. This is the test
+    /// for the dead space a tall or a very wide terminal used to show: a cover
+    /// frozen at twenty rows in a fifty-row pane, with thirty rows of nothing
+    /// under it (owner, 2026-10-02).
+    #[test]
+    fn the_now_playing_pane_has_no_gap_inside_its_block() {
+        for (w, h) in [
+            (200u16, 62u16),
+            (240, 80),
+            (120, 50),
+            (100, 30),
+            (80, 24),
+            (76, 16),
+        ] {
+            let (buf, regions) = render_with_art(w, h);
+            let art = regions.art.expect("the cover");
+            let bar = regions.progress.expect("the progress bar");
+            // The rule sits under the last text row, so the block runs from the
+            // top of the cover to the bottom of the pane's inner area.
+            assert_eq!(art.x, 1, "{w}x{h}: the cover is hard against the edge");
+            // The bar is the fifth text row, so it is below the cover by exactly
+            // the rows of type above it -- never by rows of nothing.
+            assert!(
+                bar.y > art.y + art.height,
+                "{w}x{h}: the bar is over the art"
+            );
+            assert!(
+                bar.y - (art.y + art.height) <= 5,
+                "{w}x{h}: {} blank rows between the cover and the text",
+                bar.y - (art.y + art.height)
+            );
+            // Nothing between the last row of text and the foot of the pane.
+            let pane_floor = regions.volume.map_or(bar.y + 2, |v| v.y + 2);
+            // Above and below the block the rows are split evenly, which is what
+            // makes a pane with room to spare look composed rather than top-heavy.
+            let above = art.y - 2;
+            let slack = h as i32 - pane_floor as i32;
+            assert!(slack <= 8, "{w}x{h}: {slack} rows below the block");
+
+            assert!(
+                above <= 6,
+                "{w}x{h}: {above} rows above the block and {slack} below"
+            );
+            let (x0, x1) = (art.x, art.x + art.width);
+            // Inside the block -- from the top of the cover to the foot of the
+            // rule -- there is no run of empty rows at all.
+            let longest = longest_blank_run(&buf, x0, x1, art.y, pane_floor + 1);
+            assert!(longest <= 1, "{w}x{h}: {longest} blank rows at {x0}..{x1}");
+        }
+    }
+
+    /// A short block in a tall pane is centred rather than left at the top, so a
+    /// half-empty pane reads as composed instead of unfinished.
+    #[test]
+    fn a_short_pane_of_content_is_centred_not_stranded_at_the_top() {
+        let app = app_at(120, 60);
+        let (buf, _) = render(120, 60, &app);
+        let rows: Vec<u16> = (0..60)
+            .filter(|y| {
+                (0..120).any(|x| {
+                    let c = buf[(x, *y)].symbol();
+                    !c.is_empty()
+                        && c != " "
+                        && !c.starts_with('│')
+                        && !c.starts_with('╭')
+                        && !c.starts_with('╰')
+                        && !c.starts_with('─')
+                })
+            })
+            .collect();
+        assert!(rows.len() > 4, "the tab pane should have some content");
+        // The right-hand pane's content starts well below its top border.
+        let first = rows
+            .iter()
+            .copied()
+            .find(|y| *y > 3 && (95..120).any(|x| buf[(x, *y)].symbol().trim() != "│"))
+            .expect("a row of content in the tab pane");
+        assert!(
+            first >= 6,
+            "content starts on row {first}, not centred: {rows:?}"
+        );
+    }
+
+    /// `now_playing_width` is computed from an estimate of the text block's
+    /// height, so the two have to agree: if the text ever grows past the estimate
+    /// the pane is sized for the wrong thing and the cover goes back to being a
+    /// small picture in a large box.
+    #[test]
+    fn the_text_estimate_matches_the_rows_that_are_drawn() {
+        // Only sizes where the whole text block fits: in a shorter pane the block
+        // is truncated at the bottom, so the last recorded row is a row that was
+        // never drawn and says nothing about how tall the block is.
+        for (w, h) in [
+            (240u16, 80u16),
+            (200, 62),
+            (120, 40),
+            (100, 30),
+            (80, 24),
+            (76, 16),
+        ] {
+            for volume in [true, false] {
+                for progress in [true, false] {
+                    let mut app = app_at(w, h);
+                    app.settings.show_volume = volume;
+                    app.settings.show_progress = progress;
+                    let track = app.track().expect("a track").clone();
+                    let (_, regions) = render(w, h, &app);
+                    // The last row of the block: the meter when it is drawn, the
+                    // controls otherwise.
+                    let last = match regions.volume {
+                        Some(v) => v.y,
+                        None => regions.controls.first().expect("controls").0.y,
+                    };
+                    let art = regions.art.map_or(0, |a| a.y + a.height);
+                    assert_eq!(
+                        text_rows(&app, &track),
+                        last + 1 - art,
+                        "{w}x{h} volume={volume} progress={progress}"
+                    );
+                    assert!(text_rows(&app, &track) <= TEXT_ROWS_MAX);
+                }
+            }
+        }
+    }
+
+    /// The longest run of rows with nothing but background in `x0..x1`.
+    fn longest_blank_run(
+        buf: &ratatui::buffer::Buffer,
+        x0: u16,
+        x1: u16,
+        from: u16,
+        to: u16,
+    ) -> u16 {
+        let mut longest = 0;
+        let mut run = 0;
+        for y in from..to {
+            let blank = (x0..x1).all(|x| {
+                let c = buf[(x, y)].symbol();
+                c.is_empty() || c == " "
+            });
+            run = if blank { run + 1 } else { 0 };
+            longest = longest.max(run);
+        }
+        longest
     }
 
     /// TODO 4.1: "art disappears cleanly when the terminal shrinks below the
