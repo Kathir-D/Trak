@@ -50,8 +50,16 @@ redirect `http://127.0.0.1`), add-to-queue's Premium 403. The `[owner]` steps ar
 Also unmeasured: battery drain over hours (CPU is under 1% idle, 3.9% with the visualizer).
 Also never exercised in a real terminal: the idle card (it needs Spotify quit).
 
-**Privacy:** the old `docs/images/tui-6.4-fullscreen.png` was a whole-desktop screenshot and is gone
-from the tree but still in git history; purging history needs a force-push, which needs the owner.
+**Privacy:** the whole-desktop screenshots (`tui-6.3-tab.png`, `tui-6.4-fullscreen.png`) were purged
+from history on 2026-10-02 with `git filter-repo` and a force-push of `main`, `v0.1.0` and `v0.1.1`
+(every commit from `b5f32d0` on has a new SHA; trees are identical, so the releases, the formula's
+checksum and both installers are unaffected). **GitHub still serves the old commits by SHA**
+(`raw.githubusercontent.com/Kathir-D/Trak/<old sha>/docs/images/tui-6.4-fullscreen.png` returned 200
+afterwards); only GitHub Support can drop them, via a "remove cached views / run garbage collection"
+request, which needs the owner's account **[owner]**. Old SHA to quote: `b5f32d0b72d2aee7feca199d86ceaf130f6b7a1b`.
+Lesson if you ever redo this: `filter-repo` drops `origin`; and **disable the Release workflow
+before pushing moved tags**, because a `v*` tag push rebuilds the tarball and its checksum would
+then disagree with the tap's formula.
 
 ## Tools and traps (what cost time this session)
 
