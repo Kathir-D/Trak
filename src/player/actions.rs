@@ -110,12 +110,14 @@ pub enum PlayerCommand {
     Next,
     Prev,
     Replay,
-    /// `Some(secs)` to seek, `None` to step by the configured amount.
+    /// Seek to an absolute position, in seconds.
     Seek(f64),
     VolumeStep(i16),
     SetVolume(u8),
     ToggleShuffle,
-    CycleRepeat,
+    /// AppleScript's repeat is one boolean, so the TUI's three modes are
+    /// written as off (`false`) and all/one (`true`).
+    SetRepeating(bool),
     /// Play a URI. `enter` on a history row (TODO 3.6) and the CLI both need it.
     #[allow(dead_code, reason = "wired up with the history list, TODO 3.6")]
     PlayUri(String),

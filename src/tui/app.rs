@@ -2249,12 +2249,31 @@ fn handle_key(app: &mut App, c: char, commands: &mut Vec<PlayerCommand>, web: &m
             // Advance the shown mode immediately rather than waiting for the
             // write to come back, so the key feels like it did something.
             app.repeat = app.repeat.next();
-            push(app, commands, PlayerCommand::CycleRepeat);
+            let on = app.repeat != crate::player::RepeatMode::Off;
+            push(app, commands, PlayerCommand::SetRepeating(on));
         }
         's' => push(app, commands, PlayerCommand::ToggleShuffle),
         'R' => push(app, commands, PlayerCommand::Replay),
-        'h' => push(app, commands, PlayerCommand::Seek(-app.settings.seek_step)),
-        'l' => push(app, commands, PlayerCommand::Seek(app.settings.seek_step)),
+        // `Seek` is an absolute position (it is `set player position`), so the
+        // step is applied here. Sending the bare step made `l` jump to 0:05 and
+        // `h` ask Spotify for -5 s, which it refuses.
+        'h' | 'l' => {
+            let step = if c == 'h' {
+                -app.settings.seek_step
+            } else {
+                app.settings.seek_step
+            };
+            let dur = app.track().map(|t| t.duration_secs() as f64).unwrap_or(0.0);
+            let mut to = (app.interpolated_position() + step).max(0.0);
+            if dur > 0.0 {
+                to = to.min(dur);
+            }
+            push(
+                app,
+                commands,
+                PlayerCommand::Seek((to * 1000.0).round() / 1000.0),
+            );
+        }
         'm' => {
             app.muted = !app.muted;
             if app.muted {
@@ -2514,10 +2533,12 @@ fn apply_state(app: &mut App, s: PlayerState) {
     // user's, and stays theirs: `apply_state` must never write to it, or a Sonar
     // fade would show up as trak having moved the volume (COMPAT rule 3).
     app.read_volume = s.volume;
-    app.repeat = if s.repeating_enabled {
-        RepeatMode::Context
-    } else {
-        RepeatMode::Off
+    // Spotify only says on or off. "One" is the app's own word for "on", so a
+    // poll that still says on keeps it rather than turning it back into "all".
+    app.repeat = match (s.repeating_enabled, app.repeat) {
+        (false, _) => RepeatMode::Off,
+        (true, RepeatMode::Track) => RepeatMode::Track,
+        (true, _) => RepeatMode::Context,
     };
     app.last_read = Some(Instant::now());
     // A new track's title starts at its beginning, and the last track's chorus
@@ -2667,7 +2688,7 @@ mod tests {
             (' ', PlayerCommand::Toggle),
             ('n', PlayerCommand::Next),
             ('p', PlayerCommand::Prev),
-            ('r', PlayerCommand::CycleRepeat),
+            ('r', PlayerCommand::SetRepeating(true)),
             ('s', PlayerCommand::ToggleShuffle),
         ] {
             let (app, cmds) = press(with_track(), key);
@@ -2677,11 +2698,21 @@ mod tests {
     }
 
     #[test]
-    fn seek_keys_use_the_configured_step() {
+    fn seek_keys_step_from_where_the_track_is() {
+        // `Seek` is absolute, so the keys move from the current position by the
+        // configured step rather than jumping to ±5 s.
+        let app = with_track();
+        let at = app.interpolated_position();
+        let near = |cmds: &[PlayerCommand], want: f64| matches!(cmds, [PlayerCommand::Seek(s)] if (s - want).abs() < 0.5);
         let (_, cmds) = press(with_track(), 'h');
-        assert_eq!(cmds, vec![PlayerCommand::Seek(-5.0)]);
+        assert!(near(&cmds, (at - 5.0).max(0.0)), "{cmds:?} from {at}");
         let (_, cmds) = press(with_track(), 'l');
-        assert_eq!(cmds, vec![PlayerCommand::Seek(5.0)]);
+        assert!(near(&cmds, at + 5.0), "{cmds:?} from {at}");
+        // Never before the start.
+        let mut app = with_track();
+        app.settings.seek_step = 100_000.0;
+        let (_, cmds) = press(app, 'h');
+        assert_eq!(cmds, vec![PlayerCommand::Seek(0.0)]);
     }
 
     #[test]
@@ -3090,24 +3121,40 @@ mod tests {
         assert_eq!(app.repeat, RepeatMode::Off);
 
         let (app, cmds) = press(app, 'r');
-        assert_eq!(cmds, vec![PlayerCommand::CycleRepeat]);
+        assert_eq!(cmds, vec![PlayerCommand::SetRepeating(true)]);
         assert_eq!(app.repeat, RepeatMode::Context, "all");
 
         let app = update(
             app,
-            Event::CommandDone(CommandOutcome::ok(PlayerCommand::CycleRepeat)),
+            Event::CommandDone(CommandOutcome::ok(PlayerCommand::SetRepeating(true))),
         )
         .app;
-        let (app, _) = press(app, 'r');
+        let (app, cmds) = press(app, 'r');
         assert_eq!(app.repeat, RepeatMode::Track, "one");
+        assert_eq!(cmds, vec![PlayerCommand::SetRepeating(true)], "one repeats");
 
         let app = update(
             app,
-            Event::CommandDone(CommandOutcome::ok(PlayerCommand::CycleRepeat)),
+            Event::CommandDone(CommandOutcome::ok(PlayerCommand::SetRepeating(true))),
         )
         .app;
-        let (app, _) = press(app, 'r');
+        let (app, cmds) = press(app, 'r');
         assert_eq!(app.repeat, RepeatMode::Off, "and back round to off");
+        assert_eq!(cmds, vec![PlayerCommand::SetRepeating(false)]);
+    }
+
+    /// "One" survives a poll, because Spotify's boolean cannot say it.
+    #[test]
+    fn repeat_one_survives_a_poll() {
+        let mut app = with_track();
+        app.repeat = RepeatMode::Track;
+        let mut s = playing();
+        s.repeating_enabled = true;
+        let app = update(app, Event::PlayerState(Box::new(s.clone()))).app;
+        assert_eq!(app.repeat, RepeatMode::Track);
+        s.repeating_enabled = false;
+        let app = update(app, Event::PlayerState(Box::new(s))).app;
+        assert_eq!(app.repeat, RepeatMode::Off, "but off is off");
     }
 
     #[test]

@@ -1193,10 +1193,11 @@ fn run_one(
             let on = !p.state()?.shuffling_enabled;
             p.command(&format!("set shuffling to {on}")).map(|_| None)
         }
-        PlayerCommand::CycleRepeat => {
-            // AppleScript cannot read back "repeat one" as distinct from "repeat
-            // all", so the app remembers the mode and this writes its boolean.
-            let on = !p.state()?.repeating_enabled;
+        // AppleScript cannot tell "repeat one" from "repeat all", so the app
+        // remembers the mode and this writes the boolean that mode implies.
+        // Flipping whatever Spotify had instead put off/all/one out of step:
+        // "one" switched repeat off, and "off" switched it back on.
+        PlayerCommand::SetRepeating(on) => {
             p.command(&format!("set repeating to {on}")).map(|_| None)
         }
         // `enter` on a history row (TODO 3.6). The URI came out of a read, and
@@ -1568,7 +1569,7 @@ mod tests {
                 assert!(
                     matches!(
                         cmd,
-                        PlayerCommand::ToggleShuffle | PlayerCommand::CycleRepeat
+                        PlayerCommand::ToggleShuffle | PlayerCommand::SetRepeating(_)
                     ),
                     "only the guarded writes may fail on the fake, got {cmd:?}"
                 );
