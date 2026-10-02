@@ -321,9 +321,50 @@ curl -fsSL https://raw.githubusercontent.com/Kathir-D/Trak/main/install.sh | sh 
 
 ## 11. Release log
 
-One row per release, filled in from §4 and §7. Nothing yet: the first release is
-TODO 9.8, `v0.1.0`, after phases 2–8.
+One row per release, filled in from §4 and §7.
 
 | Version | Date | sha256 (first 12) | Tap commit | Fresh-machine result |
 | --- | --- | --- | --- | --- |
-| _(none yet)_ | | | | |
+| 0.1.0 | 2026-10-02 | `3339b815bb5c` | `92359db` | Workflow green. `brew audit --strict --online` failed: `version "0.1.0"` is redundant with the URL. Superseded by 0.1.1; the binary is the same. |
+| 0.1.1 | 2026-10-02 | `5b48141e9d57` | `b19d4b9` | Both install paths below, verbatim. |
+
+### 0.1.1 fresh install, 2026-10-02 (the owner's Mac, Apple silicon, macOS 27)
+
+Homebrew (`brew uninstall trak`, then `brew update`, then):
+
+```text
+$ brew install kathir-d/tap/trak
+$ trak --version
+trak 0.1.1
+$ xattr -l "$(which trak)"          # nothing printed: no quarantine attribute
+$ ls /Applications | grep -ic trak
+0
+$ lipo -archs /opt/homebrew/bin/trak
+x86_64 arm64
+$ brew audit --strict --online kathir-d/tap/trak    # exit 0, no output
+$ brew test kathir-d/tap/trak                       # exit 0
+```
+
+`trak` is the only file in `/opt/homebrew/bin`; the Cellar holds the binary and
+`share/doc/trak`. macOS also resolves `Trak` to it, because the default volume is
+case-insensitive.
+
+curl (after `brew uninstall trak`, so the default location is free):
+
+```text
+$ curl -fsSL https://raw.githubusercontent.com/Kathir-D/Trak/main/install.sh | sh
+Downloading trak 0.1.1
+Checksum OK
+Installed trak 0.1.1 to /Users/kathirdev/.local/bin/trak
+Run trak for the TUI, trak status for a one-liner. It is ad-hoc signed, not notarized.
+$ trak --version
+trak 0.1.1
+$ xattr -l ~/.local/bin/trak         # nothing printed
+$ curl -fsSL .../install.sh | sh -s -- --uninstall
+Removed /Users/kathirdev/.local/bin/trak
+Settings and any Spotify login in ~/.config/trak were left alone.
+```
+
+Not run: a Mac that has never had Homebrew or a Spotify Automation grant, so the
+first-run permission prompt (§7's `trak status` step) was not seen from scratch
+**[owner]**.

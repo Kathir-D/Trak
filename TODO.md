@@ -831,15 +831,15 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
       asserting `trak --version` matches. No `system "codesign"`, no quarantine hacks: Homebrew formula
       downloads are not quarantined. Done when: `brew install --formula ./Formula/Trak.rb` works from a
       local tap and `brew test Trak` passes.
-- [ ] 9.4 **Add the row to the tap README** (`brew install kathir-d/tap/Trak`, uninstall, description)
+- [x] 9.4 **Add the row to the tap README** (`brew install kathir-d/tap/Trak`, uninstall, description)
       — or run prompt 3 in `docs/AGENT-PROMPTS.md`. Done when: the tap README lists Trak.
-- [ ] 9.5 **`brew audit --strict --online kathir-d/tap/Trak`** clean; `brew style`. Done when: both pass.
-- [ ] 9.6 **Fresh-machine test**: `brew install kathir-d/tap/Trak` on a clean user/VM (or after
+- [x] 9.5 **`brew audit --strict --online kathir-d/tap/Trak`** clean; `brew style`. Done when: both pass.
+- [x] 9.6 **Fresh-machine test**: `brew install kathir-d/tap/Trak` on a clean user/VM (or after
       `brew uninstall`), run `trak --version`, `trak status`, open the TUI. Done when: no Gatekeeper
       prompt, no manual steps. Record in `docs/RELEASING.md`.
 - [x] 9.7 **`docs/RELEASING.md`**: bump VERSION and Cargo.toml, changelog entry, tag, what CI does,
       how to yank a bad release. Add `CHANGELOG.md` (Keep a Changelog format).
-- [ ] 9.8 Tag **v0.1.0** when phases 2–8 are done and phase 10 rows pass. **[owner]** approves the
+- [x] 9.8 Tag **v0.1.0** when phases 2–8 are done and phase 10 rows pass. **[owner]** approves the
       release before tagging.
       > **CHANGED (owner override, 2026-10-01):** the gate is relaxed to *phases 2–7 and 9 pass*.
       > 8.3/8.5 (real audio) and phase 10 (Sonar matrix) may still be open; if 8.3 is not merged the
@@ -848,7 +848,7 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
       > CI green, `package-release.sh`, `brew audit`/`brew style`, `TAP_DEPLOY_KEY` present, README /
       > CHANGELOG / RELEASING true for the release). If the workflow fails after a tag is published,
       > fix it and cut `v0.1.1`; never move a published tag.
-- [ ] 9.9 **curl installer** (`install.sh` at the repo root; owner override 2026-10-01, a second
+- [x] 9.9 **curl installer** (`install.sh` at the repo root; owner override 2026-10-01, a second
       install path beside Homebrew). POSIX sh, shellcheck-clean. Refuses anything but macOS 14.2+;
       version is `$TRAK_VERSION` or the latest release; downloads the tarball and `SHA256SUMS.txt`
       into a `mktemp -d` (trap-cleaned), verifies with `shasum -a 256 -c` and aborts on a mismatch;
@@ -867,6 +867,10 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
       > `--uninstall` works from a **receipt** (`${XDG_DATA_HOME:-~/.local/share}/trak/install-sh-receipt`)
       > rather than by guessing paths, which is what "exactly what it installed" means: it can never
       > remove a Homebrew trak or one a user copied in by hand.
+      > **Done 2026-10-02.** v0.1.0 published and green, but `brew audit --strict` rejected the
+      > formula's redundant `version` line, so the line and its workflow substitution were removed
+      > and v0.1.1 cut (never moved a tag). Install logs are in `docs/RELEASING.md` §11. The tap
+      > README has its Trak row (one-time edit, tap commit `2c86caa`).
 
 ---
 
@@ -1014,7 +1018,7 @@ Requires Sonar installed and running (`brew install --cask kathir-d/tap/sonar`) 
       > the cover accent washed out on white, so trak asks OSC 11 once at startup (cmux answers only
       > with the ST terminator, so the query ends in ST, plus a DSR so a silent terminal costs one
       > round trip) and darkens pale RGB foregrounds to 3:1 against white, dropping DIM.
-- [ ] 11.7 Final read-through of `AGENTS.md`, `CLAUDE.md`, and the docs so they match the shipped
+- [x] 11.7 Final read-through of `AGENTS.md`, `CLAUDE.md`, and the docs so they match the shipped
       product; remove stale TODOs.
 
 ---
