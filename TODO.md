@@ -631,10 +631,16 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
       one-liner; distinguish `"reason": "QUOTA_EXCEEDED"` in the body. 403: two real causes — Premium
       (queue) and an account not on the app's 5-user allowlist. Map both to friendly typed errors.
       Needs: 7.1. Done when: fixture-driven tests, no live network.
-- [ ] 7.6 **Search tab**: `/` focuses the input, live results debounced (~250 ms), grouped Tracks /
+- [x] 7.6 **Search tab**: `/` focuses the input, live results debounced (~250 ms), grouped Tracks /
       Albums / Artists / Playlists, `Tab` jumps groups, `enter` plays (AppleScript `play track "<uri>"`,
       so it works on Free), `A` queues, `o` opens the artist/album page. Done when: update() tests
       with `FakeLibrary`; snapshot tests; stale responses never overwrite newer ones.
+      > The tab, keys, grouping and stale-response drop were already built; **the live search
+      > itself never fired** — `search_debounce` was reset on keys but nothing advanced it. `Event::Tick`
+      > now counts it (only while the box has focus, connected, not already searching, and the
+      > query is neither blank nor the one on screen) and the loop sends the job (it used to
+      > discard a tick's `web` jobs). `[`/`]` jump groups, not `Tab` (SPEC §4). **[owner]**: type in
+      > Search with a real login and watch results appear ~0.3 s after you pause.
 - [ ] 7.7 **Playlists tab** (list, open, play, tracklist) and **Liked tab** (list, play from here,
       `f` toggles like on the current track). > Field rename: playlist `tracks` → **`items`**
       (`items.items.item`), and `items` is **only present for playlists the user owns or collaborates

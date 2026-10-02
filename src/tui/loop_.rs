@@ -592,7 +592,11 @@ fn event_loop<B: ratatui::backend::Backend>(
         crate::player::notify::pump_run_loop(frame.as_secs_f64());
 
         // 4. The local tick: toast expiry and the poll-due flag.
-        app = update(app, Event::Tick).app;
+        //     It can also fire the debounced search (7.6), so its web jobs are
+        //     sent rather than dropped.
+        let ticked = update(app, Event::Tick);
+        app = ticked.app;
+        submit_web(ticked.web, &worker);
 
         // 4b. The visualizer's own tick. Separate from the clock above because
         //     bars need thirty frames a second and the clock needs one, and

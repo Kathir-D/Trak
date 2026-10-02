@@ -1294,6 +1294,25 @@ pub fn update(mut app: App, event: Event) -> Updated {
             // A command in flight is still running. Do not stack a poll behind it
             // or the queue grows without bound.
             app.poll_due = app.busy.is_none();
+            // The live search (7.6): once the typing has paused for the debounce,
+            // send what is in the box. Only while it has focus -- enter and
+            // escape have already said what to do with it -- and never for a
+            // query that is already on screen or already on its way, because
+            // the quota is per developer account.
+            let w = &mut app.web;
+            if w.search_focus
+                && w.connection.connected()
+                && !w.searching
+                && !w.query.trim().is_empty()
+                && w.query.trim() != w.search_shown
+            {
+                w.search_debounce += 0.1;
+                if w.search_debounce >= SEARCH_DEBOUNCE_SECS {
+                    w.search_debounce = 0.0;
+                    w.searching = true;
+                    web.push(WebJob::Search(w.query.trim().to_string()));
+                }
+            }
         }
 
         Event::Searched { for_query, result } => {
@@ -3676,6 +3695,69 @@ mod tests {
             app.web.search_debounce, 0.0,
             "the wait restarts, it does not count down"
         );
+    }
+
+    fn ticks(mut app: App, n: usize) -> (App, Vec<WebJob>) {
+        let mut sent = Vec::new();
+        for _ in 0..n {
+            let u = update(app, Event::Tick);
+            app = u.app;
+            sent.extend(u.web);
+        }
+        (app, sent)
+    }
+
+    fn typing_connected(text: &str) -> App {
+        let mut app = on(Tab::Search);
+        app.web.connection = Connection::Connected;
+        let app = key(app, '/').0;
+        text.chars().fold(app, |a, c| key(a, c).0)
+    }
+
+    /// The point of the debounce: nothing goes out while the typing is still
+    /// going, one request goes out when it stops.
+    #[test]
+    fn a_pause_in_typing_sends_one_search() {
+        let (app, sent) = ticks(typing_connected("massive"), 2);
+        assert!(sent.is_empty(), "still inside the debounce: {sent:?}");
+        let (app, sent) = ticks(app, 1);
+        assert_eq!(sent, vec![WebJob::Search("massive".into())]);
+        assert!(app.web.searching);
+        let (_, sent) = ticks(app, 10);
+        assert!(sent.is_empty(), "one query is one request: {sent:?}");
+    }
+
+    /// A keystroke inside the window pushes the send back, so the word is one
+    /// request and the stale half of it is never asked.
+    #[test]
+    fn typing_on_restarts_the_wait() {
+        let (app, sent) = ticks(typing_connected("mass"), 2);
+        assert!(sent.is_empty());
+        let app = key(app, 'i').0;
+        let (app, sent) = ticks(app, 2);
+        assert!(sent.is_empty(), "the wait restarted: {sent:?}");
+        let (_, sent) = ticks(app, 1);
+        assert_eq!(sent, vec![WebJob::Search("massi".into())]);
+    }
+
+    /// Without a connection a search can only fail, and `searching` would stay
+    /// set with nothing coming to clear it.
+    #[test]
+    fn a_disconnected_search_box_sends_nothing() {
+        let mut app = typing_connected("massive");
+        app.web.connection = Connection::LoggedOut;
+        let (app, sent) = ticks(app, 10);
+        assert!(sent.is_empty() && !app.web.searching);
+    }
+
+    /// What is already on screen is not asked for again, nor is a blank box.
+    #[test]
+    fn a_shown_or_blank_query_is_not_resent() {
+        let mut app = typing_connected("massive");
+        app.web.search_shown = "massive".into();
+        assert!(ticks(app, 10).1.is_empty());
+        let blank = typing_connected("  ");
+        assert!(ticks(blank, 10).1.is_empty());
     }
 
     /// Groups move with `[` and `]`, and `Tab` keeps changing tabs everywhere --
