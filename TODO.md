@@ -955,8 +955,16 @@ Requires Sonar installed and running (`brew install --cask kathir-d/tap/sonar`) 
       > captures (other windows, an API-key page) and are removed from the tree. They are still in
       > git history; purging that needs a force-push, which is the owner's call. Every capture
       > from now on is the cmux window only.
+      > **2026-10-02:** hero GIF done (`docs/images/trak-demo.gif`, 1.3 MB, see 11.2),
+      > `docs/README-NOTES.md` written (Sonar, headless-spotify, spotify-tui, spotify-player,
+      > ratatui and six profile READMEs), and the GitHub render checked in both colour schemes
+      > with headless Chrome (`--blink-settings=preferredColorScheme=0/1`): the dark-terminal GIF
+      > reads well on both. Left: release and Homebrew badges, added with the v0.1.0 release.
 - [ ] 11.2 Record the demo GIF/screenshots: Version B, Version A, visualizer styles, settings screen,
       full-screen lyrics. Done when: images committed and referenced.
+      > Version B, three visualizer styles, full-screen lyrics and settings are recorded and in
+      > the README's Screenshots section (recording method in `docs/images/NOTES.md`). Version A
+      > needs a live login **[owner]**; left unticked for that alone.
 - [ ] 11.3 GitHub repo polish: description, topics (`spotify`, `tui`, `rust`, `ratatui`, `macos`,
       `homebrew`, `terminal`), social preview image, `CONTRIBUTING.md`, issue templates,
       `SECURITY.md` (token handling note), `CODE_OF_CONDUCT.md` optional.
