@@ -968,8 +968,18 @@ Requires Sonar installed and running (`brew install --cask kathir-d/tap/sonar`) 
       > SECURITY.md link works. Left unticked until those are done.
 - [ ] 11.4 Add a "Works with Trak" mention in Sonar's and headless-spotify's READMEs (their agents do
       this via prompts 1 and 2). Confirm the three READMEs cross-link.
-- [ ] 11.5 Performance and battery pass: idle CPU < 1 % with the visualizer off and < ~5 % on;
+- [x] 11.5 Performance and battery pass: idle CPU < 1 % with the visualizer off and < ~5 % on;
       wake-ups minimised when paused; measure and record.
+      > Measured 2026-10-02 in cmux, release build, Kitty art on, `top -l 31 -s 1` averages:
+      > **paused 0.87 %** (was 1.38 %; a fake `TRAK_OSASCRIPT` answering with the
+      > `paused_track.txt` fixture, so the owner's music was not stopped), **playing 0.95 %**,
+      > **visualizer on 3.85 %** (real Spotify, `waveform`). Two fixes found by `sample` on a
+      > debug-symbol build: the header clock spawned `date` every second *on the UI thread*
+      > (now `localtime_r`), and a paused screen still wrote ~15 KB/s because the Kitty cover's
+      > placeholder row overshoots `unicode-width` and ratatui's diff rewrites the cells after it
+      > every frame (`draw_if_changed` skips a frame identical to the last one sent; now 0 B/s).
+      > What remains while paused is the 100 ms render into memory and the 5 s poll. Not measured:
+      > battery drain over hours, which needs the owner's laptop on battery **[owner]**.
 - [ ] 11.6 Accessibility / robustness pass: works with `NO_COLOR`, 16-colour terminals, light
       themes, very small and very large terminals, non-ASCII titles, right-to-left text does not break
       layout.
