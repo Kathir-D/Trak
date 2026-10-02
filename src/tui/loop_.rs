@@ -1360,6 +1360,9 @@ fn char_for(k: KeyEvent) -> Option<char> {
         KeyCode::Char(c) if matches!(c, 'h' | 'j' | 'k' | 'l') => Some(c),
         KeyCode::Char(c) => Some(c),
         KeyCode::Enter => Some('\n'),
+        // Most terminals send shift-tab as `ESC [ Z`, which crossterm reports as
+        // `BackTab` rather than as a Tab with Shift held; both mean "back".
+        KeyCode::BackTab => Some('Z'),
         KeyCode::Tab if k.modifiers.contains(KeyModifiers::SHIFT) => Some('Z'),
         KeyCode::Tab => Some('\t'),
         // The escape character itself, so `update` can bind it as a real key
@@ -1437,6 +1440,11 @@ mod tests {
             Some('\n')
         );
         assert_eq!(char_for(key(KeyCode::Tab, KeyModifiers::NONE)), Some('\t'));
+        // Shift-tab, as cmux and Terminal.app actually send it.
+        assert_eq!(
+            char_for(key(KeyCode::BackTab, KeyModifiers::SHIFT)),
+            Some('Z')
+        );
     }
 
     /// SPEC §4: `↑`/`↓` are `k`/`j`; `←`/`→` are tab keys of their own, not
