@@ -997,7 +997,7 @@ Requires Sonar installed and running (`brew install --cask kathir-d/tap/sonar`) 
       > every frame (`draw_if_changed` skips a frame identical to the last one sent; now 0 B/s).
       > What remains while paused is the 100 ms render into memory and the 5 s poll. Not measured:
       > battery drain over hours, which needs the owner's laptop on battery **[owner]**.
-- [ ] 11.6 Accessibility / robustness pass: works with `NO_COLOR`, 16-colour terminals, light
+- [x] 11.6 Accessibility / robustness pass: works with `NO_COLOR`, 16-colour terminals, light
       themes, very small and very large terminals, non-ASCII titles, right-to-left text does not break
       layout.
       > Done in code: `NO_COLOR` (CLI -> plain; TUI strips fg/bg per frame, keeps reverse/bold),
@@ -1007,6 +1007,13 @@ Requires Sonar installed and running (`brew install --cask kathir-d/tap/sonar`) 
       > as the checklist. **Not verifiable here — [owner]:** a *light-background* theme (dim text may
       > be hard to read), real RTL rendering order in cmux, and `NO_COLOR=1 trak` in a real terminal.
       > Kept open until those are looked at.
+      > **Closed 2026-10-02 in real cmux:** `NO_COLOR=1 trak` draws plain with the cursor row
+      > reversed. RTL: cmux runs the Unicode bidi algorithm per row, so digits after a Hebrew title
+      > joined it and the clock swapped sides; `tui/bidi.rs` puts U+2800 (bidi L, one column, draws
+      > blank) after each RTL run -- LRM is ignored by cmux and dropped by ratatui. Light background:
+      > the cover accent washed out on white, so trak asks OSC 11 once at startup (cmux answers only
+      > with the ST terminator, so the query ends in ST, plus a DSR so a silent terminal costs one
+      > round trip) and darkens pale RGB foregrounds to 3:1 against white, dropping DIM.
 - [ ] 11.7 Final read-through of `AGENTS.md`, `CLAUDE.md`, and the docs so they match the shipped
       product; remove stale TODOs.
 
