@@ -1536,9 +1536,9 @@ extern "C" fn note_signal(signum: i32) {
 /// This is the belt to RAII's braces, and the honest size of the belt: it covers a
 /// `kill` that arrives while the worker is between ticks, and it cannot cover
 /// `SIGKILL` or an abort. Trak's release profile is `panic = "abort"`, so a panic does
-/// not unwind and `Drop` never runs — which makes process death a *normal* path rather
-/// than a catastrophe, and is why "does a dead process leave a tap behind?" is answered
-/// by measurement rather than by hope (`docs/AUDIO-TAP.md` §4).
+/// not unwind and `Drop` never runs. What covers those is that the tap and the
+/// aggregate device are private to this process and coreaudiod owns their lifetime;
+/// `docs/AUDIO-TAP.md` §4c has what was observed and what could only be reasoned.
 struct SignalGuard;
 
 impl SignalGuard {
@@ -1663,7 +1663,10 @@ fn outcome(event: &TapEvent, warned: bool) -> (TapState, Option<String>) {
 /// The visualizer's audio source: a Core Audio tap on Spotify when it can be had, and
 /// [`SimulatedSource`] when it cannot.
 ///
-/// This is the type the TUI holds in place of a bare `SimulatedSource`.
+/// The TUI loop holds one, and reads it through [`live_spectrum`](Self::live_spectrum):
+/// the app state keeps its own `SimulatedSource`, so the loop only needs to know
+/// whether there are real bars. The [`AudioSource`] impl, which falls back on its own,
+/// is for a caller with no simulated source of its own (`examples/tap-probe.rs`).
 ///
 /// - [`new`](Self::new) never blocks, whatever the config says. Every Core Audio call
 ///   is on a worker, so a machine where the tap takes 200 ms to refuse it costs the
@@ -1671,6 +1674,8 @@ fn outcome(event: &TapEvent, warned: bool) -> (TapState, Option<String>) {
 /// - [`set_wanted`](Self::set_wanted) is the lifecycle TODO 8.5 is about: `true` when
 ///   the visualizer is on screen, `false` when it is hidden or Spotify has quit.
 ///   Idempotent and cheap, so the render loop can call it every frame.
+/// - [`set_source`](Self::set_source) follows `[visualizer] source` when the settings
+///   screen changes it.
 /// - [`take_notice`](Self::take_notice) yields the one-line explanation of a fallback,
 ///   once.
 ///

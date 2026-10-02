@@ -20,6 +20,12 @@
 //       attach, then raise SIGTERM at ourselves, so "a kill still kills, and the
 //       tap is down first" is a thing that was measured rather than intended.
 //
+//   cargo run --release --example tap-probe census
+//       count the audio devices and process taps Core Audio shows *this* process.
+//       Measured: another process's tap and private aggregate device are invisible
+//       here, so on its own this only gives the baseline; `cycles` runs the same
+//       count from inside, where its own tap does show (3/0 -> 4/1 -> 3/0).
+//
 // Nothing here launches Spotify or touches it: it reads the processes that are
 // already running, which is what COMPAT rule 2 forbids going beyond.
 use std::time::{Duration, Instant};
@@ -52,7 +58,7 @@ fn draw(bars: &[f32]) -> String {
 }
 
 fn usage() -> ! {
-    eprintln!("usage: tap-probe <run [secs] | idle [secs] | cycles [count] | signal>");
+    eprintln!("usage: tap-probe <run [secs] | idle [secs] | cycles [count] | signal | census>");
     std::process::exit(2)
 }
 
@@ -63,6 +69,42 @@ struct Motion {
     loudest: f32,
     moved: f64,
     frames: usize,
+}
+
+/// One second of real frames, summed.
+#[derive(Default)]
+struct Window {
+    frames: usize,
+    mean: f64,
+    peak: f32,
+    thirds: [f64; 3],
+}
+
+impl Window {
+    fn add(&mut self, bars: &[f32]) {
+        let n = bars.len().max(1);
+        self.frames += 1;
+        self.mean += bars.iter().map(|b| f64::from(*b)).sum::<f64>() / n as f64;
+        self.peak = bars.iter().copied().fold(self.peak, f32::max);
+        for (i, third) in bars.chunks(n.div_ceil(3)).enumerate().take(3) {
+            self.thirds[i] += third.iter().map(|b| f64::from(*b)).sum::<f64>() / third.len() as f64;
+        }
+    }
+
+    fn line(&self) -> String {
+        if self.frames == 0 {
+            return "  (no real frames: simulated or waiting)".into();
+        }
+        let f = self.frames as f64;
+        format!(
+            "{:.3}  {:.3}  {:.3}  {:.3}  {:.3}",
+            self.mean / f,
+            self.peak,
+            self.thirds[0] / f,
+            self.thirds[1] / f,
+            self.thirds[2] / f
+        )
+    }
 }
 
 fn track(motion: &mut Motion, bars: &[f32]) {
@@ -105,22 +147,37 @@ fn run(secs: f64) {
     let mut frames = 0usize;
     let mut first_shape = String::new();
 
+    // One line per second of what the real bars did, read the way the TUI reads
+    // them (`live_spectrum`, which is `None` unless a tap is up): the mean height,
+    // the loudest bar, and the energy in the bottom, middle and top thirds. Music
+    // moves all of it from second to second; a paused Spotify is all zeros.
+    let mut second = Window::default();
+    println!("     t  state                      mean   peak    low    mid   high");
+
     // The render loop's own cadence, so what is measured is what the TUI does.
     while started.elapsed() < Duration::from_secs_f64(secs) {
-        viz.set_playing(true);
-        viz.set_position(started.elapsed().as_secs_f64());
-        let bars = viz.spectrum();
+        let live = viz.live_spectrum();
+        let bars = live
+            .clone()
+            .unwrap_or_else(|| vec![0.0; trak::visualizer::BARS]);
         track(&mut motion, &bars);
+        if live.is_some() {
+            second.add(&bars);
+        }
         if frames == 0 {
             first_shape = draw(&bars);
         }
         frames += 1;
-        if frames.is_multiple_of(90) {
+        if frames.is_multiple_of(30) {
             println!(
-                "\n  t+{:>4.1}s  state {:?}",
+                "  {:>4.1}s  {:<24} {}",
                 started.elapsed().as_secs_f64(),
-                viz.state()
+                format!("{:?}", viz.state()),
+                second.line()
             );
+            second = Window::default();
+        }
+        if frames.is_multiple_of(150) {
             println!("{}", draw(&bars));
         }
         if let Some(line) = viz.take_notice() {
@@ -161,6 +218,8 @@ fn cycles(count: usize) {
     // Deliberately one pipeline for the whole run: the point is that the *worker*
     // takes the tap down and puts it back up, not that a new process does.
     let mut viz = AudioPipeline::new(VisualizerSource::Auto);
+    println!("  before any tap:");
+    census();
     for n in 1..=count {
         viz.set_wanted(true);
         // Long enough for the worker to have attached and published a state, and short
@@ -175,6 +234,12 @@ fn cycles(count: usize) {
         }
         let up = viz.state().clone();
         std::thread::sleep(Duration::from_millis(250));
+        if n == 1 {
+            // What this process sees of its own tap while it is up, so the "after"
+            // census below is known to be able to see one at all.
+            println!("  with the first tap up:");
+            census();
+        }
         viz.set_wanted(false);
         // Wait for the release to come back, so the next cycle starts from Idle.
         let deadline = Instant::now() + Duration::from_millis(1_500);
@@ -189,6 +254,8 @@ fn cycles(count: usize) {
     }
     // The worker is joined here, so this line is after every `Drop` has run.
     drop(viz);
+    println!("  after {count} cycles, every Drop run:");
+    census();
     println!("\n{count} cycles done, every Drop run. Check the visible side with:");
     println!("  system_profiler SPAudioDataType | diff - /tmp/before.txt -");
     println!("and read that with §4 in mind: Trak's aggregate device is private, so it");
@@ -224,6 +291,57 @@ unsafe extern "C" {
     fn libc_kill(pid: i32, sig: i32) -> i32;
 }
 
+#[repr(C)]
+struct PropertyAddress {
+    selector: u32,
+    scope: u32,
+    element: u32,
+}
+
+#[link(name = "CoreAudio", kind = "framework")]
+unsafe extern "C" {
+    fn AudioObjectGetPropertyDataSize(
+        object: u32,
+        address: *const PropertyAddress,
+        qualifier_size: u32,
+        qualifier: *const std::ffi::c_void,
+        size: *mut u32,
+    ) -> i32;
+}
+
+/// How many `AudioObjectID`s the system object lists under `selector`.
+fn count(selector: &[u8; 4]) -> Result<u32, i32> {
+    let address = PropertyAddress {
+        selector: u32::from_be_bytes(*selector),
+        scope: u32::from_be_bytes(*b"glob"),
+        element: 0,
+    };
+    let mut size = 0u32;
+    // SAFETY: the system object (1) with a global-scope address and no qualifier;
+    // the out pointer is one `u32`, which is what the call writes.
+    let status =
+        unsafe { AudioObjectGetPropertyDataSize(1, &address, 0, std::ptr::null(), &mut size) };
+    if status == 0 {
+        Ok(size / 4)
+    } else {
+        Err(status)
+    }
+}
+
+/// The devices and process taps Core Audio shows this process.
+fn census() {
+    match count(b"dev#") {
+        Ok(n) => println!("  devices : {n}"),
+        Err(e) => println!("  devices : error {e}"),
+    }
+    // `kAudioHardwarePropertyTapList`. Only this process's own taps show up here:
+    // a second process counted 0 while one was live elsewhere.
+    match count(b"tps#") {
+        Ok(n) => println!("  taps    : {n}"),
+        Err(e) => println!("  taps    : error {e}"),
+    }
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let Some(what) = args.next() else { usage() };
@@ -232,6 +350,7 @@ fn main() {
         "idle" => idle(args.next().and_then(|s| s.parse().ok()).unwrap_or(10.0)),
         "cycles" => cycles(args.next().and_then(|s| s.parse().ok()).unwrap_or(10)),
         "signal" => signal(),
+        "census" => census(),
         _ => usage(),
     }
 }
