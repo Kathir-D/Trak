@@ -556,7 +556,7 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
       > ahead still shows which line the song is on. **Real-song check (2026-10-01, "Beauty Sleep"
       > — Jane Remover):** the live lookup returned synced lyrics from `/api/get`, wrote the disk
       > cache, and the line-at-position resolved correctly at pos 48 s against the playing
-      > Spotify. Screenshots: `docs/images/tui-6.3-tab.png`.
+      > Spotify. (Its screenshot was a whole-desktop capture and was removed on 2026-10-01; 11.2 re-shoots it window-only.)
 - [x] 6.4 **Full-screen lyrics (`L`)**: large centered current line, dim neighbours, accent colour,
       `esc` returns. Done when: works at several sizes, no wrapping glitches (wrap long lines by
       display width, mind wide/CJK characters).
@@ -570,7 +570,7 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
       > NOT_YET is now **empty** — every key SPEC §4 promises to both versions is bound — and the
       > 3.8 test that asserted the excuse list was non-empty was updated: empty is the finished
       > state, and the two render-side tests on the same list are what stop it meaning "the help
-      > and the SPEC diverged". Screenshot: `docs/images/tui-6.4-fullscreen.png`.
+      > and the SPEC diverged". (Its screenshot was a whole-desktop capture and was removed on 2026-10-01.)
 
 ---
 
@@ -802,6 +802,32 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
       how to yank a bad release. Add `CHANGELOG.md` (Keep a Changelog format).
 - [ ] 9.8 Tag **v0.1.0** when phases 2–8 are done and phase 10 rows pass. **[owner]** approves the
       release before tagging.
+      > **CHANGED (owner override, 2026-10-01):** the gate is relaxed to *phases 2–7 and 9 pass*.
+      > 8.3/8.5 (real audio) and phase 10 (Sonar matrix) may still be open; if 8.3 is not merged the
+      > simulated visualizer ships and the README and CHANGELOG say so. A half-working 8.3 is never
+      > merged. The agent may tag and push `v0.1.0` itself once every pre-tag check passes (gate +
+      > CI green, `package-release.sh`, `brew audit`/`brew style`, `TAP_DEPLOY_KEY` present, README /
+      > CHANGELOG / RELEASING true for the release). If the workflow fails after a tag is published,
+      > fix it and cut `v0.1.1`; never move a published tag.
+- [ ] 9.9 **curl installer** (`install.sh` at the repo root; owner override 2026-10-01, a second
+      install path beside Homebrew). POSIX sh, shellcheck-clean. Refuses anything but macOS 14.2+;
+      version is `$TRAK_VERSION` or the latest release; downloads the tarball and `SHA256SUMS.txt`
+      into a `mktemp -d` (trap-cleaned), verifies with `shasum -a 256 -c` and aborts on a mismatch;
+      installs `trak` to `$TRAK_INSTALL_DIR`, else `/usr/local/bin` if writable, else `~/.local/bin`
+      (with a PATH hint); never sudo, never touches quarantine, never launches Spotify;
+      `--uninstall` removes exactly what it installed; `--help`; prints `trak --version` at the end.
+      Needs: 9.1. Done when: tested end to end against a local `file://` mirror of a packaged release
+      **and** against the real release after tagging; documented in SPEC §9, `docs/RELEASING.md`
+      and the README (Homebrew first, curl second).
+      > `tests/install_sh.rs` runs the real script against a `file://` mirror of a stand-in tarball
+      > packed the way `package-release.sh` packs it: install + version, forged checksum (nothing
+      > installed, no receipt), a sums file without the tarball's line, a missing release, macOS
+      > 14.1/13.6.1 refused before any download and 14.2/15.0 accepted (a `sw_vers` shim on PATH),
+      > uninstall leaves a neighbour file and `~/.config/trak` alone and is a no-op the second time,
+      > a Homebrew Cellar symlink is never overwritten, `--help` and an unknown flag (exit 2).
+      > `--uninstall` works from a **receipt** (`${XDG_DATA_HOME:-~/.local/share}/trak/install-sh-receipt`)
+      > rather than by guessing paths, which is what "exactly what it installed" means: it can never
+      > remove a Homebrew trak or one a user copied in by hand.
 
 ---
 
@@ -852,9 +878,10 @@ Requires Sonar installed and running (`brew install --cask kathir-d/tap/sonar`) 
       > credits; relative links checked. **Not done:** the hero demo GIF (needs a real terminal),
       > release/Homebrew badges (no release yet), `docs/README-NOTES.md` (it asks for a study of
       > 6–8 external READMEs, which was not done), and the light/dark GitHub render check.
-      > **[owner] privacy:** `docs/images/tui-6.4-fullscreen.png` is a whole-desktop screenshot
-      > (other windows, an API-key page) and is deliberately **not** referenced in the README;
-      > consider removing it from the repo and re-shooting just the terminal window.
+      > **Privacy (2026-10-01):** `tui-6.3-tab.png` and `tui-6.4-fullscreen.png` were whole-desktop
+      > captures (other windows, an API-key page) and are removed from the tree. They are still in
+      > git history; purging that needs a force-push, which is the owner's call. Every capture
+      > from now on is the cmux window only.
 - [ ] 11.2 Record the demo GIF/screenshots: Version B, Version A, visualizer styles, settings screen,
       full-screen lyrics. Done when: images committed and referenced.
 - [ ] 11.3 GitHub repo polish: description, topics (`spotify`, `tui`, `rust`, `ratatui`, `macos`,
