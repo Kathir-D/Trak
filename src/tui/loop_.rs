@@ -460,6 +460,16 @@ fn event_loop<B: ratatui::backend::Backend>(
         {
             submit_web(vec![job], &worker);
         }
+        // The playing track's heart (7.7), asked once per track. Skipped while
+        // the worker is busy, so a check that could not be sent is not marked as
+        // sent and is simply asked on a later pass.
+        if !worker.is_busy() {
+            let playing = app.track().and_then(|t| t.uri.clone());
+            let connected = app.web.connection.connected();
+            if let Some(job) = app.web.next_liked_check(playing.as_deref(), connected) {
+                submit_web(vec![job], &worker);
+            }
+        }
         // A page that has just been opened, and an opened page that has no rows
         // yet. The open page is fetched because the user asked for it by name.
         if let Some(open) = app.web.open.clone()
@@ -927,7 +937,12 @@ fn run_web(job: WebJob) -> Option<crate::player::actions::WorkerResult> {
         }
         // Nothing to send: the check is folded into the like write, which is
         // one request rather than two.
-        WebJob::IsLiked(_) => return None,
+        WebJob::IsLiked(uri) => {
+            return Some(WorkerResult::Web(Event::LikedHere {
+                result: client.is_liked(&uri),
+                uri,
+            }));
+        }
         WebJob::CreatePlaylist(name) => {
             let result = client.create_playlist(&name, false);
             return Some(WorkerResult::Web(Event::WebWrote(result.map(|_| ()))));

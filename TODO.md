@@ -641,13 +641,19 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
       > query is neither blank nor the one on screen) and the loop sends the job (it used to
       > discard a tick's `web` jobs). `[`/`]` jump groups, not `Tab` (SPEC §4). **[owner]**: type in
       > Search with a real login and watch results appear ~0.3 s after you pause.
-- [ ] 7.7 **Playlists tab** (list, open, play, tracklist) and **Liked tab** (list, play from here,
+- [x] 7.7 **Playlists tab** (list, open, play, tracklist) and **Liked tab** (list, play from here,
       `f` toggles like on the current track). > Field rename: playlist `tracks` → **`items`**
       (`items.items.item`), and `items` is **only present for playlists the user owns or collaborates
       on** — no feature may promise to show any playlist's tracks. > `f` is `PUT`/`DELETE
       `/me/library` and the liked check is `GET /me/library/contains`, not `/me/tracks`. > **Playlist
       item read/write is unverified in dev mode** (docs contradict themselves) — confirm here with a
       real login and degrade cleanly if it 403s. Done when: tests + manual.
+      > Lists, open, play and `f` were built; **nothing ever asked the server whether the playing
+      > track is liked**, so `liked_here` stayed blank and `f` could only ever send a like. The
+      > loop now asks once per track (`WebState::next_liked_check` -> `WebJob::IsLiked` ->
+      > `Event::LikedHere`, dropped if the track changed) and re-asks after any landed write.
+      > **[owner]** with a real login: confirm the heart matches the app, and whether playlist
+      > items 403 in dev mode (the tab must degrade, not crash).
 - [ ] 7.8 **Queue tab** (now playing + up next) and add-to-queue (`A`). > `POST /me/player/queue`
       is **Premium-only by Spotify's own documentation**; `GET /me/player/queue` is not. A 403 on add
       is the expected Free-tier path, not an error. `User.product` no longer exists, so Premium

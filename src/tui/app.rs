@@ -186,6 +186,12 @@ pub enum Event {
     },
     /// The queue loaded (7.8).
     Queue(Result<Queue, crate::web::api::ApiError>),
+    /// Whether the playing track is liked (7.7). `uri` is what was asked, so an
+    /// answer about a track that has since changed is dropped.
+    LikedHere {
+        uri: String,
+        result: Result<bool, crate::web::api::ApiError>,
+    },
     /// A write to the library landed or did not (7.7's `f`, 7.8's `A`).
     WebWrote(Result<(), crate::web::api::ApiError>),
     /// The connection state changed, from the token store or from a login.
@@ -429,6 +435,9 @@ pub struct WebState {
     pub library: LibrarySections,
     pub queue: Queue,
     pub liked_here: Option<bool>,
+    /// The track `liked_here` was last asked about, so one track is one check
+    /// rather than one per frame.
+    pub liked_checked: Option<String>,
 
     // -- The pages you open something into (7.10)
     /// A navigation stack, so `esc` from an album inside an artist returns to the
@@ -566,6 +575,7 @@ impl Default for WebState {
             library: LibrarySections::default(),
             queue: Queue::default(),
             liked_here: None,
+            liked_checked: None,
             pages: Vec::new(),
             open: None,
             open_tracks: Vec::new(),
@@ -1343,6 +1353,18 @@ pub fn update(mut app: App, event: Event) -> Updated {
             Err(e) => app.toast(e.notice()),
         },
 
+        Event::LikedHere { uri, result } => {
+            let playing = app.track().and_then(|t| t.uri.clone());
+            if playing.as_deref() == Some(uri.as_str()) {
+                match result {
+                    Ok(liked) => app.web.liked_here = Some(liked),
+                    // Not a toast: this runs on every track change, and a
+                    // failing check should not talk over the music every song.
+                    Err(_) => app.web.liked_here = None,
+                }
+            }
+        }
+
         Event::WebWrote(result) => {
             if let Err(e) = result {
                 app.toast(e.notice());
@@ -1350,6 +1372,7 @@ pub fn update(mut app: App, event: Event) -> Updated {
                 // The write landed, so the check is stale: re-read it rather than
                 // leaving the row saying the old thing.
                 app.web.liked_here = None;
+                app.web.liked_checked = None;
             }
         }
 
@@ -1649,6 +1672,25 @@ fn web_tab_key(
 /// Web tabs, and a second copy of "which one is open" is a second thing to fall
 /// out of step.
 impl WebState {
+    /// The like check the playing track needs, if it has not had one (7.7).
+    ///
+    /// Marks the track as asked, so the loop can call this every iteration. A new
+    /// track clears the old answer first: showing the last song's heart on this
+    /// one is worse than showing none.
+    pub fn next_liked_check(&mut self, playing: Option<&str>, connected: bool) -> Option<WebJob> {
+        let Some(uri) = playing else {
+            self.liked_here = None;
+            self.liked_checked = None;
+            return None;
+        };
+        if !connected || self.liked_checked.as_deref() == Some(uri) {
+            return None;
+        }
+        self.liked_here = None;
+        self.liked_checked = Some(uri.to_string());
+        Some(WebJob::IsLiked(uri.to_string()))
+    }
+
     pub fn row_uri(&self, tab: Tab) -> Option<String> {
         if self.open.is_some() {
             return self.open_row_uri();
@@ -3871,6 +3913,58 @@ mod tests {
         let (app, cmds, web) = key(advert, 'f');
         assert!(cmds.is_empty() && web.is_empty());
         assert_eq!(app.web.liked_here, None, "and says nothing either way");
+    }
+
+    #[test]
+    fn a_playing_track_is_checked_once_and_a_new_one_clears_the_answer() {
+        let mut w = WebState::default();
+        assert_eq!(w.next_liked_check(Some("a"), false), None, "not connected");
+        assert_eq!(
+            w.next_liked_check(Some("a"), true),
+            Some(WebJob::IsLiked("a".into()))
+        );
+        assert_eq!(w.next_liked_check(Some("a"), true), None, "once per track");
+        w.liked_here = Some(true);
+        assert_eq!(
+            w.next_liked_check(Some("b"), true),
+            Some(WebJob::IsLiked("b".into()))
+        );
+        assert_eq!(w.liked_here, None, "the last song's heart is gone");
+        assert_eq!(w.next_liked_check(None, true), None);
+        assert_eq!(w.liked_checked, None, "so a replay is checked again");
+    }
+
+    #[test]
+    fn the_answer_applies_only_to_the_track_still_playing() {
+        let app = on(Tab::Liked);
+        let uri = app.track().and_then(|t| t.uri.clone()).expect("a uri");
+        let stale = update(
+            app.clone(),
+            Event::LikedHere {
+                uri: "spotify:track:other".into(),
+                result: Ok(true),
+            },
+        )
+        .app;
+        assert_eq!(stale.web.liked_here, None);
+        let fresh = update(
+            app,
+            Event::LikedHere {
+                uri,
+                result: Ok(true),
+            },
+        )
+        .app;
+        assert_eq!(fresh.web.liked_here, Some(true));
+    }
+
+    #[test]
+    fn a_landed_write_asks_again() {
+        let mut app = on(Tab::Liked);
+        app.web.liked_checked = Some("x".into());
+        app.web.liked_here = Some(true);
+        let app = update(app, Event::WebWrote(Ok(()))).app;
+        assert_eq!((app.web.liked_here, app.web.liked_checked), (None, None));
     }
 
     /// A page that arrives after the user has left it is dropped, so opening an
