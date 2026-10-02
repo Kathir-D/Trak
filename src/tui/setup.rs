@@ -359,7 +359,7 @@ pub fn explain(step: usize, app: &App) -> Vec<String> {
                 None => app.config.spotify.client_id.clone(),
             };
             vec![
-                format!("{shown}"),
+                shown,
                 "enter to type or paste it (the 32 characters on the app's Settings page).".into(),
             ]
         }
