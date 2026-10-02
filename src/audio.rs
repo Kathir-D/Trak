@@ -72,6 +72,11 @@ use crate::visualizer::{AudioSource, BARS, SimulatedSource};
 /// feeds, and is also the resolution [`RELEASE`] is measured in.
 const TICK: Duration = Duration::from_millis(20);
 
+/// How many ticks the callback can be silent before the analyser is told the window is
+/// silence. Three is 60 ms — far below one 30 fps frame, and comfortably longer than a
+/// callback that arrives a tick late.
+const SILENT_TICKS: u32 = 3;
+
 /// How long before trying the tap again after a failure.
 ///
 /// This is also how "reattach when Spotify restarts" (TODO 8.5) is delivered: a
@@ -829,17 +834,23 @@ impl Analyser {
         )
     }
 
-    /// Hand over captured samples and update the bars in place.
+    /// Hand over the audio captured since the last call and update the bars in place.
     ///
-    /// Anything older than one window is dropped rather than queued. That is the
-    /// whole latency policy: the bars describe the last [`window_len`] samples of
-    /// what the tap heard, and a slow tick costs resolution rather than delay.
+    /// Anything older than one window is dropped rather than queued. That is the whole
+    /// latency policy: the bars describe the last [`window_len`] samples of what the
+    /// tap heard, and a slow tick costs resolution rather than delay.
+    ///
+    /// **An empty handover means silence**, not "no news". A tap whose client has
+    /// paused is not called at all any more, so there is nothing to hand over and
+    /// nothing to decay the bars with; keeping the last window would answer the same
+    /// spectrum for ever, which is a paused song drawn as though it were playing. So an
+    /// empty window is transformed as silence, and the bars reach zero on that tick.
+    /// [`SILENT_TICKS`] is what stops one late callback from doing it.
     fn push(&mut self, samples: &[f32]) {
         let len = self.fft.len();
         if samples.is_empty() {
-            return;
-        }
-        if samples.len() >= len {
+            self.recent.clear();
+        } else if samples.len() >= len {
             self.recent.clear();
             self.recent
                 .extend(samples[samples.len() - len..].iter().map(|s| f64::from(*s)));
@@ -1262,6 +1273,7 @@ fn run(commands: Receiver<Command>, outbox: Sender<TapEvent>, bars: Arc<BarCell>
     let mut next_try: Option<Instant> = None;
     let mut session: Option<(TapSession, Analyser)> = None;
     let mut scratch: Vec<f32> = Vec::new();
+    let mut quiet: u32 = 0;
 
     loop {
         match commands.try_recv() {
@@ -1309,10 +1321,11 @@ fn run(commands: Receiver<Command>, outbox: Sender<TapEvent>, bars: Arc<BarCell>
 
         if let Some((tap, analyser)) = session.as_mut() {
             // Everything the callback has delivered since the last tick, analysed as
-            // one window. Anything older than the window is already gone, so the
-            // ring cannot end up permanently ahead of the analysis.
+            // one window. Anything older than the window is already gone, so the ring
+            // cannot end up permanently ahead of the analysis.
             tap.drain(&mut scratch);
-            if !scratch.is_empty() {
+            quiet = if scratch.is_empty() { quiet + 1 } else { 0 };
+            if !scratch.is_empty() || quiet >= SILENT_TICKS {
                 analyser.push(&scratch);
                 bars.store(analyser.bars());
             }
@@ -1590,11 +1603,17 @@ impl AudioPipeline {
                 let (commands, inbox) = channel();
                 let bars = Arc::new(BarCell::new());
                 let published = Arc::clone(&bars);
-                self.tap = Some(RealTap {
+                let tap = RealTap {
                     bars,
                     commands,
                     worker: Some(spawn(move || run(inbox, outbox, published))),
-                });
+                };
+                // The first `Run` has to be sent here rather than left to the next
+                // call: the worker starts with nothing wanted, and a caller that asks
+                // once at startup and then leaves it alone — which is exactly what the
+                // TUI does — would get a live worker and a tap that never attaches.
+                tap.send(Command::Run);
+                self.tap = Some(tap);
                 self.events = events;
                 self.state = TapState::Idle;
             }
@@ -2499,6 +2518,55 @@ mod tests {
     }
 
     #[test]
+    fn a_tap_that_stops_delivering_becomes_silence_rather_than_freezing() {
+        // Measured on this machine: with Spotify **paused** the aggregate device is
+        // still running but Core Audio stops invoking the IO proc altogether, so there
+        // is no silence to hand over — there is no handover at all. Re-transforming the
+        // last window would keep drawing the spectrum of a song that stopped, which is
+        // the one thing the release ballistics exist to stop.
+        let mut analyser = Analyser::new(48_000.0).expect("48k");
+        analyser.push(&sine(48_000.0, 80.0, 1.0));
+        assert!(loudest(analyser.bars()) > 0.5, "there is something to lose");
+        analyser.push(&[]);
+        assert_eq!(
+            analyser.bars(),
+            &[0.0; BARS],
+            "one empty handover and the spectrum is gone"
+        );
+
+        // And silence is not a transient: it holds, however long the tap stays quiet.
+        let held = analyser.scale.peak;
+        for _ in 0..200 {
+            analyser.push(&[]);
+        }
+        assert_eq!(analyser.bars(), &[0.0; BARS], "still nothing, 4 s later");
+        // The reference decays geometrically rather than reaching zero, which is what
+        // lets a quiet passage after a loud one come back into view; what matters is
+        // that it is far below where it was, not that it is exactly nothing.
+        assert!(
+            analyser.scale.peak < held * 0.01,
+            "the reference fell {} -> {}",
+            held,
+            analyser.scale.peak
+        );
+    }
+
+    #[test]
+    fn audio_coming_back_after_a_gap_is_heard_not_lost_to_the_silence() {
+        let mut analyser = Analyser::new(48_000.0).expect("48k");
+        analyser.push(&sine(48_000.0, 80.0, 1.0));
+        analyser.push(&[]);
+        assert_eq!(analyser.bars(), &[0.0; BARS]);
+        analyser.push(&sine(48_000.0, 4_000.0, 1.0));
+        let highest = analyser
+            .bars()
+            .iter()
+            .rposition(|b| *b > 0.02)
+            .unwrap_or_else(|| panic!("nothing after the gap: {:?}", analyser.bars()));
+        assert!(highest > BARS / 2, "resuming put 4 kHz at band {highest}");
+    }
+
+    #[test]
     fn an_analyser_keeps_no_longer_history_than_one_window() {
         // The latency policy, as a bound on memory rather than on a comment: a tap
         // that ran for an hour must not have accumulated an hour of samples.
@@ -2667,6 +2735,32 @@ mod tests {
         let viz = AudioPipeline::new(VisualizerSource::Auto);
         assert_eq!(*viz.state(), TapState::Idle);
         assert_eq!(viz.sample_rate(), None);
+    }
+
+    #[test]
+    fn asking_once_starts_the_tap_and_leaving_it_alone_keeps_it() {
+        // The worker starts with nothing wanted, so the `Run` that makes it attach has
+        // to be sent by the call that *creates* it. The TUI asks once at startup and
+        // then only reads, which is why nothing that polled a second time would ever
+        // notice: the state stayed `Idle` and the bars were silently simulated.
+        //
+        // What comes back depends on the machine — `Tapping` where there is a Spotify
+        // and a permission, `WaitingForSpotify` where there is not — and both prove the
+        // command arrived. Only `Idle` means nothing happened. On a CI box with no
+        // Spotify there is nothing to tap, so no device is ever created.
+        let mut viz = AudioPipeline::new(VisualizerSource::Auto);
+        viz.set_wanted(true);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while *viz.state() == TapState::Idle && Instant::now() < deadline {
+            let _ = viz.spectrum();
+            sleep(Duration::from_millis(20));
+        }
+        assert_ne!(
+            *viz.state(),
+            TapState::Idle,
+            "the tap was asked for once and the worker never heard about it"
+        );
+        viz.set_wanted(false);
     }
 
     #[test]

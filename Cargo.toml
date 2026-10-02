@@ -85,6 +85,13 @@ name = "notify-probe"
 [[example]]
 name = "accent-probe"
 
+# TODO 8.3/8.5: drives the real Core Audio tap on Spotify - holds it and reports
+# the spectrum and the CPU, cycles it to show that nothing is left in
+# `system_profiler`, and raises SIGTERM at itself with a tap up. None of that can
+# be a unit test, because CI has no Spotify, no permission and no audio device.
+[[example]]
+name = "tap-probe"
+
 [dev-dependencies]
 assert_cmd = "2"
 filetime = "0.2.29"

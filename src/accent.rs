@@ -60,8 +60,7 @@ fn from_samples(rgba: &[u8]) -> Option<Color> {
     let (mut best, mut best_score) = (None, 0.0f32);
     let (mut fallback, mut fallback_score) = (None, 0.0f32);
 
-    for px in rgba.chunks_exact(4) {
-        let [r, g, b, a] = [px[0], px[1], px[2], px[3]];
+    for &[r, g, b, a] in rgba.as_chunks::<4>().0 {
         // Spotify artwork is opaque, but a PNG with alpha is not, and a fully
         // transparent pixel says nothing about the cover.
         if a < 128 {
@@ -692,8 +691,7 @@ type Bin = (f32, Color, f32);
 fn hue_bins(image: &image::DynamicImage) -> Vec<Bin> {
     let small = image::imageops::resize(&image.to_rgba8(), SAMPLE, SAMPLE, FilterType::Triangle);
     let mut bins: Vec<Bin> = Vec::new();
-    for px in small.as_raw().chunks_exact(4) {
-        let [r, g, b, a] = [px[0], px[1], px[2], px[3]];
+    for &[r, g, b, a] in small.as_raw().as_chunks::<4>().0 {
         if a < 128 {
             continue;
         }

@@ -419,28 +419,27 @@ fn event_loop<B: ratatui::backend::Backend>(
         //    and the volume it already knew.
         if let Some(sub) = &notify
             && let Some(event) = sub.poll()
+            && let Some(state) = app.state.as_ref()
         {
-            if let Some(state) = app.state.as_ref() {
-                let track_changed = event.is_different_track(state);
-                let merged = crate::player::notify::merge(state, &event);
-                app = update(app, Event::PlayerState(Box::new(merged))).app;
+            let track_changed = event.is_different_track(state);
+            let merged = crate::player::notify::merge(state, &event);
+            app = update(app, Event::PlayerState(Box::new(merged))).app;
 
-                // A track change is the one thing the notification cannot be
-                // trusted about on its own: it has no artwork, play count or
-                // popularity, so one read has to follow. It is cheap, because
-                // that is once per song rather than once per poll.
-                if track_changed {
-                    // TODO 4.5. The first read of a session is not a change, and
-                    // `app.state` is only set after one, so announcing here
-                    // cannot announce what was already playing when trak started.
-                    let u = update(app, Event::SoundForTrackChanged);
-                    app = u.app;
-                    submit_all(u.commands, &worker);
-                    worker.submit(|p| match p.state() {
-                        Ok(st) => crate::player::actions::WorkerResult::State(Box::new(st)),
-                        Err(e) => crate::player::actions::WorkerResult::ReadFailed(e),
-                    });
-                }
+            // A track change is the one thing the notification cannot be
+            // trusted about on its own: it has no artwork, play count or
+            // popularity, so one read has to follow. It is cheap, because
+            // that is once per song rather than once per poll.
+            if track_changed {
+                // TODO 4.5. The first read of a session is not a change, and
+                // `app.state` is only set after one, so announcing here
+                // cannot announce what was already playing when trak started.
+                let u = update(app, Event::SoundForTrackChanged);
+                app = u.app;
+                submit_all(u.commands, &worker);
+                worker.submit(|p| match p.state() {
+                    Ok(st) => crate::player::actions::WorkerResult::State(Box::new(st)),
+                    Err(e) => crate::player::actions::WorkerResult::ReadFailed(e),
+                });
             }
         }
 
