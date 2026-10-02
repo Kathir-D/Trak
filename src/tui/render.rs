@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use image::{DynamicImage, Rgba};
 use ratatui::Frame;
+use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -117,7 +118,13 @@ pub struct Images {
     /// A resize changes the area, and Kitty's state is only valid for the size it
     /// was encoded at, so both invalidate it.
     built_for: Option<(PathBuf, u16, u16)>,
+    /// The cover as one colour per cell, for the lyrics page, and what it was
+    /// sampled for. Kept because resampling it on every frame is wasted work.
+    backdrop: Option<Backdrop>,
 }
+
+/// The cover sampled one colour per cell, keyed by the image and the rectangle.
+type Backdrop = ((PathBuf, Rect), Vec<(u8, u8, u8)>);
 
 /// How the protocol is obtained. A picker in production, because only the
 /// terminal knows what it can draw; a fixed one in tests, because a test has no
@@ -140,6 +147,7 @@ impl Default for Images {
             },
             protocol: None,
             built_for: None,
+            backdrop: None,
         }
     }
 }
@@ -173,6 +181,7 @@ impl Images {
             },
             protocol: None,
             built_for: None,
+            backdrop: None,
         }
     }
 
@@ -187,6 +196,7 @@ impl Images {
             },
             protocol: None,
             built_for: None,
+            backdrop: None,
         }
     }
 
@@ -256,6 +266,58 @@ impl Images {
         self.built_for = None;
     }
 
+    /// Paint `image` into `area` as cell backgrounds, darkened, under whatever
+    /// text is already there (the full-screen lyrics page).
+    ///
+    /// A graphics protocol cannot do this: Kitty's placeholders and sixel both
+    /// own their cells, so text drawn over the cover would cut holes in it. A
+    /// background colour per cell is something every colour terminal can show
+    /// under a glyph. It is coarse, one colour per cell, which suits a backdrop:
+    /// the cover is there to set the mood, and the words are what is read.
+    pub fn backdrop(&mut self, buf: &mut Buffer, path: &Path, image: &DynamicImage, area: Rect) {
+        let fit = self.fit(area, image);
+        if fit.width == 0 || fit.height == 0 {
+            return;
+        }
+        let key = (path.to_path_buf(), fit);
+        if self.backdrop.as_ref().map(|(k, _)| k) != Some(&key) {
+            let small = image::imageops::resize(
+                &image.to_rgb8(),
+                u32::from(fit.width),
+                u32::from(fit.height),
+                ratatui_image::FilterType::Triangle,
+            );
+            let cells = small
+                .pixels()
+                .map(|p| backdrop_shade((p[0], p[1], p[2])))
+                .collect();
+            self.backdrop = Some((key, cells));
+        }
+        let Some((_, cells)) = &self.backdrop else {
+            return;
+        };
+        for (i, &(r, g, b)) in cells.iter().enumerate() {
+            let x = fit.x + (i % usize::from(fit.width)) as u16;
+            let y = fit.y + (i / usize::from(fit.width)) as u16;
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_bg(Color::Rgb(r, g, b));
+                // Text drawn in the terminal's own colours or the dim grey was
+                // chosen for an empty background; on the cover it has to be
+                // light, whatever the terminal's foreground is.
+                match cell.fg {
+                    Color::Reset => {
+                        cell.set_fg(Color::Rgb(240, 240, 240));
+                    }
+                    Color::DarkGray => {
+                        cell.set_fg(Color::Rgb(165, 165, 165));
+                        cell.modifier.remove(Modifier::DIM);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
     /// Whether an image has been encoded and is ready to draw.
     pub fn is_ready(&self) -> bool {
         self.protocol.is_some()
@@ -295,6 +357,14 @@ impl Backend {
             ),
         }
     }
+}
+
+/// A cover pixel darkened to sit behind text. A third of its brightness keeps
+/// the picture recognisable while white and grey words stay readable on the
+/// brightest part of it (white becomes about 85/255).
+fn backdrop_shade((r, g, b): (u8, u8, u8)) -> (u8, u8, u8) {
+    let d = |c: u8| (u16::from(c) / 3) as u8;
+    (d(r), d(g), d(b))
 }
 
 /// The graphics protocols trak can draw with, in the order `from_terminal`
@@ -470,6 +540,15 @@ pub fn draw_with(
     // a page that covers it.
     if app.lyrics_full {
         draw_lyrics_page(f, area, app, theme);
+        // The cover goes behind the words when there is one; without it the
+        // page is the plain one it always was.
+        let cover = app
+            .track()
+            .filter(|_| app.settings.show_art && app.art.error.is_none())
+            .and_then(|t| app.art.drawable(t));
+        if let Some(art) = cover {
+            images.backdrop(f.buffer_mut(), &art.path, &art.image, area);
+        }
         if let Some(t) = &app.toast {
             draw_toast(f, area, &t.text, theme);
         }
@@ -3376,6 +3455,58 @@ mod tests {
                 "row {y} still draws the dashboard"
             );
         }
+    }
+
+    /// With a cover, the page draws it behind the words as darkened cell
+    /// backgrounds, and the words stay in place and readable on it.
+    #[test]
+    fn the_full_screen_page_puts_the_cover_behind_the_words() {
+        let dir = temp_dir("backdrop");
+        let path = fixture_image(&dir);
+        let image = crate::art::decode(&path).expect("decoding the fixture");
+        let mut app = lyrics_app(12, Some(5));
+        app.lyrics_full = true;
+        let url = app.track().unwrap().artwork_url.clone().unwrap();
+        assert!(app.art.begin(&url));
+        let app = update(
+            app,
+            Event::Art {
+                url,
+                result: Ok(crate::player::actions::LoadedArt { path, image }),
+            },
+        )
+        .app;
+
+        let plain = page_term(&lyrics_app(12, Some(5)), 80, 24);
+        let term = page_term(&app, 80, 24);
+        let buf = term.backend().buffer();
+        let painted = buf
+            .content
+            .iter()
+            .filter(|c| matches!(c.bg, Color::Rgb(..)))
+            .count();
+        assert!(
+            painted > 80 * 24 / 4,
+            "only {painted} cells carry the cover"
+        );
+        // The fixture's red half, a third as bright: dark enough to read on.
+        for c in buf.content.iter() {
+            if let Color::Rgb(r, g, b) = c.bg {
+                assert!(r.max(g).max(b) <= 85, "too bright behind text: {r} {g} {b}");
+            }
+        }
+        let (mid, _) = row_at(&term, 12);
+        assert!(mid.contains("line 5"), "{mid:?}");
+        let (above, fg) = row_at(&term, 11);
+        assert!(above.contains("line 4"));
+        assert_eq!(
+            fg[37],
+            Color::Rgb(165, 165, 165),
+            "dim grey lifted on the cover"
+        );
+        // Without a cover the words sit on the terminal's own background.
+        let plain = plain.backend().buffer();
+        assert!((0..80).all(|x| plain[(x, 11)].bg == Color::Reset));
     }
 
     /// A long line wraps onto several rows rather than tearing off the edge,

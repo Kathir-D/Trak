@@ -108,7 +108,7 @@ Rules:
 | `Tab` / `Shift-Tab` | Cycle focus between panes / tabs | both |
 | `1`–`6` | Jump to tab | both |
 | `c` | Copy the current track's share URL | both |
-| `L` | Full-screen lyrics | both |
+| `L` | Full-screen lyrics, over the darkened cover when there is one | both |
 | `,` | Open settings (`trak config`) | both |
 | `?` | Help overlay | both |
 | `q` / `ctrl-c` | Quit | both |
