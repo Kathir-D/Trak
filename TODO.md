@@ -603,9 +603,10 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
       > the input with the reason; a failed login (denied, port busy, timeout) shows the notice and
       > `enter` retries; a second login cannot start while one waits. **Found while wiring it:
       > nothing set `app.web.connection` at startup**, so no Web API tab could ever have loaded;
-      > `connection_at_start` now derives it from the config and token file. Not done (backlog):
-      > the TUI never refreshes a stale *access* token (`web_client()` just reads the file), so a
-      > login works for ~1 h until that lands. `esc` while the browser is open closes the panel but
+      > `connection_at_start` now derives it from the config and token file. The TUI also
+      > never refreshed a stale *access* token, so a login would have died after ~1 h:
+      > `web_client()` (worker only) now renews and saves it via `Session::access`, and the UI
+      > thread asks the no-network `web_ready()` instead. `esc` while the browser is open closes the panel but
       > cannot cancel the wait; it ends at the login timeout. **[owner]** walk through it once.
 - [x] 7.4 **Token storage**: the `0600` file decided in 1.8 (`~/.config/trak/token.json`, `XDG_CONFIG_HOME`
       respected, directory `0700`, atomic temp-then-rename write). **Refuse to read a token whose mode

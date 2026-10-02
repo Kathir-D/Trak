@@ -802,26 +802,50 @@ fn spawn_login(client_id: String) -> std::sync::mpsc::Receiver<Result<(), String
     rx
 }
 
+/// Whether there is a token the Web API could be called with. Reads one small
+/// file and does no network, so the UI thread may ask it every frame.
+///
+/// A stale *access* token still counts: it is renewed by [`web_client`] on the
+/// worker. An expired *refresh* token is the one case that is not "just stale":
+/// it is a new login.
+fn web_ready() -> bool {
+    let store = crate::web::token::TokenFile::at(&crate::config::Paths::from_env());
+    store
+        .load()
+        .ok()
+        .and_then(|l| l.token)
+        .is_some_and(|t| !t.refresh_stale(std::time::SystemTime::now()))
+}
+
 /// A Web API client for whatever the token file currently holds, or `None` when
-/// there is nothing to talk to.
+/// there is nothing to talk to. **Blocks on the network when the access token is
+/// stale**, so it is only for the worker; the UI thread asks [`web_ready`].
 ///
 /// Read fresh each time rather than cached: the token can expire under a running
 /// session, and a client holding a dead token is how "search silently stopped
-/// working an hour ago" happens.
+/// working an hour ago" happens. A stale access token is renewed and written back
+/// here, which is what keeps a login from lasting exactly one hour.
 fn web_client() -> Option<SpotifyLibrary> {
+    use crate::web::auth::{Session, SpotifyEndpoint};
     let store = crate::web::token::TokenFile::at(&crate::config::Paths::from_env());
-    let loaded = store.load().ok()?;
+    let token = store.load().ok()?.token?;
     let now = std::time::SystemTime::now();
-    // A token that is stale still has a refresh token, and refreshing is the
-    // caller's business, not this function's. An *expired* refresh token is the
-    // one case that is not "just stale": it is a new login.
-    if loaded.token.as_ref().is_some_and(|t| t.refresh_stale(now)) {
+    if token.refresh_stale(now) {
         return None;
     }
-    Some(SpotifyLibrary::at(
-        crate::web::api::API_BASE,
-        loaded.token.as_ref()?,
-    ))
+    let token = if token.access_stale(now) {
+        let client_id = crate::config::Config::load().ok()?.config.spotify.client_id;
+        let endpoint = SpotifyEndpoint::default();
+        // A refresh that fails leaves `None` here, so the job is dropped rather
+        // than sent with a token Spotify will answer 401.
+        Session::new(&endpoint, &store, &client_id)
+            .access(&token, now)
+            .token()?
+            .clone()
+    } else {
+        token
+    };
+    Some(SpotifyLibrary::at(crate::web::api::API_BASE, &token))
 }
 
 /// Run one Web API job on the worker and turn its answer into an app event.
@@ -926,7 +950,7 @@ fn submit_web(jobs: Vec<WebJob>, worker: &Worker) {
     for job in jobs {
         // `run_web` needs a client, which needs a token. Without one there is
         // nothing to send and the tab has already said so in its own body.
-        if web_client().is_none() {
+        if !web_ready() {
             continue;
         }
         // `run_web` answers `None` only for a job that has nothing to do, and
