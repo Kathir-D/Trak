@@ -104,7 +104,6 @@ jobs:
                   sys.exit(f"expected exactly one {label} line in {path}")
               return new
 
-          source = sub(r'^  version ".*"$', f'  version "{version}"', "version")
           source = sub(r'^  url ".*"$',
                        f'  url "https://github.com/Kathir-D/Trak/releases/download/v{version}'
                        f'/trak-{version}-macos.tar.gz"',

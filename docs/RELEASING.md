@@ -10,7 +10,7 @@ What exists today:
 | --- | --- | --- |
 | Packaging | `scripts/package-release.sh` | Universal binary, ad-hoc signed, tarball + `SHA256SUMS.txt` in `dist/` |
 | Automation | `.github/workflows/release.yml` | Runs on `v*` tags: gate, package, release, then the tap commit |
-| Formula | `Formula/trak.rb` | Placeholders until a release; CI rewrites `version`, `url` and `sha256` |
+| Formula | `Formula/trak.rb` | Placeholders until a release; CI rewrites `url` and `sha256` |
 | Tap | `github.com/Kathir-D/homebrew-tap` | `Formula/trak.rb`, written by this repo's release workflow and nothing else |
 | curl installer | `install.sh` | Installs the same tarball without Homebrew, after a sha256 check (§10, TODO 9.9) |
 
@@ -122,8 +122,9 @@ that is already cached, with a different sha256 (§9).
 1. Takes the version and the sha256 the packaging script reported, as job
    outputs. The checksum in the formula is the same number that was published,
    not a second calculation of it.
-2. Rewrites `version`, `url` and `sha256` in `Formula/trak.rb` in place, refusing
-   to continue if any of the three lines is not found or either value is not the
+2. Rewrites `url` and `sha256` in `Formula/trak.rb` in place (the version comes from
+   the url; a separate `version` line fails `brew audit --strict`), refusing
+   to continue if either line is not found or either value is not the
    right shape.
 3. Commits the rewritten formula back to `main` here (rebased onto whatever
    `main` is now), the way headless-spotify keeps its cask in step, so the file in
