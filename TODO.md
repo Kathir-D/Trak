@@ -850,6 +850,12 @@ Requires Sonar installed and running (`brew install --cask kathir-d/tap/sonar`) 
 - [ ] 11.3 GitHub repo polish: description, topics (`spotify`, `tui`, `rust`, `ratatui`, `macos`,
       `homebrew`, `terminal`), social preview image, `CONTRIBUTING.md`, issue templates,
       `SECURITY.md` (token handling note), `CODE_OF_CONDUCT.md` optional.
+      > Files written: `CONTRIBUTING.md`, `SECURITY.md` (token handling, checked against
+      > `web/token.rs` and `web/auth.rs`), `.github/ISSUE_TEMPLATE/{bug_report,feature_request}.md`
+      > and `config.yml`. **[owner]** (needs repo admin, not available to an agent session): set the
+      > description and topics (`spotify`, `tui`, `rust`, `ratatui`, `macos`, `homebrew`,
+      > `terminal`), upload the social preview, enable *private vulnerability reporting* so the
+      > SECURITY.md link works. Left unticked until those are done.
 - [ ] 11.4 Add a "Works with Trak" mention in Sonar's and headless-spotify's READMEs (their agents do
       this via prompts 1 and 2). Confirm the three READMEs cross-link.
 - [ ] 11.5 Performance and battery pass: idle CPU < 1 % with the visualizer off and < ~5 % on;
