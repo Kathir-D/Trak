@@ -260,6 +260,7 @@ pub fn config_screen() -> i32 {
         let _ = terminal.backend_mut().execute(EnableMouseCapture);
     }
     let _ = terminal.clear();
+    let light = light_background(depth);
 
     // The theme is rebuilt from the settings each frame for the same reason the
     // TUI's is: a border or an accent changed on this screen has to be visible
@@ -288,6 +289,9 @@ pub fn config_screen() -> i32 {
         if terminal
             .draw(|f| {
                 crate::tui::settings::render(f, f.area(), &app, &theme);
+                if light {
+                    crate::tui::colour::for_light_background(f.buffer_mut());
+                }
                 crate::tui::colour::apply(f.buffer_mut(), depth);
             })
             .is_err()
@@ -361,6 +365,7 @@ fn event_loop<B: ratatui::backend::Backend>(
     // before any event is read (TODO 1.4's ordering requirement).
     //
     let mut images = crate::tui::render::Images::from_terminal();
+    let light = light_background(depth);
     // Ask headless-spotify once, at startup, rather than per frame (TODO 4.7).
     if crate::headless::is_installed() && !worker.is_busy() {
         worker.submit(|_| WorkerResult::Headless(headless_status()));
@@ -736,6 +741,9 @@ fn event_loop<B: ratatui::backend::Backend>(
             }
             // Last, so it sees every cell: NO_COLOR and 16/256-colour
             // terminals are handled once here, not by each widget (11.6).
+            if light {
+                crate::tui::colour::for_light_background(f.buffer_mut());
+            }
             crate::tui::colour::apply(f.buffer_mut(), depth);
             crate::tui::bidi::fence(f.buffer_mut());
         })
@@ -1428,6 +1436,13 @@ const SIZE_EVERY: Duration = Duration::from_secs(1);
 ///
 /// Returns whether anything was sent. Whoever clears the terminal must forget
 /// `last`, or the next frame would be judged unchanged against a blank screen.
+/// Whether the terminal's background is light, asked once at startup. With
+/// `NO_COLOR` there is no colour to adjust, so the terminal is not asked.
+fn light_background(depth: crate::tui::colour::Depth) -> bool {
+    depth != crate::tui::colour::Depth::None
+        && crate::tui::colour::query_background().is_some_and(crate::tui::colour::is_light)
+}
+
 fn draw_if_changed<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     last: &mut Option<ratatui::buffer::Buffer>,

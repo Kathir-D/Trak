@@ -13,7 +13,7 @@
 //! list.
 
 use ratatui::buffer::Buffer;
-use ratatui::style::Color;
+use ratatui::style::{Color, Modifier};
 
 /// How many colours the terminal is taken to have.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +55,144 @@ impl Depth {
             std::env::var("TERM").ok().as_deref(),
         )
     }
+}
+
+/// Ask the terminal what its background is (OSC 11), for [`is_light`].
+///
+/// Must run in raw mode, after the alternate screen is up and before anything
+/// else reads input. A Device Status Report goes out behind the question
+/// because every terminal answers that one: its reply ends the read at once, so
+/// a terminal that ignores OSC 11 costs a round trip, not the timeout. The read
+/// is `poll` on the descriptor rather than a reader thread, because a thread
+/// left blocked in `read` by a silent terminal would eat the user's first key.
+pub fn query_background() -> Option<(u8, u8, u8)> {
+    use std::io::Write;
+    use std::os::fd::AsRawFd;
+    use std::time::{Duration, Instant};
+
+    let mut out = std::io::stdout();
+    out.write_all(b"\x1b]11;?\x1b\\\x1b[5n").ok()?;
+    out.flush().ok()?;
+    let fd = std::io::stdin().as_raw_fd();
+    let deadline = Instant::now() + Duration::from_millis(300);
+    let mut got = Vec::new();
+    while !got.windows(4).any(|w| w == b"\x1b[0n") {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one valid pollfd, and a buffer `read` may fill up to its
+        // length; nothing else holds either.
+        if unsafe { libc::poll(&mut pfd, 1, left.as_millis() as i32) } <= 0 {
+            break;
+        }
+        let mut buf = [0u8; 128];
+        let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
+        if n <= 0 {
+            break;
+        }
+        got.extend_from_slice(&buf[..n as usize]);
+    }
+    parse_osc11(&got)
+}
+
+/// The colour in an OSC 11 reply: `ESC ] 11 ; rgb:RRRR/GGGG/BBBB` ended by BEL
+/// or ST, each channel one to four hex digits (xterm's format).
+pub fn parse_osc11(reply: &[u8]) -> Option<(u8, u8, u8)> {
+    let text = String::from_utf8_lossy(reply);
+    let start = text.find("]11;rgb:")? + "]11;rgb:".len();
+    let body: String = text[start..]
+        .chars()
+        .take_while(|c| c.is_ascii_hexdigit() || *c == '/')
+        .collect();
+    let channel = |h: &str| -> Option<u8> {
+        if h.is_empty() || h.len() > 4 {
+            return None;
+        }
+        let max = (1u32 << (4 * h.len())) - 1;
+        let v = u32::from_str_radix(h, 16).ok()?;
+        Some(((v * 255 + max / 2) / max) as u8)
+    };
+    let mut parts = body.split('/');
+    let rgb = (
+        channel(parts.next()?)?,
+        channel(parts.next()?)?,
+        channel(parts.next()?)?,
+    );
+    parts.next().is_none().then_some(rgb)
+}
+
+/// Relative luminance (WCAG), 0 for black to 1 for white.
+fn luminance((r, g, b): (u8, u8, u8)) -> f64 {
+    let lin = |c: u8| {
+        let c = f64::from(c) / 255.0;
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+}
+
+/// Whether a background is light enough that pale text on it is unreadable.
+pub fn is_light(rgb: (u8, u8, u8)) -> bool {
+    luminance(rgb) > 0.4
+}
+
+/// The brightest a foreground may be on a light background: 3:1 against white,
+/// WCAG's floor for large or bold text, which is most of what is coloured.
+const LIGHT_MAX: f64 = 0.3;
+
+/// Darken every RGB foreground that would wash out on a light background.
+///
+/// The accent comes off the album cover and is tuned for a dark terminal: a
+/// pale tan cover gave pale tan borders and titles that all but vanished on
+/// white (seen in cmux, 2026-10-02). Hue is kept and only lightness changes, so
+/// the theme still matches the cover. Cells with a background of their own (a
+/// selected tab) are left as they are: that pair was chosen together.
+///
+/// Dim text is the other half of it: a terminal draws DIM by blending towards
+/// the background, which on white makes secondary text paler still. It loses
+/// the modifier and is darkened like the rest; lightness alone keeps it
+/// secondary, because it was a lighter colour to begin with.
+pub fn for_light_background(buf: &mut Buffer) {
+    for cell in buf.content.iter_mut() {
+        if let (Color::Rgb(r, g, b), Color::Reset) = (cell.fg, cell.bg) {
+            let (r, g, b) = darken_to((r, g, b), LIGHT_MAX);
+            cell.fg = Color::Rgb(r, g, b);
+            cell.modifier.remove(Modifier::DIM);
+        }
+    }
+}
+
+/// `rgb` scaled in linear light until its luminance is at most `max`.
+fn darken_to(rgb: (u8, u8, u8), max: f64) -> (u8, u8, u8) {
+    let l = luminance(rgb);
+    if l <= max {
+        return rgb;
+    }
+    let k = max / l;
+    let scale = |c: u8| {
+        let c = f64::from(c) / 255.0;
+        let lin = if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        } * k;
+        let s = if lin <= 0.0031308 {
+            lin * 12.92
+        } else {
+            1.055 * lin.powf(1.0 / 2.4) - 0.055
+        };
+        (s * 255.0).round().clamp(0.0, 255.0) as u8
+    };
+    (scale(rgb.0), scale(rgb.1), scale(rgb.2))
 }
 
 /// Rewrite every cell's colours for `depth`. A no-op for true colour, so the
@@ -169,6 +307,48 @@ mod tests {
     use super::*;
     use ratatui::layout::Rect;
     use ratatui::style::{Modifier, Style};
+
+    #[test]
+    fn an_osc11_reply_parses_with_either_terminator_and_any_digit_count() {
+        assert_eq!(
+            parse_osc11(b"\x1b]11;rgb:fafa/fafa/fafa\x1b\\\x1b[0n"),
+            Some((250, 250, 250))
+        );
+        assert_eq!(parse_osc11(b"\x1b]11;rgb:00/00/00\x07"), Some((0, 0, 0)));
+        assert_eq!(parse_osc11(b"\x1b]11;rgb:f/8/0\x07"), Some((255, 136, 0)));
+        // A terminal that ignores the question answers only the status report.
+        assert_eq!(parse_osc11(b"\x1b[0n"), None);
+        assert_eq!(parse_osc11(b"\x1b]11;rgb:ff/ff\x07"), None);
+    }
+
+    #[test]
+    fn light_means_a_light_background() {
+        assert!(is_light((250, 250, 250)));
+        assert!(is_light((238, 232, 213))); // solarized light
+        assert!(!is_light((0, 0, 0)));
+        assert!(!is_light((40, 42, 54)));
+    }
+
+    #[test]
+    fn pale_text_on_a_light_background_is_darkened_and_keeps_its_hue() {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 3, 1));
+        buf[(0, 0)].set_fg(Color::Rgb(230, 210, 170)); // pale tan accent
+        buf[(1, 0)]
+            .set_fg(Color::Rgb(40, 40, 40))
+            .set_style(Style::default().add_modifier(Modifier::DIM)); // already dark
+        buf[(2, 0)]
+            .set_fg(Color::Rgb(250, 250, 250))
+            .set_bg(Color::Rgb(200, 0, 0)); // a chosen pair
+        for_light_background(&mut buf);
+        let Color::Rgb(r, g, b) = buf[(0, 0)].fg else {
+            panic!("still rgb")
+        };
+        assert!(luminance((r, g, b)) <= LIGHT_MAX + 0.01);
+        assert!(r > g && g > b, "hue kept: {r} {g} {b}");
+        assert_eq!(buf[(1, 0)].fg, Color::Rgb(40, 40, 40));
+        assert!(!buf[(1, 0)].modifier.contains(Modifier::DIM));
+        assert_eq!(buf[(2, 0)].fg, Color::Rgb(250, 250, 250));
+    }
 
     #[test]
     fn no_color_set_and_non_empty_wins_over_everything() {
