@@ -743,11 +743,24 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
       looking at it did. > The tests assert a flat spectrum looks flat and a peak looks like a peak — a
       renderer that only does not panic is a renderer that is wrong. > Not borrowed from scope-tui; the
       braille dot maths is written from the Unicode 2x4 grid, so THIRD-PARTY-NOTICES is unchanged.
-- [ ] 8.3 **Real audio source** from the spike: tap Spotify's process, mono-mix, ring buffer, cavacore
+- [x] 8.3 **Real audio source** from the spike: tap Spotify's process, mono-mix, ring buffer, cavacore
       → bars, on its own thread; auto-fallback to simulated on denial/error with a one-time toast that
       says how to grant permission. `source = simulated` forces the fallback. Needs: 1.5, 1.6.
       Done when: bars visibly track the music on the owner's machine; denial path tested manually;
       CPU stays low (record % in the PR/commit).
+      > Merged 2026-10-01 from `wt/8.3-tap`. Taps **Spotify's process only** (pids → process objects
+      > via `'id2p'`) through cidre's `TapDesc`; no objc2 bypass, no Swift rpath (`otool -L` clean).
+      > **cavacore dropped**: 2.0.2 truncates every band's cut-off to FFT bin 0 (AUDIO-TAP §2f), so
+      > `src/audio.rs` has its own radix-2 FFT and log band map. Measured with
+      > `cargo run --release --example tap-probe -- run 12`: bars move with the music (per-second
+      > band means 0.17–0.25) and read exactly zero when paused — a paused Spotify stops the IO proc
+      > entirely, so three empty ticks count as silence. TUI CPU in a 110×34 pty over 30 s: **3.8 %
+      > real audio vs 3.2 % simulated**. Denial falls back to simulated with **one** toast per run
+      > naming *Screen & System Audio Recording* (fake-tested,
+      > `a_denied_tap_falls_back_to_simulated_bars_and_says_so_once`); **a real denial could not be
+      > provoked**, because this Mac grants the tap with no prompt at all (R1). `source = "simulated"`
+      > never taps, and switching to it live lets go at once. MSRV went 1.85 → 1.88: main already
+      > used let-chains, so 1.85 was wrong before this. **[owner]**: watch the bars in cmux by eye.
 - [x] 8.4 **`v` cycles styles**, `a` toggles art/visualizer, both persist to config; visualizer FPS
       capped (~30) and paused when the terminal is hidden/too small. > The four renderers are pure
       functions over a spectrum and hand back plain text; **the colour is applied per column in the
@@ -763,10 +776,24 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
       is restored** rather than an escape sequence. > Not paused for a hidden terminal: ratatui has no
       way to know the window is occluded, so 8.5's answer is that the tap stops, not that the frames
       do.
-- [ ] 8.5 **Tap lifecycle**: start on demand, stop when the visualizer is hidden or Spotify quits,
+- [x] 8.5 **Tap lifecycle**: start on demand, stop when the visualizer is hidden or Spotify quits,
       reattach when Spotify restarts, never leave a tap/aggregate device behind after exit or crash
       (RAII + signal handling; verify with `system_profiler SPAudioDataType` before/after).
       Done when: 10 start/stop cycles leave no leftover devices.
+      > The **loop, not `App`, owns `AudioPipeline`** (a thread and a Core Audio device do not belong
+      > in a state that is cloned and compared); it sends `Event::LiveSpectrum` / `Event::TapNotice`.
+      > `set_wanted(visualizer_visible)` runs every frame, so the tap attaches on show and releases
+      > within ~20 ms on hide or when Spotify goes idle. A live tap checks its pids with
+      > `kill(pid, 0)` every 1 s and retries every 2 s, so it reattaches by itself after a relaunch
+      > (lifecycle tested against a fake backend; **quit/relaunch of the real Spotify was not done**,
+      > because an agent must not launch Spotify). `tap-probe cycles 10`: `system_profiler` 3 → 3
+      > devices, byte-identical dumps; that alone is weak because the aggregate device is private,
+      > so the probe also counts Core Audio's lists in-process: 3 devices/0 taps → 4/1 with a tap up
+      > → 3/0 after 10 cycles. SIGTERM/SIGHUP drop the tap and re-raise (exit 143 in 0.1 s). SIGKILL
+      > or a panic (release is `panic = "abort"`) cannot clean up in-process; that relies on the tap
+      > and device being private to the process (AUDIO-TAP §4c) — after a `kill -9` Spotify kept
+      > playing and a fresh tap came up normally. **[owner]**: with the visualizer showing, quit and
+      > relaunch Spotify and see the bars come back within ~2 s.
 
 ---
 

@@ -184,12 +184,16 @@ invalidates a decision this section previously made.
 - Styles: `spectrum`, `mirrored`, `waveform` (braille), `circular`. `v` cycles.
 - Source `auto`: real audio via a Core Audio process tap on Spotify's process (macOS 14.2+), falling
   back to a simulated visualizer if permission is denied / the tap fails. Source `simulated` forces it.
-- Math: [cavacore](https://github.com/TornaxO7/cavacore-rs). Tap: [cidre](https://github.com/yury/cidre).
+- Math: an in-house radix-2 FFT and log band map (`src/audio.rs`; [cavacore](https://github.com/TornaxO7/cavacore-rs)
+  was rejected in TODO 8.3, see `docs/AUDIO-TAP.md` §2f). Tap: [cidre](https://github.com/yury/cidre).
   Waveform drawing: study [scope-tui](https://github.com/alemidev/scope-tui). Renderers are small
   pure functions `(samples/bars, Rect) -> Buffer` so they are unit-testable.
 - The tap targets **Spotify's process only**, never system audio, so it does not disturb Sonar's tap.
-- Permission is attributed to the **terminal app** ("System Audio Recording"). This is the top risk
-  (R1 in `TODO.md`). Prototype it first.
+- Permission would be attributed to the **terminal app** ("Screen & System Audio Recording"). On
+  the machines measured so far no prompt appears at all (R1 refuted in TODO 1.5); if macOS ever
+  refuses, Trak falls back to simulated bars and says so once, with the settings path.
+- The tap runs only while the visualizer is on screen and Spotify is running, and reattaches by
+  itself after Spotify restarts (TODO 8.5).
 
 ## 8. Config
 

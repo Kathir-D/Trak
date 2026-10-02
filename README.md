@@ -14,8 +14,7 @@
 
 > **Status: pre-alpha.** Everything below describes what is built and tested. Two parts have not
 > met a real account yet and are marked **unverified**: the Spotify Web API tabs (they need a
-> Client ID and a first live login) and the visualizer reading real audio (it draws a simulated
-> spectrum today). There is no Homebrew release yet; build from source.
+> Client ID and a first live login). There is no Homebrew release yet; build from source.
 
 **Contents:** [Why Trak](#why-trak) · [Features](#features) · [Install](#install) ·
 [The TUI](#the-tui) · [Version A and B](#version-a-and-b) · [Settings](#settings) ·
@@ -40,7 +39,7 @@
 | 🎧 **Now Playing** | title, artist, album, progress bar you can click, volume meter, shuffle and repeat |
 | 🖼 **Album art** | in kitty, iTerm2, sixel or half-block terminals (negotiated at start); the accent colour is taken from the cover |
 | 📜 **Synced lyrics** | from [LRCLIB](https://lrclib.net), follow the song, with a full-screen page on `L` |
-| 📊 **Visualizer** | four styles (`v`), 30 fps while visible. *Simulated spectrum today; real audio is not wired up.* |
+| 📊 **Visualizer** | four styles (`v`), 30 fps while visible, from Spotify's own audio (a Core Audio tap on Spotify alone, never the rest of the system); simulated if the tap is unavailable |
 | 🕘 **History and Info** | tracks played this session; everything AppleScript exposes about the current track |
 | ⚙️ **Settings** | `,` or `trak config`: a checklist where changes apply live |
 | 🔎 **Search, playlists, queue, library** | optional, with a Spotify Client ID (**unverified** against a live account) |
@@ -115,7 +114,7 @@ keys take defaults, and a corrupt file is renamed to `config.toml.bak`.
 | | `accent` | `art`, `green`, `terminal` |
 | | `art_protocol` | `auto`, `kitty`, `iterm2`, `sixel`, `halfblocks` |
 | `[visualizer]` | `style` | `spectrum`, `mirrored`, `waveform`, `circular` |
-| | `source` | `auto`, `simulated` (both draw the simulated spectrum today) |
+| | `source` | `auto` (real audio, falling back to simulated), `simulated` |
 | `[input]` | `mouse` | `true`, `false` |
 | | `volume_step`, `seek_step` | `10`, `5` |
 | `[notifications]` | `song_change` | `false`, `true` |
@@ -211,6 +210,13 @@ That prompt belongs to your **terminal**, not to Trak, so it happens once per
 terminal. Trak never starts Spotify as a side effect; it only talks to an app you
 already have running.
 
+The visualizer taps Spotify's audio only while it is on screen. On the Macs tested
+so far macOS asks for nothing; if it ever refuses, the bars fall back to a simulated
+spectrum and Trak says once where to allow it:
+
+> System Settings › Privacy & Security › Screen & System Audio Recording › your
+> terminal.
+
 ## Made for a headless setup
 
 Works alongside [Sonar](https://github.com/Kathir-D/Sonar) (menu-bar skip/prev
@@ -228,9 +234,9 @@ Start with [`AGENTS.md`](AGENTS.md), then [`docs/SPEC.md`](docs/SPEC.md) and
 ## Credits
 
 Trak descends from [shpotify](https://github.com/hnarayanan/shpotify) by Harish
-Narayanan (MIT). Visualizer maths from
-[cavacore](https://github.com/TornaxO7/cavacore-rs), a port of
-[cava](https://github.com/karlstav/cava). See
+Narayanan (MIT). The visualizer is inspired by
+[cava](https://github.com/karlstav/cava); its tap uses
+[cidre](https://github.com/yury/cidre). See
 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md).
 
 ## License

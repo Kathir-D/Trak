@@ -41,11 +41,14 @@ player/
   fake.rs          in-memory Player for tests
 history.rs         session play history (ring buffer of TrackInfo with URI)
 art.rs             fetch + cache artwork URL, decode, dominant colour, ratatui-image protocol picker
-visualizer.rs     AudioSource trait + SimulatedSource + the four renderers (spectrum / mirrored /
-                  waveform / circular) as pure fns. > **One file, not `viz/{source,dsp,render}.rs`**:
-                  the tap half of the source never existed, because 1.5 could not find a way to tap
-                  Spotify's process alone, so there is no dsp layer to separate out yet. Split it when
-                  8.3 lands a real tap and there is a real second implementation to separate from.
+visualizer.rs      AudioSource trait + SimulatedSource + the four renderers (spectrum / mirrored /
+                   waveform / circular) as pure fns
+audio.rs           the real source (TODO 8.3/8.5): a Core Audio process tap on Spotify's pids only,
+                   its own radix-2 FFT + log band map, and `AudioPipeline`, the lifecycle (attach while
+                   the visualizer is visible and Spotify runs, release otherwise, reattach after a
+                   relaunch, one fallback toast). The **loop owns it**, not `App`: a thread and a Core
+                   Audio device do not belong in a state that is cloned and compared, so the loop
+                   sends `Event::LiveSpectrum` / `Event::TapNotice` and the app only sees bars
 lyrics.rs          LRCLIB client + LRC parser + "current line for position"
 config.rs          load/save/defaults/migrate ~/.config/trak/config.toml
 web/  (A)          auth.rs (PKCE, loopback server), api.rs (rspotify wrapper), token.rs (keychain/file)
