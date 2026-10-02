@@ -974,6 +974,10 @@ Requires Sonar installed and running (`brew install --cask kathir-d/tap/sonar`) 
       > description and topics (`spotify`, `tui`, `rust`, `ratatui`, `macos`, `homebrew`,
       > `terminal`), upload the social preview, enable *private vulnerability reporting* so the
       > SECURITY.md link works. Left unticked until those are done.
+      > **2026-10-02, checked with `gh`:** description, all seven topics and private
+      > vulnerability reporting are set (`viewerPermission: ADMIN`). Only the social preview
+      > image is left: it has no API, so it is a web-UI upload **[owner]** (Settings → General →
+      > Social preview; `docs/images/dashboard.png` cropped to 1280×640 would do).
 - [ ] 11.4 Add a "Works with Trak" mention in Sonar's and headless-spotify's READMEs (their agents do
       this via prompts 1 and 2). Confirm the three READMEs cross-link.
 - [x] 11.5 Performance and battery pass: idle CPU < 1 % with the visualizer off and < ~5 % on;
