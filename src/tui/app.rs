@@ -2323,6 +2323,18 @@ fn handle_key(app: &mut App, c: char, commands: &mut Vec<PlayerCommand>, web: &m
                 }
             }
         }
+        // The Web API keys only mean something on the Web API tabs. Anywhere
+        // else, a key that silently does nothing reads as a broken key, so it
+        // says what it needs instead.
+        '/' | 'o' | 'A' | 'f' | 'P' | 'X'
+            if !app.tab.needs_web() || !app.web.connection.connected() =>
+        {
+            let why = match app.web.connection.notice() {
+                Some(n) => n.to_string(),
+                None => format!("{c} works on the Spotify tabs, 1 to 5"),
+            };
+            app.toast(why);
+        }
         _ => {}
     }
 }
@@ -4125,6 +4137,28 @@ mod tests {
     fn key(app: App, c: char) -> (App, Vec<PlayerCommand>, Vec<WebJob>) {
         let u = update(app, Event::Key(c));
         (u.app, u.commands, u.web)
+    }
+
+    /// A Web API key off the Web API tabs, or with no Client ID, says what it
+    /// needs rather than doing nothing (found in a real-terminal sweep).
+    #[test]
+    fn a_web_key_that_cannot_act_says_why() {
+        for c in ['/', 'o', 'A', 'f', 'P', 'X'] {
+            let mut app = on(Tab::History);
+            app.web.connection = Connection::NoClientId;
+            let (app, cmds, web) = key(app, c);
+            assert!(cmds.is_empty() && web.is_empty(), "{c}");
+            let text = app.toast.map(|t| t.text).unwrap_or_default();
+            assert!(text.contains("Client ID"), "{c}: {text}");
+
+            let (app, _, web) = key(on(Tab::History), c);
+            assert!(web.is_empty(), "{c}");
+            let text = app.toast.map(|t| t.text).unwrap_or_default();
+            assert!(text.contains("1 to 5"), "{c}: {text}");
+        }
+        // On a Web API tab with a connection, the tab owns the key.
+        let (app, _, _) = key(on(Tab::Playlists), 'X');
+        assert!(app.toast.is_none());
     }
 
     fn a_track(id: &str, name: &str) -> crate::web::api::Track {

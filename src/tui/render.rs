@@ -1832,7 +1832,7 @@ pub(crate) const HELP_ROWS: &[(&str, &str)] = &[
     ("f", "like or unlike the playing track"),
     ("P", "add the selection to a playlist"),
     ("X", "remove it from the open playlist"),
-    (",", "settings"),
+    (", / ?", "settings"),
     ("? / esc", "close this"),
     ("q / ctrl-c", "quit"),
 ];
