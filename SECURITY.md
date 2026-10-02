@@ -20,9 +20,9 @@ happened; there is no need to include a token (see below, and please do not).
   closed as soon as one redirect has been handled.
 - **Refresh tokens expire after six months.** Trak warns before then and, if Spotify rejects one,
   deletes it and asks you to log in again.
-- Trak talks to Spotify only through the desktop app (AppleScript) and, if you add a Client ID,
-  the Web API over HTTPS. It sends nothing anywhere else, except lyric lookups to LRCLIB
-  (`[lyrics] enabled = false` turns that off).
+- Trak talks to Spotify through the desktop app (AppleScript) and, if you add a Client ID,
+  the Web API over HTTPS. Besides that it fetches album art from Spotify's image CDN and looks up lyrics at LRCLIB
+  (`[lyrics] enabled = false` turns the lookup off). Nothing else leaves the machine.
 
 To revoke Trak completely: remove it under *Apps* in your Spotify account page, and delete
 `~/.config/trak/token.json`.

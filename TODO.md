@@ -845,6 +845,16 @@ Requires Sonar installed and running (`brew install --cask kathir-d/tap/sonar`) 
       Needs: phases 3–8 built enough to screenshot. Done when: the README renders well on GitHub in
       light and dark mode (check both), all links work (`lychee` or manual), and an outsider can
       install and use Trak from it alone.
+      > **Partly done (left unticked).** README rewritten around the shipped product: status note
+      > that names what is *unverified* (Web API live, real-audio visualizer), contents list, Why
+      > Trak, feature table, install (source only: no formula exists), TUI key table, A vs B table,
+      > settings in a `<details>`, `NO_COLOR`, CLI reference kept, permissions, Sonar/headless,
+      > credits; relative links checked. **Not done:** the hero demo GIF (needs a real terminal),
+      > release/Homebrew badges (no release yet), `docs/README-NOTES.md` (it asks for a study of
+      > 6–8 external READMEs, which was not done), and the light/dark GitHub render check.
+      > **[owner] privacy:** `docs/images/tui-6.4-fullscreen.png` is a whole-desktop screenshot
+      > (other windows, an API-key page) and is deliberately **not** referenced in the README;
+      > consider removing it from the repo and re-shooting just the terminal window.
 - [ ] 11.2 Record the demo GIF/screenshots: Version B, Version A, visualizer styles, settings screen,
       full-screen lyrics. Done when: images committed and referenced.
 - [ ] 11.3 GitHub repo polish: description, topics (`spotify`, `tui`, `rust`, `ratatui`, `macos`,
