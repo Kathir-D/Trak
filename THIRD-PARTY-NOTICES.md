@@ -41,6 +41,7 @@ All MIT or MIT/Apache-2.0, checked against the crate metadata in `Cargo.lock`.
 | [rand](https://github.com/rust-random/rand) | 0.8 | MIT/Apache-2.0 | the PKCE verifier and `state` | |
 | [ratatui](https://github.com/ratatui/ratatui) | 0.29 | MIT | TUI rendering | |
 | [crossterm](https://github.com/crossterm-rs/crossterm) | 0.28 | MIT | terminal and input events | mouse capture, bracketed paste, the run-loop-safe read |
+| [libc](https://github.com/rust-lang/libc) | 0.2 | MIT/Apache-2.0 | `localtime_r` for the header clock | already pulled in by crossterm; replaced a `date` process spawned every second |
 | [objc2](https://github.com/madsmtm/objc2) | 0.6 | MIT | Objective-C runtime | the `PlaybackStateChanged` observer; no app bundle needed |
 | [objc2-foundation](https://github.com/madsmtm/objc2) | 0.3 | MIT | Foundation bindings | only the notification classes, nothing else |
 | [ratatui-image](https://github.com/ratatui/ratatui-image) | 8.0.1 | MIT | Album art | Kitty / iTerm2 / sixel / half-blocks; `Picker::from_query_stdio()` also reports the cell size (TODO 1.4) |

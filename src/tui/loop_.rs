@@ -375,6 +375,10 @@ fn event_loop<B: ratatui::backend::Backend>(
     let mut last_scroll = Duration::ZERO;
     // What covered the cover last frame; see the draw step.
     let mut last_covering: Option<(bool, bool, bool, bool)> = None;
+    // The last frame actually sent to the terminal, and when the size was last
+    // asked for; see `draw_if_changed`.
+    let mut last_frame: Option<ratatui::buffer::Buffer> = None;
+    let mut last_size_check = Instant::now();
     let mut last_sonar = Instant::now() - SONAR_EVERY;
     let mut last_viz = Instant::now() - VIZ_FPS;
     // The real-audio source (TODO 8.3). Created idle: nothing touches Core Audio
@@ -440,6 +444,7 @@ fn event_loop<B: ratatui::backend::Backend>(
                         // has to be repainted, so the frame is forced rather than
                         // left to the diff.
                         terminal.clear().ok();
+                        last_frame = None;
                     }
                     u.app
                 }
@@ -612,7 +617,8 @@ fn event_loop<B: ratatui::backend::Backend>(
                     // encoded at, so a resize has to throw it away or the art is
                     // drawn at the wrong size until the next track.
                     images.invalidate();
-                    // ratatui handles the buffer; a redraw picks the new size up.
+                    // The next draw asks for the new size and repaints it all.
+                    last_frame = None;
                 }
                 Ok(_) => {}
                 Err(e) => {
@@ -716,19 +722,23 @@ fn event_loop<B: ratatui::backend::Backend>(
         );
         if last_covering.is_some_and(|c| c != covering) {
             let _ = terminal.clear();
+            last_frame = None;
         }
         last_covering = Some(covering);
-        if terminal
-            .draw(|f| {
-                crate::tui::render::draw_with(f, &app, &theme, &mut regions, &mut images);
-                if settings_open {
-                    crate::tui::settings::render(f, f.area(), &app, &theme);
-                }
-                // Last, so it sees every cell: NO_COLOR and 16/256-colour
-                // terminals are handled once here, not by each widget (11.6).
-                crate::tui::colour::apply(f.buffer_mut(), depth);
-            })
-            .is_err()
+        let check_size = last_size_check.elapsed() >= SIZE_EVERY;
+        if check_size {
+            last_size_check = Instant::now();
+        }
+        if draw_if_changed(terminal, &mut last_frame, check_size, |f| {
+            crate::tui::render::draw_with(f, &app, &theme, &mut regions, &mut images);
+            if settings_open {
+                crate::tui::settings::render(f, f.area(), &app, &theme);
+            }
+            // Last, so it sees every cell: NO_COLOR and 16/256-colour
+            // terminals are handled once here, not by each widget (11.6).
+            crate::tui::colour::apply(f.buffer_mut(), depth);
+        })
+        .is_err()
         {
             break;
         }
@@ -1401,16 +1411,65 @@ fn launch_spotify() -> Result<(), crate::player::PlayerError> {
         .map_err(|e| crate::player::PlayerError::Script(format!("launching Spotify: {e}")))
 }
 
+/// How often the draw step asks the terminal for its size when no resize event
+/// has said it changed. A fallback only: crossterm reports resizes as events.
+const SIZE_EVERY: Duration = Duration::from_secs(1);
+
+/// `Terminal::draw`, minus the frames that would change nothing.
+///
+/// A paused trak draws ten identical frames a second. ratatui diffs them, but a
+/// Kitty cover's first cell holds a whole row of placeholders whose
+/// `unicode-width` overshoots the image, and the diff then rewrites the cells
+/// after it on every row, every frame: ~15 KB/s to the terminal for a screen
+/// that is not moving (11.5). Comparing the finished buffer with the last one
+/// sent skips all of it. It also asks for the size only when told to, because
+/// crossterm opens `/dev/tty` for every ask.
+///
+/// Returns whether anything was sent. Whoever clears the terminal must forget
+/// `last`, or the next frame would be judged unchanged against a blank screen.
+fn draw_if_changed<B: ratatui::backend::Backend>(
+    terminal: &mut Terminal<B>,
+    last: &mut Option<ratatui::buffer::Buffer>,
+    check_size: bool,
+    render: impl FnOnce(&mut ratatui::Frame),
+) -> std::io::Result<bool> {
+    if check_size || last.is_none() {
+        let before = terminal.get_frame().area();
+        terminal.autoresize()?;
+        if terminal.get_frame().area() != before {
+            *last = None;
+        }
+    }
+    let mut frame = terminal.get_frame();
+    render(&mut frame);
+    let buffer = terminal.current_buffer_mut();
+    if last.as_ref() == Some(&*buffer) {
+        // Nothing to send; the next frame is drawn into a clean buffer, which
+        // is what `swap_buffers` would otherwise have handed back.
+        buffer.reset();
+        return Ok(false);
+    }
+    *last = Some(buffer.clone());
+    // What `Terminal::try_draw` does after the render callback: trak never
+    // shows a cursor, so the cursor branch is always the hide.
+    terminal.flush()?;
+    terminal.hide_cursor()?;
+    terminal.swap_buffers();
+    ratatui::backend::Backend::flush(terminal.backend_mut())?;
+    Ok(true)
+}
+
 fn clock_string() -> String {
-    // The header only needs HH:MM, and `date` is on every macOS, so there is no
-    // reason to take a date dependency for it.
-    std::process::Command::new("date")
-        .arg("+%H:%M")
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default()
+    // `localtime_r`, not a `date` process: the header asks every second, and a
+    // spawn a second on the UI thread was most of an idle trak's CPU (11.5).
+    // SAFETY: `time` with a null out-pointer only returns, and `localtime_r`
+    // writes into the zeroed `tm` it is given and nothing else.
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    let now = unsafe { libc::time(std::ptr::null_mut()) };
+    if unsafe { libc::localtime_r(&now, &mut tm) }.is_null() {
+        return String::new();
+    }
+    format!("{:02}:{:02}", tm.tm_hour, tm.tm_min)
 }
 
 #[cfg(test)]
@@ -1501,10 +1560,59 @@ mod tests {
         assert_eq!(char_for(key(KeyCode::Home, KeyModifiers::NONE)), None);
     }
 
+    /// A frame identical to the last one sent costs nothing; a changed one, or
+    /// any frame after the screen was cleared, is drawn in full.
+    #[test]
+    fn only_a_changed_frame_reaches_the_terminal() {
+        use ratatui::backend::TestBackend;
+        use ratatui::widgets::Paragraph;
+        let mut terminal = Terminal::new(TestBackend::new(20, 2)).unwrap();
+        let mut last = None;
+        let text = |t: &'static str| {
+            move |f: &mut ratatui::Frame| {
+                f.render_widget(Paragraph::new(t), f.area());
+            }
+        };
+        assert!(draw_if_changed(&mut terminal, &mut last, false, text("one")).unwrap());
+        assert!(!draw_if_changed(&mut terminal, &mut last, false, text("one")).unwrap());
+        assert!(!draw_if_changed(&mut terminal, &mut last, true, text("one")).unwrap());
+        assert!(draw_if_changed(&mut terminal, &mut last, false, text("two")).unwrap());
+        terminal
+            .backend()
+            .assert_buffer_lines(["two                 ", "                    "]);
+        // A skipped frame must not leave its cells behind for the next one.
+        assert!(!draw_if_changed(&mut terminal, &mut last, false, text("two")).unwrap());
+        assert!(draw_if_changed(&mut terminal, &mut last, false, |_| {}).unwrap());
+        terminal
+            .backend()
+            .assert_buffer_lines(["                    "; 2]);
+        // After a clear the screen is blank, so the same frame is sent again.
+        terminal.clear().unwrap();
+        last = None;
+        assert!(draw_if_changed(&mut terminal, &mut last, false, |_| {}).unwrap());
+        // A resize is noticed when the size is checked, and repaints in full.
+        terminal.backend_mut().resize(10, 1);
+        assert!(draw_if_changed(&mut terminal, &mut last, true, text("one")).unwrap());
+        terminal.backend().assert_buffer_lines(["one       "]);
+    }
+
     #[test]
     fn the_clock_is_hh_mm_or_empty() {
         let c = clock_string();
-        assert!(c.is_empty() || (c.len() == 5 && c.contains(':')), "{c:?}");
+        assert!(c.len() == 5 && c.as_bytes()[2] == b':', "{c:?}");
+        // The local time `date` gives, not UTC: allow for a minute rolling over
+        // between the two reads.
+        let date = |fmt| {
+            std::process::Command::new("date")
+                .arg(fmt)
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .unwrap_or_default()
+        };
+        let before = date("+%H:%M");
+        let c = clock_string();
+        let after = date("+%H:%M");
+        assert!(c == before || c == after, "{c} vs {before}/{after}");
     }
 
     /// COMPAT rule 2: the launch must not focus Spotify or bounce the Dock. This

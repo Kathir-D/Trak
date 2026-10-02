@@ -28,6 +28,9 @@ objc2-foundation = { version = "0.3", features = [
     "NSArray",
     "NSObject",
 ] }
+# The header clock's local HH:MM (TODO 11.5). Already in the tree through
+# crossterm; named here so the clock is a library call, not a `date` process.
+libc = "0.2"
 ratatui-image = "8.0.1"
 image = "0.25"
 # The Core Audio process tap (TODO 8.3). `default-features = false` because the

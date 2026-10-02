@@ -1910,6 +1910,7 @@ dependencies = [
  "crossterm",
  "filetime",
  "image",
+ "libc",
  "objc2",
  "objc2-foundation",
  "predicates",
