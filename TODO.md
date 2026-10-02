@@ -908,6 +908,21 @@ Requires Sonar installed and running (`brew install --cask kathir-d/tap/sonar`) 
 
 ## Phase 11 — README, docs, polish
 
+- [x] 11.0 **Real-terminal key and mouse sweep** (owner request, 2026-10-01/02). Every key in the
+      Keys panel and every click target, in cmux against real Spotify, watching what AppleScript
+      was sent (a logging `TRAK_OSASCRIPT` wrapper) and what Spotify read back.
+      > Bugs it found, all fixed with tests: commands dropped while a poll was in flight (and
+      > `busy` stuck, so every key died); `h`/`l` sent the step as an absolute position; repeat
+      > desynced and a poll reset "one"; shift-tab (crossterm `BackTab`) unmapped; overlay
+      > remnants over the Kitty cover (`terminal.clear()` when an overlay opens/closes);
+      > clicks went through the settings screen; a volume *drag* stopped at its first step (and
+      > the loop dropped commands a finished write returned); Web API keys off their tabs were
+      > silent. Owner decisions in the same pass: `←`/`→` switch tabs, `h`/`l` seek, the help
+      > overlay is folded into the settings screen (`?` and `,` both open it, Keys panel beside
+      > it). **Tooling:** `cliclick` drops keys in cmux and System Events hangs, so keys were
+      > typed by a tiny Swift CGEvent keycode typer; clicks via `cliclick` work. Not covered: the
+      > idle card (needs Spotify quit, which would interrupt the owner).
+
 - [ ] 11.1 **Refactor the README** using https://github.com/abhisheknaiidu/awesome-github-profile-readme
       as the style reference. Note: that repo is a *curated list of GitHub profile READMEs*, not a
       template, and profile READMEs are not project READMEs, so **borrow the presentation ideas, not
