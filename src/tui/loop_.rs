@@ -416,7 +416,13 @@ fn event_loop<B: ratatui::backend::Backend>(
                     });
                     next
                 }
-                WorkerResult::Command(outcome) => update(app, Event::CommandDone(outcome)).app,
+                // A finished write can release one held back behind it (a
+                // volume drag's last step), so its commands are queued too.
+                WorkerResult::Command(outcome) => {
+                    let u = update(app, Event::CommandDone(outcome));
+                    pending.extend(u.commands);
+                    u.app
+                }
                 WorkerResult::Sonar(state) => update(app, Event::Sonar(state)).app,
                 WorkerResult::Headless(h) => update(app, Event::Headless(h)).app,
                 WorkerResult::Lyrics { uri, result } => {

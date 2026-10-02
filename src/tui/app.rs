@@ -1089,6 +1089,10 @@ pub struct App {
     /// fade the read *is* the mid-fade value trak must not present as the user's
     /// (COMPAT rule 3).
     pub user_volume: Option<u8>,
+    /// Where a volume drag is while an earlier write is still in flight. Only
+    /// the latest is kept: it is sent when the write lands, so a drag ends where
+    /// the pointer let go rather than at its first step.
+    pub volume_queued: Option<u8>,
     /// Set when a volume write did not land. The meter is then a lie, so it is
     /// hidden rather than shown wrong (COMPAT rule 5).
     pub volume_hidden: bool,
@@ -1169,6 +1173,7 @@ impl App {
             cursor_moved: false,
             read_volume: 0,
             user_volume: None,
+            volume_queued: None,
             volume_hidden: false,
             muted: false,
             pre_mute_volume: 0,
@@ -1606,6 +1611,14 @@ pub fn update(mut app: App, event: Event) -> Updated {
                         }
                     }
                 }
+            }
+            if let Some(v) = app.volume_queued.take()
+                && app.settings.volume_control != VolumeControl::System
+                && !app.sonar.is_ducking()
+            {
+                push(&mut app, &mut commands, PlayerCommand::SetVolume(v));
+                app.muted = false;
+                app.user_volume = Some(v);
             }
         }
     }
@@ -2392,10 +2405,17 @@ fn handle_mouse(app: &mut App, m: Mouse, commands: &mut Vec<PlayerCommand>) {
                 return;
             }
             let v = (fraction.clamp(0.0, 1.0) * 100.0).round() as u8;
-            // Behind a write still in flight the click is dropped, like any
-            // other, and the meter stays where Spotify is; a drag sends the
-            // next position a moment later anyway.
-            if (app.meter_volume() == v && !app.muted) || app.busy.is_some() {
+            if app.meter_volume() == v && !app.muted {
+                return;
+            }
+            // A drag outruns osascript: every step after the first arrives
+            // while a write is in flight. Dropping them left the volume at the
+            // first step, so the latest is kept and sent when the write lands.
+            if app.busy.is_some() {
+                if matches!(app.busy, Some(PlayerCommand::SetVolume(_))) {
+                    app.volume_queued = Some(v);
+                    app.user_volume = Some(v);
+                }
                 return;
             }
             push(app, commands, PlayerCommand::SetVolume(v));
@@ -3233,6 +3253,35 @@ mod tests {
         let (app, cmds) = step(app, click(Hit::Volume(0.5)));
         assert!(cmds.is_empty());
         assert!(app.toast.is_some());
+    }
+
+    /// A drag sends its first step at once and its last when that lands; the
+    /// steps in between are superseded, not queued one by one.
+    #[test]
+    fn a_volume_drag_ends_where_the_pointer_let_go() {
+        let mut app = with_track();
+        app.user_volume = Some(40);
+        let (app, cmds) = step(app, click(Hit::Volume(0.5)));
+        assert_eq!(cmds, vec![PlayerCommand::SetVolume(50)]);
+        let drag = |f| {
+            Event::Mouse(Mouse {
+                target: Hit::Volume(f),
+                action: MouseAction::Drag,
+            })
+        };
+        let (app, cmds) = step(app, drag(0.6));
+        let (app, more) = step(app, drag(0.8));
+        assert!(
+            cmds.is_empty() && more.is_empty(),
+            "nothing while a write is in flight"
+        );
+        assert_eq!(app.meter_volume(), 80, "the meter follows the pointer");
+        let done = Event::CommandDone(CommandOutcome::ok(PlayerCommand::SetVolume(50)));
+        let (app, cmds) = step(app, done.clone());
+        assert_eq!(cmds, vec![PlayerCommand::SetVolume(80)]);
+        assert_eq!(app.volume_queued, None);
+        let (_, cmds) = step(app, done);
+        assert!(cmds.is_empty(), "sent once");
     }
 
     /// A click has to do what the pixel under it looks like it does.
