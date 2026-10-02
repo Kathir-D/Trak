@@ -68,10 +68,10 @@ define_class!(
         /// the userInfo, build a plain struct, hand it to the channel.
         #[unsafe(method(handleNotification:))]
         fn handle(&self, note: &NSNotification) {
-            if let Some(tx) = sender_slot() {
-                if let Some(event) = parse(note) {
-                    let _ = tx.send(event);
-                }
+            if let Some(tx) = sender_slot()
+                && let Some(event) = parse(note)
+            {
+                let _ = tx.send(event);
             }
         }
     }

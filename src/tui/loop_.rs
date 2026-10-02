@@ -375,6 +375,10 @@ fn event_loop<B: ratatui::backend::Backend>(
     let mut last_scroll = Duration::ZERO;
     let mut last_sonar = Instant::now() - SONAR_EVERY;
     let mut last_viz = Instant::now() - VIZ_FPS;
+    // The real-audio source (TODO 8.3). Created idle: nothing touches Core Audio
+    // until the visualizer is on screen, and dropping it at the end of this
+    // function joins the worker, which is what takes the tap down on a normal exit.
+    let mut audio = crate::audio::AudioPipeline::new(app.settings.visualizer_source);
 
     loop {
         // 1. Finished writes first, so a completed command is applied before the
@@ -429,28 +433,27 @@ fn event_loop<B: ratatui::backend::Backend>(
         //    and the volume it already knew.
         if let Some(sub) = &notify
             && let Some(event) = sub.poll()
+            && let Some(state) = app.state.as_ref()
         {
-            if let Some(state) = app.state.as_ref() {
-                let track_changed = event.is_different_track(state);
-                let merged = crate::player::notify::merge(state, &event);
-                app = update(app, Event::PlayerState(Box::new(merged))).app;
+            let track_changed = event.is_different_track(state);
+            let merged = crate::player::notify::merge(state, &event);
+            app = update(app, Event::PlayerState(Box::new(merged))).app;
 
-                // A track change is the one thing the notification cannot be
-                // trusted about on its own: it has no artwork, play count or
-                // popularity, so one read has to follow. It is cheap, because
-                // that is once per song rather than once per poll.
-                if track_changed {
-                    // TODO 4.5. The first read of a session is not a change, and
-                    // `app.state` is only set after one, so announcing here
-                    // cannot announce what was already playing when trak started.
-                    let u = update(app, Event::SoundForTrackChanged);
-                    app = u.app;
-                    submit_all(u.commands, &worker);
-                    worker.submit(|p| match p.state() {
-                        Ok(st) => crate::player::actions::WorkerResult::State(Box::new(st)),
-                        Err(e) => crate::player::actions::WorkerResult::ReadFailed(e),
-                    });
-                }
+            // A track change is the one thing the notification cannot be
+            // trusted about on its own: it has no artwork, play count or
+            // popularity, so one read has to follow. It is cheap, because
+            // that is once per song rather than once per poll.
+            if track_changed {
+                // TODO 4.5. The first read of a session is not a change, and
+                // `app.state` is only set after one, so announcing here
+                // cannot announce what was already playing when trak started.
+                let u = update(app, Event::SoundForTrackChanged);
+                app = u.app;
+                submit_all(u.commands, &worker);
+                worker.submit(|p| match p.state() {
+                    Ok(st) => crate::player::actions::WorkerResult::State(Box::new(st)),
+                    Err(e) => crate::player::actions::WorkerResult::ReadFailed(e),
+                });
             }
         }
 
@@ -627,9 +630,23 @@ fn event_loop<B: ratatui::backend::Backend>(
         //     bars need thirty frames a second and the clock needs one, and
         //     because a tap (TODO 8.3) has to be able to stop without the clock
         //     noticing (TODO 8.5).
+        //
+        //     The tap follows the same test as the frame rate (TODO 8.5): on
+        //     screen and Spotify running means attached, anything else means
+        //     released. The setting is re-read every frame because the settings
+        //     screen can change it under us.
+        audio.set_source(app.settings.visualizer_source);
+        audio.set_wanted(visualizer_visible(&app));
+        if let Some(line) = audio.take_notice() {
+            app = update(app, Event::TapNotice(line)).app;
+        }
         if visualizer_visible(&app) && last_viz.elapsed() >= VIZ_FPS {
             last_viz = Instant::now();
-            app = update(app, Event::VizTick).app;
+            let frame = match audio.live_spectrum() {
+                Some(bars) => Event::LiveSpectrum(bars),
+                None => Event::VizTick,
+            };
+            app = update(app, frame).app;
         }
 
         if last_clock_tick.elapsed() >= Duration::from_secs(1) {

@@ -172,6 +172,14 @@ pub enum Event {
     /// screen (TODO 8.4/8.5). Separate from [`Event::Tick`] because the clock
     /// ticks once a second and a 30 fps bar needs thirty.
     VizTick,
+    /// A frame of real audio from the tap on Spotify (TODO 8.3), sent in place of
+    /// [`Event::VizTick`] while a tap is up. The loop owns the tap, because it is a
+    /// thread and a Core Audio device, neither of which belongs in a state that is
+    /// cloned and compared; the app only ever sees the bars.
+    LiveSpectrum(Vec<f32>),
+    /// Why the visualizer fell back to simulated bars (TODO 8.3). The tap raises
+    /// this at most once per run, so it is shown as it comes.
+    TapNotice(String),
     /// A search finished. `for_query` is what was asked, so a response for a
     /// question the user has already typed past is dropped rather than shown
     /// (TODO 7.6).
@@ -1444,6 +1452,16 @@ pub fn update(mut app: App, event: Event) -> Updated {
             app.viz.set_position(app.interpolated_position());
             app.spectrum = app.viz.spectrum();
         }
+
+        Event::LiveSpectrum(bars) => {
+            // Held to `BARS` wide, like the simulated frames, so switching between
+            // the two sources can never change how many bands the pane spreads.
+            let mut bars = bars;
+            bars.resize(crate::visualizer::BARS, 0.0);
+            app.spectrum = bars;
+        }
+
+        Event::TapNotice(line) => app.toast(line),
 
         Event::Key(c) => handle_key(&mut app, c, &mut commands, &mut web),
 
@@ -4937,5 +4955,39 @@ mod lyrics_tests {
             "the scroll does not survive into a new song"
         );
         assert_eq!(app.lyrics.follow_hold, 0.0);
+    }
+
+    /// TODO 8.3: real bars replace the simulated ones for that frame, and nothing
+    /// else about the app changes — no command, no toast.
+    #[test]
+    fn a_frame_of_real_audio_is_what_the_pane_draws() {
+        let mut real = vec![0.0; crate::visualizer::BARS];
+        real[0] = 1.0;
+        let u = update(with_track(), Event::LiveSpectrum(real.clone()));
+        assert_eq!(u.app.spectrum, real);
+        assert!(u.commands.is_empty());
+        assert!(u.app.toast.is_none());
+
+        // A frame of the wrong width is held to `BARS` rather than drawn as is.
+        let app = update(u.app, Event::LiveSpectrum(vec![0.5; 3])).app;
+        assert_eq!(app.spectrum.len(), crate::visualizer::BARS);
+        assert_eq!(&app.spectrum[..3], &[0.5; 3]);
+
+        // And the simulated tick takes over again when the tap is gone.
+        let app = update(app, Event::VizTick).app;
+        assert_eq!(app.spectrum.len(), crate::visualizer::BARS);
+    }
+
+    /// TODO 8.3: the fallback's explanation is a toast, word for word.
+    #[test]
+    fn a_tap_notice_is_shown_as_a_toast() {
+        let line = crate::audio::TapError::PermissionDenied("'!hog'")
+            .notice()
+            .expect("a denial has a line");
+        let app = update(with_track(), Event::TapNotice(line.clone())).app;
+        assert_eq!(
+            app.toast.as_ref().map(|t| t.text.as_str()),
+            Some(line.as_str())
+        );
     }
 }
