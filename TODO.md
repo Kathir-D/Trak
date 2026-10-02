@@ -654,11 +654,15 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
       > `Event::LikedHere`, dropped if the track changed) and re-asks after any landed write.
       > **[owner]** with a real login: confirm the heart matches the app, and whether playlist
       > items 403 in dev mode (the tab must degrade, not crash).
-- [ ] 7.8 **Queue tab** (now playing + up next) and add-to-queue (`A`). > `POST /me/player/queue`
+- [x] 7.8 **Queue tab** (now playing + up next) and add-to-queue (`A`). > `POST /me/player/queue`
       is **Premium-only by Spotify's own documentation**; `GET /me/player/queue` is not. A 403 on add
       is the expected Free-tier path, not an error. `User.product` no longer exists, so Premium
       cannot be detected up front — rely on the 403. Done when: works or shows the clear Premium
       message; tests.
+      > Audited: tab, `A`, lazy load and the typed Premium 403 (`ApiError::PremiumOnly`) were all
+      > built and tested. Added: a landed write empties the cached queue so the tab refetches on
+      > its next visit and shows the track just added. **[owner]**: add to queue on Free to see
+      > the Premium line.
 - [ ] 7.9 **Library tab**: saved albums, followed artists, recently played. Done when: paginated
       lists load lazily; tests.
 - [ ] 7.10 **Artist page** and **album page** (tracklist, play from track). Back with `esc`. >

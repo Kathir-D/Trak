@@ -1373,6 +1373,10 @@ pub fn update(mut app: App, event: Event) -> Updated {
                 // leaving the row saying the old thing.
                 app.web.liked_here = None;
                 app.web.liked_checked = None;
+                // An add-to-queue is a write too, and the Queue tab is lazy: an
+                // emptied queue is fetched again the next time it is shown, so
+                // the track just added is there rather than hiding until restart.
+                app.web.queue = Queue::default();
             }
         }
 
@@ -3956,6 +3960,14 @@ mod tests {
         )
         .app;
         assert_eq!(fresh.web.liked_here, Some(true));
+    }
+
+    #[test]
+    fn a_landed_write_makes_the_queue_tab_fetch_again() {
+        let mut app = on(Tab::Queue);
+        app.web.queue.upcoming = vec![a_track("1", "Teardrop")];
+        let app = update(app, Event::WebWrote(Ok(()))).app;
+        assert!(app.web.queue.upcoming.is_empty());
     }
 
     #[test]
