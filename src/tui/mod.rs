@@ -4,6 +4,7 @@
 //! draws, and `loop_` is the only thing that talks to the terminal or a player.
 
 pub mod app;
+pub mod bidi;
 pub mod colour;
 pub mod loop_;
 pub mod render;

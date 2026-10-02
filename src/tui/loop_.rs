@@ -737,6 +737,7 @@ fn event_loop<B: ratatui::backend::Backend>(
             // Last, so it sees every cell: NO_COLOR and 16/256-colour
             // terminals are handled once here, not by each widget (11.6).
             crate::tui::colour::apply(f.buffer_mut(), depth);
+            crate::tui::bidi::fence(f.buffer_mut());
         })
         .is_err()
         {

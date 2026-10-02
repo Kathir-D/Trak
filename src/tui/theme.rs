@@ -629,6 +629,11 @@ pub fn status_dot(playing: bool, elapsed: f64) -> &'static str {
 /// case with a hair space between letters, which reads as a label rather than as
 /// shouting.
 pub fn spaced_caps(text: &str) -> String {
+    // Hebrew has no case and Arabic letters join: spaced out, an Arabic name
+    // falls apart into isolated letters. Both are shown as written.
+    if text.chars().any(crate::tui::bidi::is_rtl) {
+        return text.to_string();
+    }
     let chars: Vec<char> = text.chars().collect();
     let mut out = String::new();
     for (i, c) in chars.iter().enumerate() {
@@ -774,6 +779,8 @@ mod whimsy_tests {
         let stripped: String = out.chars().filter(|c| *c != '\u{2009}').collect();
         assert_eq!(stripped, "JANE   REMOVER", "and it reads as small caps");
         assert_eq!(spaced_caps("!!!"), "!!!", "punctuation is left alone");
+        assert_eq!(spaced_caps("فيروز"), "فيروز", "Arabic letters stay joined");
+        assert_eq!(spaced_caps("עידן רייכל"), "עידן רייכל");
         assert_eq!(spaced_caps(""), "");
     }
 
