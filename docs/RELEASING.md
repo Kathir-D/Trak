@@ -41,10 +41,11 @@ Then, in this order:
    # and in Cargo.toml, the [package] version = "0.1.0"
    ```
 
-2. **Write the changelog entry.** `CHANGELOG.md` does not exist yet — create it in
-   [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format, with an
-   `## [Unreleased]` section at the top and the release below it. Compare against
-   the previous tag so the entry describes what changed in *this* release:
+2. **Write the changelog entry.** `CHANGELOG.md` is in
+   [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format: move what is
+   under `## [Unreleased]` into a new `## [x.y.z] - date` section below it and
+   update the compare links at the bottom. Compare against the previous tag so the
+   entry describes what changed in *this* release:
 
    ```sh
    PREV="$(git describe --tags --abbrev=0 2>/dev/null || echo v0.0.0)"
@@ -112,8 +113,9 @@ that is already cached, with a different sha256 (§9).
    signature is ad-hoc and not the linker's, runs `--version` on it, tars
    `trak`, `LICENSE`, `README.md` and `THIRD-PARTY-NOTICES.md` without extended
    attributes, and writes `dist/SHA256SUMS.txt`.
-5. **Publishes the GitHub release** with the tarball and `SHA256SUMS.txt`. It
-   fails if the glob matches nothing, so a release with no tarball cannot exist.
+5. **Publishes the GitHub release** with the tarball and `SHA256SUMS.txt`, and
+   notes generated from the merged commits. It fails if the glob matches nothing,
+   so a release with no tarball cannot exist.
 
 **`formula`** — the job that tells Homebrew about it:
 
@@ -123,7 +125,10 @@ that is already cached, with a different sha256 (§9).
 2. Rewrites `version`, `url` and `sha256` in `Formula/trak.rb` in place, refusing
    to continue if any of the three lines is not found or either value is not the
    right shape.
-3. Copies that file into `Kathir-D/homebrew-tap` through the `TAP_DEPLOY_KEY`
+3. Commits the rewritten formula back to `main` here (rebased onto whatever
+   `main` is now), the way headless-spotify keeps its cask in step, so the file in
+   this repository always says what the tap says.
+4. Copies that file into `Kathir-D/homebrew-tap` through the `TAP_DEPLOY_KEY`
    deploy key and commits it. It owns that one file in the tap, which is the tap's
    one-writer-per-file rule; the tap README is not touched.
 
@@ -270,7 +275,8 @@ have to re-run it, re-run `formula` too, and understand that the two commits wil
 differ.
 
 For a bad *formula* with a good binary, fix `Formula/trak.rb` here, commit it, and
-have the **[owner]** push that one file to the tap. The workflow only runs on tags,
+have the **[owner]** push that one file to the tap. (The `formula` job also commits
+the bumped release lines back to `main` here, so pull before editing the file.) The workflow only runs on tags,
 and the tap's one-writer rule means the file is not edited from two places.
 
 ## 10. The curl installer (TODO 9.9)

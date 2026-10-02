@@ -63,6 +63,7 @@ jobs:
           # A glob that matches nothing would otherwise publish a release with no
           # tarball and a checksum for one that does not exist.
           fail_on_unmatched_files: true
+          generate_release_notes: true
           files: |
             dist/trak-*-macos.tar.gz
             dist/SHA256SUMS.txt
@@ -76,6 +77,9 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history, so the commit below can be rebased onto main.
+          fetch-depth: 0
       - name: Point the formula at this release
         env:
           VERSION: ${{ needs.release.outputs.version }}
@@ -111,6 +115,28 @@ jobs:
           open(path, "w").write(source)
           print(f"formula points at v{version}, sha256 {sha}")
           EOF
+      - name: Commit the formula back to this repository
+        # So Formula/trak.rb in the repo says what the tap says, the way
+        # headless-spotify keeps its cask. A tag checkout is a detached HEAD, so
+        # a bare `git push` fails with "not currently on a branch": push to the
+        # default branch by name.
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/trak.rb
+          # A re-run for the same tag has nothing new to commit.
+          if git diff --cached --quiet; then
+            echo "Formula/trak.rb already points at ${GITHUB_REF_NAME}."
+            exit 0
+          fi
+          git commit -m "chore: point the formula at ${GITHUB_REF_NAME}"
+          git fetch origin "${{ github.event.repository.default_branch }}"
+          # main may have moved since the tag; replaying one file's change onto
+          # it is safe, and a conflict means a human edited the formula's
+          # release lines, which is worth a red job.
+          git rebase "origin/${{ github.event.repository.default_branch }}"
+          git push origin "HEAD:${{ github.event.repository.default_branch }}"
       # `brew install kathir-d/tap/trak` reads the formula from the tap, not from
       # this repository. TAP_DEPLOY_KEY is a deploy key with write access to
       # Kathir-D/homebrew-tap and to nothing else, which is how the tap keeps its
@@ -122,6 +148,7 @@ jobs:
           TAP_DEPLOY_KEY: ${{ secrets.TAP_DEPLOY_KEY }}
           VERSION: ${{ needs.release.outputs.version }}
         run: |
+          set -euo pipefail
           if [ -z "$TAP_DEPLOY_KEY" ]; then
             echo "::error::TAP_DEPLOY_KEY is not set, so the tap was not updated. The release is up; add the secret and re-run this job."
             exit 1
@@ -141,5 +168,7 @@ jobs:
             echo "The tap already points at ${GITHUB_REF_NAME}."
             exit 0
           fi
-          git commit -m "trak ${GITHUB_REF_NAME#v}: $VERSION"
-          git push origin HEAD
+          git commit -m "trak ${VERSION}"
+          # Named, not bare HEAD: the clone's branch is the tap's default, and
+          # saying so keeps a detached or renamed checkout from pushing elsewhere.
+          git push origin HEAD:main
