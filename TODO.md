@@ -712,8 +712,12 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
       > cannot report a coin flip: `play list` was a random row out of ten, and `play uri` was
       > not silent (`Playing Spotify URI: …`). The setup message quotes back the spelling that
       > was typed, so `trak play album x` is not told to run `trak play "x"`.
-- [ ] 7.13 **Tab order and default tab for A**, plus the B-mode hint that a Client ID unlocks these.
+- [x] 7.13 **Tab order and default tab for A**, plus the B-mode hint that a Client ID unlocks these.
       Done when: SPEC §3 matches the built UI (update the doc if the order changed).
+      > Built order already matched the SPEC's list (`Tab::ALL`, digits 1-6, History/Info via
+      > `Tab`, `default_tab` = history). What differed was the *B-mode* wording: SPEC said B has
+      > three tabs, but the build draws one strip of eight and the Web tabs carry the Client ID
+      > notice. SPEC §3 now says what is built, and why (one strip, one meaning for `1`-`6`).
 
 ---
 
