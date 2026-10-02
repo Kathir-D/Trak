@@ -1130,8 +1130,11 @@ fn draw_now_playing(
     if app.settings.show_volume && !app.volume_hidden {
         let v = app.meter_volume();
         let label = "vol ";
+        // Two cells before the percentage, not one: `▰` is drawn a little
+        // wider than its cell in common fonts, so at 100 % a full last cell ran
+        // into the "1" with only a single space between them.
         let meter_w = (text_body.width as usize)
-            .saturating_sub(label.len() + 5)
+            .saturating_sub(label.len() + 6)
             .max(1);
         regions.volume = Some(Rect {
             x: text_body.x + label.len() as u16,
@@ -1146,7 +1149,7 @@ fn draw_now_playing(
             &theme.palette,
             app.muted,
         ));
-        row.push(Span::raw(" "));
+        row.push(Span::raw("  "));
         row.push(Span::styled(
             format!("{v:>3}%"),
             Style::default().fg(theme.accent_colour()),
@@ -2794,6 +2797,13 @@ mod tests {
         assert_eq!(regions.hit(v.x, v.y), Some(Hit::Volume(0.0)));
         assert_eq!(regions.hit(v.x + v.width - 1, v.y), Some(Hit::Volume(1.0)));
         assert_eq!(regions.hit(v.x + v.width, v.y), None);
+        // At 100 % the label still sits two cells clear of a full meter (the
+        // `▰` glyph overhangs its cell in real fonts; seen in cmux).
+        let mut full = app_at(100, 30);
+        full.user_volume = Some(100);
+        let (buf, regions) = render(100, 30, &full);
+        let v = regions.volume.expect("a volume meter");
+        assert_eq!(row_text(&buf, v.y, v.x + v.width, 6), "  100%");
     }
 
     /// A click on a history row selects that row, counted from what is shown.
