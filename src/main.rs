@@ -582,6 +582,12 @@ impl Player for AnyPlayer {
             Self::Fake(p) => p.set_volume(v),
         }
     }
+    fn volume(&self) -> Result<u8, trak::player::PlayerError> {
+        match self {
+            Self::Real(p) => p.volume(),
+            Self::Fake(p) => p.volume(),
+        }
+    }
     fn play_uri(&self, uri: &str) -> Result<(), trak::player::PlayerError> {
         match self {
             Self::Real(p) => p.play_uri(uri),

@@ -87,7 +87,9 @@ pub fn set_volume_checked<P: Player + ?Sized>(
 ) -> Result<WriteOutcome, PlayerError> {
     let want = volume.min(100);
     p.set_volume(want)?;
-    let read = p.state()?.volume;
+    // The volume, not the whole state: the read-back only compares one number,
+    // and the full read costs three times as much (docs/APPLESCRIPT.md §4).
+    let read = p.volume()?;
     Ok(WriteOutcome {
         what: "volume",
         wanted: i64::from(want),
@@ -98,7 +100,7 @@ pub fn set_volume_checked<P: Player + ?Sized>(
 
 /// Step the volume, staying inside 0–100 rather than wrapping.
 pub fn step_volume<P: Player + ?Sized>(p: &mut P, step: i16) -> Result<WriteOutcome, PlayerError> {
-    let current = i16::from(p.state()?.volume);
+    let current = i16::from(p.volume()?);
     let target = (current + step).clamp(0, 100) as u8;
     set_volume_checked(p, target)
 }

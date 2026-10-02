@@ -209,6 +209,17 @@ pub trait Player {
     /// (COMPAT rule 5) and must allow ±1.
     fn set_volume(&mut self, volume: u8) -> Result<(), PlayerError>;
 
+    /// Read the volume and nothing else, 0–100.
+    ///
+    /// Its own method because it is three times cheaper than [`Player::state`]:
+    /// the batched read is seventeen properties across about eighteen Apple
+    /// Events, measured at ~430 ms, and one property is ~140 ms. Every volume
+    /// keypress needs the current volume (to step it) and then the value Spotify
+    /// took (COMPAT rule 5), and doing both with [`Player::state`] held the worker
+    /// for the best part of a second -- long enough that the next keypress landed
+    /// behind it (owner, 2026-10-02).
+    fn volume(&self) -> Result<u8, PlayerError>;
+
     /// Play a URI. Works for tracks, albums, playlists and artists, and works on
     /// the Free tier because it goes through AppleScript (SPEC §6).
     fn play_uri(&self, uri: &str) -> Result<(), PlayerError>;

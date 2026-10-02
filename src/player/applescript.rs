@@ -25,6 +25,18 @@ const TIMEOUT: Duration = Duration::from_secs(5);
 /// The batched read. `is running` is the FIRST statement on purpose: a bare
 /// `tell` on a non-running app *launches* it, which COMPAT rule 2 forbids
 /// (docs/APPLESCRIPT.md §3).
+/// The volume on its own: one property, one Apple Event.
+///
+/// Same guard as the batched read and the same "never launch Spotify" rule, but
+/// nothing else -- `docs/APPLESCRIPT.md` §4 measured ~18 ms per property against
+/// a ~50 ms spawn, so this is about a fifth of [`READ`].
+const VOLUME: &str = r#"
+on run argv
+	if application "Spotify" is not running then return "not-running"
+	tell application "Spotify" to return ((sound volume) as string)
+end run
+"#;
+
 const READ: &str = r#"
 on run argv
 	set U to ASCII character 31
@@ -279,6 +291,17 @@ impl Player for AppleScriptPlayer {
             return Err(PlayerError::Script(format!("bad seek target {secs}")));
         }
         self.command(&format!("set player position to {}", clamp_secs(secs)))
+    }
+
+    fn volume(&self) -> Result<u8, PlayerError> {
+        let raw = self.run(VOLUME)?;
+        if raw.starts_with("not-running") {
+            return Err(PlayerError::NotRunning);
+        }
+        raw.trim()
+            .parse::<u8>()
+            .map_err(|_| PlayerError::Script(format!("Spotify said {raw:?} for a volume")))
+            .map(|v| v.min(100))
     }
 
     fn set_volume(&mut self, volume: u8) -> Result<(), PlayerError> {

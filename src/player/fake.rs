@@ -232,6 +232,12 @@ impl Player for FakePlayer {
         Ok(())
     }
 
+    fn volume(&self) -> Result<u8, PlayerError> {
+        self.gate()?;
+        let i = self.inner.borrow();
+        Ok(self.read_volume(i.volume))
+    }
+
     fn set_volume(&mut self, volume: u8) -> Result<(), PlayerError> {
         self.gate()?;
         let v = volume.min(100);

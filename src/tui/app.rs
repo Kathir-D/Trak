@@ -1089,10 +1089,14 @@ pub struct App {
     /// fade the read *is* the mid-fade value trak must not present as the user's
     /// (COMPAT rule 3).
     pub user_volume: Option<u8>,
-    /// Where a volume drag is while an earlier write is still in flight. Only
-    /// the latest is kept: it is sent when the write lands, so a drag ends where
-    /// the pointer let go rather than at its first step.
-    pub volume_queued: Option<u8>,
+    /// What the user asked for while a write was in flight, and the worker has
+    /// not taken yet. Only the latest is kept: it is sent when the write lands, so
+    /// a drag ends where the pointer let go rather than at its first step, and a
+    /// key pressed twice in a row does two things rather than one.
+    ///
+    /// Volume steps add up instead of replacing each other, because two presses
+    /// of `+` mean two steps and not one.
+    pub queued: Option<PlayerCommand>,
     /// Set when a volume write did not land. The meter is then a lie, so it is
     /// hidden rather than shown wrong (COMPAT rule 5).
     pub volume_hidden: bool,
@@ -1173,7 +1177,7 @@ impl App {
             cursor_moved: false,
             read_volume: 0,
             user_volume: None,
-            volume_queued: None,
+            queued: None,
             volume_hidden: false,
             muted: false,
             pre_mute_volume: 0,
@@ -1222,6 +1226,26 @@ impl App {
     /// they choose one.
     pub fn meter_volume(&self) -> u8 {
         self.user_volume.unwrap_or(self.read_volume)
+    }
+
+    /// Show the track at `secs` from the start, and keep counting from there.
+    ///
+    /// Used the moment a seek is asked for rather than when it lands: the bar is
+    /// then drawn from the position the user asked for, still interpolating, so a
+    /// seek reads as a seek instead of as a keypress that did nothing for a
+    /// second. The next read from Spotify is the authority and overwrites it.
+    pub fn seek_to(&mut self, secs: f64) {
+        let Some(state) = self.state.as_mut() else {
+            return;
+        };
+        let dur = state.track.duration_secs() as f64;
+        let to = if dur > 0.0 {
+            secs.clamp(0.0, dur)
+        } else {
+            secs.max(0.0)
+        };
+        state.position_secs = to;
+        self.last_read = Some(Instant::now());
     }
 
     /// Spotify is not running.
@@ -1612,13 +1636,30 @@ pub fn update(mut app: App, event: Event) -> Updated {
                     }
                 }
             }
-            if let Some(v) = app.volume_queued.take()
-                && app.settings.volume_control != VolumeControl::System
-                && !app.sonar.is_ducking()
-            {
-                push(&mut app, &mut commands, PlayerCommand::SetVolume(v));
-                app.muted = false;
-                app.user_volume = Some(v);
+            // A key pressed while that write was in flight goes now, rather than
+            // being dropped: two `+` in a row is two steps, and a drag that
+            // outran the first write still ends where the pointer let go.
+            if let Some(next) = app.queued.take() {
+                // The volume guards are re-checked here rather than trusted from
+                // the keypress: Sonar may have started a fade in between, and a
+                // volume write during one would undo it (COMPAT rule 3).
+                let volume = matches!(
+                    next,
+                    PlayerCommand::SetVolume(_) | PlayerCommand::VolumeStep(_)
+                );
+                if volume
+                    && (app.settings.volume_control == VolumeControl::System
+                        || app.sonar.is_ducking())
+                {
+                    app.queued = None;
+                } else {
+                    if let PlayerCommand::SetVolume(v) = next {
+                        app.muted = false;
+                        app.user_volume = Some(v);
+                    }
+                    app.queued = None;
+                    push(&mut app, &mut commands, next);
+                }
             }
         }
     }
@@ -2190,9 +2231,6 @@ fn handle_key(app: &mut App, c: char, commands: &mut Vec<PlayerCommand>, web: &m
         return;
     }
 
-    // A command is already running; queue nothing behind it.
-    let busy = app.busy.is_some();
-
     match c {
         'q' | 'Q' => app.should_quit = true,
         // Full-screen lyrics (SPEC §4). Any tab: the words are about the song,
@@ -2243,7 +2281,6 @@ fn handle_key(app: &mut App, c: char, commands: &mut Vec<PlayerCommand>, web: &m
         _ if app.sonar.is_ducking() && matches!(c, 'm' | '+' | '=' | '-' | '_') => {
             app.toast("Sonar is adjusting the volume — leave it alone for a moment");
         }
-        _ if busy => {}
         // `enter` plays the selected history row (SPEC §4). It only means that on
         // the History tab, because that is the only one with a selection; on the
         // other tabs it is a no-op rather than something that guesses.
@@ -2281,6 +2318,13 @@ fn handle_key(app: &mut App, c: char, commands: &mut Vec<PlayerCommand>, web: &m
             if dur > 0.0 {
                 to = to.min(dur);
             }
+            // Move the bar now and keep counting from here. Waiting for the write
+            // to come back meant the bar did not move for the length of two
+            // AppleScript round trips -- the key felt like nothing happened, and
+            // holding `l` walked the bar one step per second (owner,
+            // 2026-10-02). A write that does not land says so, and the next poll
+            // puts the truth back.
+            app.seek_to(to);
             push(
                 app,
                 commands,
@@ -2300,16 +2344,8 @@ fn handle_key(app: &mut App, c: char, commands: &mut Vec<PlayerCommand>, web: &m
                 push(app, commands, PlayerCommand::SetVolume(app.pre_mute_volume));
             }
         }
-        '+' | '=' => push(
-            app,
-            commands,
-            PlayerCommand::VolumeStep(app.settings.volume_step),
-        ),
-        '-' | '_' => push(
-            app,
-            commands,
-            PlayerCommand::VolumeStep(-app.settings.volume_step),
-        ),
+        '+' | '=' => volume_step(app, commands, app.settings.volume_step),
+        '-' | '_' => volume_step(app, commands, -app.settings.volume_step),
         'c' => {
             // Copy the share URL (TODO 3.11). The clipboard write goes to the
             // worker so a slow pasteboard cannot block the render loop.
@@ -2398,11 +2434,11 @@ fn handle_mouse(app: &mut App, m: Mouse, commands: &mut Vec<PlayerCommand>) {
         Hit::Seek(fraction) => {
             let dur = app.track().map(|t| t.duration_secs()).unwrap_or(0);
             if dur > 0 {
-                push(
-                    app,
-                    commands,
-                    PlayerCommand::Seek((fraction.clamp(0.0, 1.0) * dur as f64).round()),
-                );
+                let to = (fraction.clamp(0.0, 1.0) * dur as f64).round();
+                // The bar follows the pointer while it is being dragged, for the
+                // same reason `h`/`l` move it at once.
+                app.seek_to(to);
+                push(app, commands, PlayerCommand::Seek(to));
             }
         }
         // The meter is a slider: a click or a drag sets the volume where the
@@ -2422,11 +2458,14 @@ fn handle_mouse(app: &mut App, m: Mouse, commands: &mut Vec<PlayerCommand>) {
             }
             // A drag outruns osascript: every step after the first arrives
             // while a write is in flight. Dropping them left the volume at the
-            // first step, so the latest is kept and sent when the write lands.
+            // first step, so the latest is kept and sent when the write lands --
+            // and the meter moves now, because the pointer is there and the
+            // value it let go at is the truth (owner, 2026-10-02).
             if app.busy.is_some() {
-                if matches!(app.busy, Some(PlayerCommand::SetVolume(_))) {
-                    app.volume_queued = Some(v);
+                if is_volume(&app.busy) {
+                    app.queued = Some(PlayerCommand::SetVolume(v));
                     app.user_volume = Some(v);
+                    app.muted = false;
                 }
                 return;
             }
@@ -2445,9 +2484,47 @@ fn handle_mouse(app: &mut App, m: Mouse, commands: &mut Vec<PlayerCommand>) {
     }
 }
 
-/// Queue a command unless one is already in flight.
+/// Step the volume, showing the new value at once.
+///
+/// The meter is the user's own value (COMPAT rule 3), so the number they asked
+/// for is drawn the moment they ask for it. The read-back still happens and
+/// still decides whether the meter can be trusted; it just no longer decides
+/// when the screen catches up.
+fn volume_step(app: &mut App, commands: &mut Vec<PlayerCommand>, step: i16) {
+    let want = (i16::from(app.meter_volume()) + step).clamp(0, 100) as u8;
+    app.user_volume = Some(want);
+    if want > 0 {
+        app.muted = false;
+    }
+    push(app, commands, PlayerCommand::VolumeStep(step));
+}
+
+/// Whether a command is one of the two volume writes.
+fn is_volume(cmd: &Option<PlayerCommand>) -> bool {
+    matches!(
+        cmd,
+        Some(PlayerCommand::SetVolume(_) | PlayerCommand::VolumeStep(_))
+    )
+}
+
+/// Queue a command, or hold it until the one in flight has finished.
+///
+/// A key pressed while a write is running used to be dropped, which is what made
+/// a second `+`, `l` or `n` do nothing at all: one AppleScript round trip is
+/// ~150 ms and a key repeat is faster than that, so half of every burst of
+/// keypresses vanished (owner, 2026-10-02). One command is held rather than a
+/// queue of them, so holding a key down cannot build a backlog of skips.
+///
+/// Volume steps accumulate, because two presses of `+` are two steps. Everything
+/// else is replaced by the newest, which is what a slider drag wants.
 fn push(app: &mut App, commands: &mut Vec<PlayerCommand>, cmd: PlayerCommand) {
     if app.busy.is_some() {
+        app.queued = Some(match (app.queued.take(), &cmd) {
+            (Some(PlayerCommand::VolumeStep(a)), PlayerCommand::VolumeStep(b)) => {
+                PlayerCommand::VolumeStep(a.saturating_add(*b))
+            }
+            _ => cmd,
+        });
         return;
     }
     app.busy = Some(cmd.clone());
@@ -3291,7 +3368,7 @@ mod tests {
         let done = Event::CommandDone(CommandOutcome::ok(PlayerCommand::SetVolume(50)));
         let (app, cmds) = step(app, done.clone());
         assert_eq!(cmds, vec![PlayerCommand::SetVolume(80)]);
-        assert_eq!(app.volume_queued, None);
+        assert_eq!(app.queued, None);
         let (_, cmds) = step(app, done);
         assert!(cmds.is_empty(), "sent once");
     }
@@ -3683,6 +3760,98 @@ mod tests {
         app.settings.volume_control = VolumeControl::Spotify;
         let (_, cmds) = press(app, '+');
         assert_eq!(cmds, vec![PlayerCommand::VolumeStep(10)]);
+    }
+
+    /// The meter moves on the keypress, not when AppleScript answers. An
+    /// AppleScript round trip is ~150 ms and the read-back another one, so a
+    /// meter that waited for it felt like a keypress that did nothing (owner,
+    /// 2026-10-02).
+    #[test]
+    fn a_volume_key_moves_the_meter_before_spotify_answers() {
+        let mut app = with_track();
+        app.read_volume = 40;
+        let before = app.meter_volume();
+        let (after, cmds) = press(app.clone(), '+');
+        assert_eq!(cmds, vec![PlayerCommand::VolumeStep(10)]);
+        assert_eq!(after.meter_volume(), 50, "moved at once");
+
+        let (down, _) = press(app, '-');
+        assert_eq!(down.meter_volume(), before - 10);
+    }
+
+    /// Two presses inside one round trip are two steps, not one. They used to be
+    /// dropped, so half of every burst of keypresses did nothing.
+    #[test]
+    fn two_volume_keys_in_a_row_both_count() {
+        let mut app = with_track();
+        app.read_volume = 40;
+        let (after, sent) = press(app.clone(), '+');
+        assert_eq!(
+            sent,
+            vec![PlayerCommand::VolumeStep(10)],
+            "the first goes now"
+        );
+        let (after, cmds2) = press(after, '+');
+        assert_eq!(cmds2, Vec::new(), "the second press is held, not sent");
+        assert_eq!(after.meter_volume(), app.meter_volume() + 20, "two steps");
+
+        // And it goes out when the first write lands.
+        let mut busy = after.clone();
+        busy.busy = Some(PlayerCommand::VolumeStep(10));
+        let out = update(
+            busy,
+            Event::CommandDone(CommandOutcome::ok(PlayerCommand::VolumeStep(10))),
+        );
+        assert_eq!(out.app.queued, None, "the held step has been sent");
+        // The held step is a second step of ten, not a step of twenty: Spotify
+        // applies them one after the other, so two steps of ten is two steps.
+        assert_eq!(out.commands, vec![PlayerCommand::VolumeStep(10)]);
+    }
+
+    /// The same for the transport: a second `n` while the first is in flight is
+    /// held rather than dropped.
+    #[test]
+    fn a_second_key_while_a_write_is_in_flight_is_held_not_dropped() {
+        let (after, _) = press(with_track(), 'n');
+        let (after, cmds) = press(after, 'n');
+        assert_eq!(cmds, Vec::new());
+        assert_eq!(after.queued, Some(PlayerCommand::Next));
+        let mut busy = after;
+        busy.busy = Some(PlayerCommand::Next);
+        let out = update(
+            busy,
+            Event::CommandDone(CommandOutcome::ok(PlayerCommand::Next)),
+        );
+        assert_eq!(out.commands, vec![PlayerCommand::Next]);
+        assert_eq!(out.app.busy, Some(PlayerCommand::Next), "and it is running");
+    }
+
+    /// The bar moves on the keypress and keeps interpolating from the new
+    /// position.
+    #[test]
+    fn a_seek_key_moves_the_bar_at_once() {
+        let (after, cmds) = press(with_track(), 'l');
+        let PlayerCommand::Seek(to) = cmds[0] else {
+            panic!("a seek, not {cmds:?}");
+        };
+        // And the bar is already there, rather than waiting for the write to come
+        // back: it is showing the position trak asked Spotify for.
+        assert!(
+            (after.interpolated_position() - to).abs() < 0.2,
+            "bar is at {:?}, asked for {to}",
+            after.interpolated_position()
+        );
+    }
+
+    /// A seek past the end is clamped in the app too, so the bar never shows a
+    /// position the track does not have.
+    #[test]
+    fn a_seek_key_clamps_to_the_track() {
+        let mut app = with_track();
+        app.state.as_mut().unwrap().position_secs = 358.0;
+        let (after, cmds) = press(app, 'l');
+        assert_eq!(cmds, vec![PlayerCommand::Seek(360.0)]);
+        assert!(after.interpolated_position() <= 360.0);
     }
 
     #[test]

@@ -62,6 +62,12 @@ const POLL_IDLE: Duration = Duration::from_secs(5);
 /// stop looking like a slideshow; above that they cost battery and look the same.
 const VIZ_FPS: Duration = Duration::from_millis(33);
 
+/// How many terminal events one frame will take. A bound rather than a `while`,
+/// because a terminal that reports a stream of mouse-move events would
+/// otherwise keep the loop in the read and never draw. Sixty-four is far more
+/// than a key repeat produces between two frames.
+const MAX_EVENTS_PER_FRAME: u32 = 64;
+
 /// Shown once, on a machine that has never run trak (TODO 5.4). It has to say
 /// where the settings are and what the optional bit is, because a first launch
 /// is the only moment a user is guaranteed to be looking.
@@ -399,6 +405,9 @@ fn event_loop<B: ratatui::backend::Backend>(
     // moment the worker is free, ahead of any poll.
     let mut pending: std::collections::VecDeque<PlayerCommand> = Default::default();
     let mut pending_web: std::collections::VecDeque<WebJob> = Default::default();
+    // Set when the terminal itself has failed. `break` out of a `match` inside a
+    // `for` is not a thing, so the flag is how the read error leaves the loop.
+    let mut broken = false;
 
     loop {
         flush(&mut pending, &mut pending_web, &worker);
@@ -594,49 +603,71 @@ fn event_loop<B: ratatui::backend::Backend>(
         // 3. Terminal input. The wait is a run-loop pump, not a sleep:
         //    NSDistributedNotificationCenter only delivers on the main run loop,
         //    so a plain sleep here would leave the observer registered and silent.
-        match poll(Duration::ZERO) {
-            Ok(true) => match read() {
-                Ok(TermEvent::Key(k)) => {
-                    if k.modifiers.contains(KeyModifiers::CONTROL) && k.code == KeyCode::Char('c') {
-                        app = update(app, Event::Quit).app;
-                    } else if let Some(c) = char_for(k) {
-                        let u = update(app, Event::Key(c));
-                        app = u.app;
-                        pending.extend(u.commands);
-                        pending_web.extend(u.web);
-                        flush(&mut pending, &mut pending_web, &worker);
+        //
+        //    **Every** event that is waiting is read, not one per frame. crossterm
+        //    hands over one event per `read`, and a frame is 100 ms, so a burst of
+        //    key repeats was being taken one per frame: holding `l` to seek, or
+        //    `→` to walk the tabs, took a third of a second per keypress and the
+        //    last key of a burst landed seconds after it was pressed (owner,
+        //    2026-10-02). Draining the queue makes a burst land in one frame.
+        let mut handled_input = 0u32;
+        for _ in 0..MAX_EVENTS_PER_FRAME {
+            match poll(Duration::ZERO) {
+                Ok(true) => match read() {
+                    Ok(TermEvent::Key(k)) => {
+                        handled_input += 1;
+                        if k.modifiers.contains(KeyModifiers::CONTROL)
+                            && k.code == KeyCode::Char('c')
+                        {
+                            app = update(app, Event::Quit).app;
+                            break;
+                        } else if let Some(c) = char_for(k) {
+                            let u = update(app, Event::Key(c));
+                            app = u.app;
+                            pending.extend(u.commands);
+                            pending_web.extend(u.web);
+                            flush(&mut pending, &mut pending_web, &worker);
+                        }
                     }
-                }
-                Ok(TermEvent::Mouse(m)) => {
-                    if app.settings.mouse {
-                        let u = update(app, mouse_event(m, &regions, &mut scrubbing));
-                        app = u.app;
-                        pending.extend(u.commands);
-                        pending_web.extend(u.web);
-                        flush(&mut pending, &mut pending_web, &worker);
+                    Ok(TermEvent::Mouse(m)) => {
+                        handled_input += 1;
+                        if app.settings.mouse {
+                            let u = update(app, mouse_event(m, &regions, &mut scrubbing));
+                            app = u.app;
+                            pending.extend(u.commands);
+                            pending_web.extend(u.web);
+                            flush(&mut pending, &mut pending_web, &worker);
+                        }
                     }
-                }
-                Ok(TermEvent::Resize(_, _)) => {
-                    app = update(app, Event::Resize).app;
-                    // Kitty's encoded state is only valid for the size it was
-                    // encoded at, so a resize has to throw it away or the art is
-                    // drawn at the wrong size until the next track.
-                    images.invalidate();
-                    // The next draw asks for the new size and repaints it all.
-                    last_frame = None;
-                }
-                Ok(_) => {}
+                    Ok(TermEvent::Resize(_, _)) => {
+                        handled_input += 1;
+                        app = update(app, Event::Resize).app;
+                        // Kitty's encoded state is only valid for the size it was
+                        // encoded at, so a resize has to throw it away or the art is
+                        // drawn at the wrong size until the next track.
+                        images.invalidate();
+                        // The next draw asks for the new size and repaints it all.
+                        last_frame = None;
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        // A broken stdin means there is no terminal to talk to.
+                        eprintln!("trak: terminal input failed: {e}");
+                        broken = true;
+                    }
+                },
+                Ok(false) => break,
                 Err(e) => {
-                    // A broken stdin means there is no terminal to talk to.
                     eprintln!("trak: terminal input failed: {e}");
-                    break;
+                    broken = true;
                 }
-            },
-            Ok(false) => {}
-            Err(e) => {
-                eprintln!("trak: terminal input failed: {e}");
+            }
+            if broken || app.should_quit {
                 break;
             }
+        }
+        if broken {
+            break;
         }
         // Waiting happens here rather than inside `poll`, so the run loop gets
         // the time instead of the terminal read. Together they pace the frame.
@@ -644,7 +675,14 @@ fn event_loop<B: ratatui::backend::Backend>(
         // The wait is shorter while the visualizer is on screen and the same as
         // ever otherwise, because 10 fps is plenty for a dashboard and is a
         // tenth of the wake-ups (TODO 11.5's idle-CPU budget).
-        let frame = if visualizer_visible(&app) {
+        //
+        // And after input it is skipped altogether. There is no point pacing a
+        // frame that is already behind: the loop is about to draw the result of
+        // the keys it just read, and any further keys the user types are already
+        // in the queue this will come back for.
+        let frame = if handled_input > 0 {
+            Duration::ZERO
+        } else if visualizer_visible(&app) {
             VIZ_FPS
         } else {
             INPUT_WAIT
