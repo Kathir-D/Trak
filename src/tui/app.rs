@@ -17,7 +17,9 @@ use crate::player::actions::{CommandOutcome, PlayerCommand};
 use crate::player::{PlaybackState, PlayerState, RepeatMode, TrackInfo};
 use crate::tui::theme::{Accent, Border};
 use crate::visualizer::AudioSource;
-use crate::web::api::{Album, Artist, Page, Playlist, Queue, SearchResults, Track, TrackItem};
+use crate::web::api::{
+    Album, Artist, Continuation, Page, Playlist, Queue, SearchResults, Track, TrackItem,
+};
 
 /// A track played this session. Session-only, cleared on exit (SPEC §2).
 #[derive(Debug, Clone, PartialEq)]
@@ -181,6 +183,11 @@ pub enum Event {
     /// near-identical variants, because the handling is identical and five
     /// variants is five places to forget one.
     Page {
+        what: PageWhat,
+        result: Result<PageLoaded, crate::web::api::ApiError>,
+    },
+    /// The next page of a list tab loaded, to be appended to what is shown.
+    MorePage {
         what: PageWhat,
         result: Result<PageLoaded, crate::web::api::ApiError>,
     },
@@ -384,6 +391,8 @@ pub enum WebJob {
     },
     /// Whether the playing track is liked, which is `GET /me/library/contains`.
     IsLiked(String),
+    /// The page of a list tab after the one on screen (7.9).
+    More(PageWhat, Continuation),
 }
 
 /// Which volume trak changes (TODO 4.4, R2).
@@ -438,6 +447,9 @@ pub struct WebState {
     /// The track `liked_here` was last asked about, so one track is one check
     /// rather than one per frame.
     pub liked_checked: Option<String>,
+    /// A next page is on its way, so the cursor sitting near the end does not
+    /// ask for the same page every frame.
+    pub loading_more: bool,
 
     // -- The pages you open something into (7.10)
     /// A navigation stack, so `esc` from an album inside an artist returns to the
@@ -576,6 +588,7 @@ impl Default for WebState {
             queue: Queue::default(),
             liked_here: None,
             liked_checked: None,
+            loading_more: false,
             pages: Vec::new(),
             open: None,
             open_tracks: Vec::new(),
@@ -668,6 +681,11 @@ impl Page_ {
         }
     }
 }
+
+/// How many rows from the end of a list the cursor is when the next page is
+/// asked for (TODO 7.9). Five is a screenful of lead: the page lands before the
+/// cursor reaches the bottom, so the list never visibly stops.
+pub const MORE_AHEAD: usize = 5;
 
 /// How long a keystroke waits before a search goes out (TODO 7.6).
 ///
@@ -1348,6 +1366,20 @@ pub fn update(mut app: App, event: Event) -> Updated {
             Err(e) => app.toast(e.notice()),
         },
 
+        Event::MorePage { what, result } => {
+            app.web.loading_more = false;
+            match result {
+                Ok(loaded) => append_page(&mut app, loaded),
+                Err(e) => {
+                    // The rest of the list is given up rather than retried: a
+                    // failing page asked for every frame is a request storm
+                    // against a per-account quota.
+                    drop_continuation(&mut app, what);
+                    app.toast(e.notice());
+                }
+            }
+        }
+
         Event::Queue(result) => match result {
             Ok(q) => app.web.queue = q,
             Err(e) => app.toast(e.notice()),
@@ -1693,6 +1725,58 @@ impl WebState {
         self.liked_here = None;
         self.liked_checked = Some(uri.to_string());
         Some(WebJob::IsLiked(uri.to_string()))
+    }
+
+    /// The next page the cursor is about to need, if there is one (7.9).
+    ///
+    /// Lists load lazily: the first page when a tab is first shown, and each
+    /// later page when the cursor comes within [`MORE_AHEAD`] rows of the end, so
+    /// a long library costs requests in proportion to how far it is read.
+    pub fn next_more(&mut self, tab: Tab) -> Option<WebJob> {
+        if self.loading_more || self.open.is_some() {
+            return None;
+        }
+        let (cursor, len, next, what) = match tab {
+            Tab::Playlists => (
+                self.playlist_cursor,
+                self.playlists.items.len(),
+                self.playlists.next.clone(),
+                PageWhat::Playlists,
+            ),
+            Tab::Liked => (
+                self.liked_cursor,
+                self.liked.items.len(),
+                self.liked.next.clone(),
+                PageWhat::Liked,
+            ),
+            Tab::Library => match self.library.section {
+                LibrarySection::Albums => (
+                    self.library_cursor,
+                    self.library.albums.items.len(),
+                    self.library.albums.next.clone(),
+                    PageWhat::LibraryAlbums,
+                ),
+                LibrarySection::Artists => (
+                    self.library_cursor,
+                    self.library.artists.items.len(),
+                    self.library.artists.next.clone(),
+                    PageWhat::LibraryArtists,
+                ),
+                LibrarySection::Recent => (
+                    self.library_cursor,
+                    self.library.recent.items.len(),
+                    self.library.recent.next.clone(),
+                    PageWhat::LibraryRecent,
+                ),
+            },
+            _ => return None,
+        };
+        let after = next?;
+        if len == 0 || cursor + MORE_AHEAD < len {
+            return None;
+        }
+        self.loading_more = true;
+        Some(WebJob::More(what, after))
     }
 
     pub fn row_uri(&self, tab: Tab) -> Option<String> {
@@ -2121,6 +2205,36 @@ fn push(app: &mut App, commands: &mut Vec<PlayerCommand>, cmd: PlayerCommand) {
 /// not have to go and fetch again -- but a page for a *page* that has since been
 /// left is dropped, because opening an album and going back to the list must not
 /// leave the list showing the album.
+/// Add a continuation page to the end of the list it belongs to. Only the five
+/// top-level lists are paged this way; the opened pages are one request each.
+fn append_page(app: &mut App, loaded: PageLoaded) {
+    fn extend<T>(list: &mut Page<T>, page: Page<T>) {
+        list.items.extend(page.items);
+        list.next = page.next;
+    }
+    let w = &mut app.web;
+    match loaded {
+        PageLoaded::Playlists(p) => extend(&mut w.playlists, p),
+        PageLoaded::Liked(p) => extend(&mut w.liked, p),
+        PageLoaded::LibraryAlbums(p) => extend(&mut w.library.albums, p),
+        PageLoaded::LibraryArtists(p) => extend(&mut w.library.artists, p),
+        PageLoaded::LibraryRecent(p) => extend(&mut w.library.recent, p),
+        _ => {}
+    }
+}
+
+fn drop_continuation(app: &mut App, what: PageWhat) {
+    let w = &mut app.web;
+    match what {
+        PageWhat::Playlists => w.playlists.next = None,
+        PageWhat::Liked => w.liked.next = None,
+        PageWhat::LibraryAlbums => w.library.albums.next = None,
+        PageWhat::LibraryArtists => w.library.artists.next = None,
+        PageWhat::LibraryRecent => w.library.recent.next = None,
+        _ => {}
+    }
+}
+
 fn apply_page(app: &mut App, _what: PageWhat, loaded: PageLoaded) {
     // A page for a *page* that has since been left is dropped: opening an album
     // and going back to the list must not leave the list showing the album.
@@ -3977,6 +4091,99 @@ mod tests {
         app.web.liked_here = Some(true);
         let app = update(app, Event::WebWrote(Ok(()))).app;
         assert_eq!((app.web.liked_here, app.web.liked_checked), (None, None));
+    }
+
+    fn playlist(id: &str) -> Playlist {
+        Playlist {
+            id: id.into(),
+            name: id.into(),
+            uri: String::new(),
+            description: None,
+            images: Vec::new(),
+            contents: None,
+        }
+    }
+
+    #[test]
+    fn the_next_page_is_asked_for_only_near_the_end_and_only_once() {
+        let mut w = WebState {
+            playlists: Page {
+                items: (0..20).map(|i| playlist(&i.to_string())).collect(),
+                next: Some(Continuation::for_test("20")),
+            },
+            playlist_cursor: 3,
+            ..WebState::default()
+        };
+        assert_eq!(w.next_more(Tab::Playlists), None, "far from the end");
+        w.playlist_cursor = 15;
+        assert_eq!(
+            w.next_more(Tab::Playlists),
+            Some(WebJob::More(
+                PageWhat::Playlists,
+                Continuation::for_test("20")
+            ))
+        );
+        assert_eq!(w.next_more(Tab::Playlists), None, "already on its way");
+        assert_eq!(w.next_more(Tab::Search), None, "Search is not paged");
+    }
+
+    #[test]
+    fn the_end_of_a_list_asks_for_nothing() {
+        let mut w = WebState {
+            playlists: Page {
+                items: vec![playlist("a")],
+                next: None,
+            },
+            ..WebState::default()
+        };
+        assert_eq!(w.next_more(Tab::Playlists), None);
+    }
+
+    #[test]
+    fn a_continuation_page_is_appended_and_hands_over_the_cursor_to_the_next() {
+        let mut app = on(Tab::Playlists);
+        app.web.loading_more = true;
+        app.web.playlists = Page {
+            items: vec![playlist("a")],
+            next: Some(Continuation::for_test("1")),
+        };
+        let app = update(
+            app,
+            Event::MorePage {
+                what: PageWhat::Playlists,
+                result: Ok(PageLoaded::Playlists(Page {
+                    items: vec![playlist("b"), playlist("c")],
+                    next: None,
+                })),
+            },
+        )
+        .app;
+        let names: Vec<_> = app
+            .web
+            .playlists
+            .items
+            .iter()
+            .map(|p| p.id.as_str())
+            .collect();
+        assert_eq!(names, ["a", "b", "c"]);
+        assert!(app.web.playlists.next.is_none() && !app.web.loading_more);
+    }
+
+    #[test]
+    fn a_failed_next_page_gives_up_on_the_rest_and_says_why() {
+        let mut app = on(Tab::Liked);
+        app.web.loading_more = true;
+        app.web.liked.next = Some(Continuation::for_test("1"));
+        let app = update(
+            app,
+            Event::MorePage {
+                what: PageWhat::Liked,
+                result: Err(crate::web::api::ApiError::NotFound),
+            },
+        )
+        .app;
+        assert!(!app.web.loading_more && app.web.liked.next.is_none());
+        assert!(app.toast.is_some());
     }
 
     /// A page that arrives after the user has left it is dropped, so opening an

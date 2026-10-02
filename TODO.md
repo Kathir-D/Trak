@@ -663,8 +663,17 @@ clone at `../shpotify-tui/spotify` on the owner's machine). Behaviour reference 
       > built and tested. Added: a landed write empties the cached queue so the tab refetches on
       > its next visit and shows the track just added. **[owner]**: add to queue on Free to see
       > the Premium line.
-- [ ] 7.9 **Library tab**: saved albums, followed artists, recently played. Done when: paginated
+- [x] 7.9 **Library tab**: saved albums, followed artists, recently played. Done when: paginated
       lists load lazily; tests.
+      > The three Library lists loaded their first page and stopped: **every fetch passed `None`
+      > for the continuation**, so "more ↓" was drawn and unreachable, for Playlists and Liked as
+      > well. `WebState::next_more` now asks for the next page when the cursor is within
+      > `MORE_AHEAD` (5) rows of the end of the list on screen (`WebJob::More` ->
+      > `Event::MorePage`, appended). A failed page gives up on the rest with a toast rather than
+      > retrying every frame; a not-sent page unmarks itself. Also fixed on the way: `submit_web`'s
+      > no-op fallback was `WebWrote(Ok)`, which now re-asks the like check and would have looped on
+      > a failing client — it is `Resize` now. Opened pages (playlist items, artist albums, album
+      > tracks) are still one request each.
 - [ ] 7.10 **Artist page** and **album page** (tracklist, play from track). Back with `esc`. >
       **Albums only — `GET /artists/{id}/top-tracks` was removed in dev mode with no replacement**, so
       the top-tracks half of this task is dead. `GET /artists/{id}/albums` still works. SPEC §6 is

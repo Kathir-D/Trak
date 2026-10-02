@@ -463,6 +463,16 @@ fn event_loop<B: ratatui::backend::Backend>(
         // The playing track's heart (7.7), asked once per track. Skipped while
         // the worker is busy, so a check that could not be sent is not marked as
         // sent and is simply asked on a later pass.
+        // The next page of the list on screen (7.9), when the cursor is near the
+        // end of it.
+        if app.web.connection.connected()
+            && !worker.is_busy()
+            && let Some(job) = app.web.next_more(app.tab)
+            && !submit_web(vec![job], &worker)
+        {
+            // Not sent, so it is not on its way.
+            app.web.loading_more = false;
+        }
         if !worker.is_busy() {
             let playing = app.track().and_then(|t| t.uri.clone());
             let connected = app.web.connection.connected();
@@ -905,6 +915,24 @@ fn run_web(job: WebJob) -> Option<crate::player::actions::WorkerResult> {
                 },
             }
         }
+        WebJob::More(what, after) => {
+            let result = match &what {
+                PageWhat::Playlists => client.playlists(Some(&after)).map(PageLoaded::Playlists),
+                PageWhat::Liked => client.liked_tracks(Some(&after)).map(PageLoaded::Liked),
+                PageWhat::LibraryAlbums => client
+                    .saved_albums(Some(&after))
+                    .map(PageLoaded::LibraryAlbums),
+                PageWhat::LibraryArtists => client
+                    .followed_artists(Some(&after))
+                    .map(PageLoaded::LibraryArtists),
+                PageWhat::LibraryRecent => client
+                    .recently_played(Some(&after))
+                    .map(PageLoaded::LibraryRecent),
+                // Only the five top-level lists are paged.
+                _ => return None,
+            };
+            Event::MorePage { what, result }
+        }
         WebJob::PlaylistItems(id) => Event::Page {
             what: PageWhat::PlaylistItems(id.clone()),
             result: client
@@ -965,26 +993,38 @@ fn run_web(job: WebJob) -> Option<crate::player::actions::WorkerResult> {
 /// commands, for the same reason. A refused job is not queued for later either --
 /// a search the user has already typed past is not worth sending, and a list they
 /// have left is not worth loading.
-fn submit_web(jobs: Vec<WebJob>, worker: &Worker) {
+/// `false` if any job was not sent, so a caller that marked something "on its
+/// way" can unmark it.
+fn submit_web(jobs: Vec<WebJob>, worker: &Worker) -> bool {
+    let mut all_sent = true;
     for job in jobs {
         // `run_web` needs a client, which needs a token. Without one there is
         // nothing to send and the tab has already said so in its own body.
         if !web_ready() {
+            all_sent = false;
             continue;
         }
-        // `run_web` answers `None` only for a job that has nothing to do, and
-        // the worker has to answer with *something*. The something is a Web event
-        // that changes nothing, so a job which turned out to be a no-op cannot
-        // show a stale badge.
+        // `run_web` answers `None` when it has nothing to send -- no client (a
+        // refresh that failed) or a job with no request in it. The worker has to
+        // answer with *something*: a page that was asked for gets its own error
+        // so its "on its way" flag is cleared, and anything else gets `Resize`,
+        // which changes nothing. (Not a landed write: that event re-asks the
+        // like check, and a failing client would then ask every frame.)
+        let fallback = match &job {
+            WebJob::More(what, _) => crate::tui::app::Event::MorePage {
+                what: what.clone(),
+                result: Err(crate::web::api::ApiError::NotConnected),
+            },
+            _ => crate::tui::app::Event::Resize,
+        };
         let accepted = worker.submit(move |_| {
-            run_web(job).unwrap_or(crate::player::actions::WorkerResult::Web(
-                crate::tui::app::Event::WebWrote(Ok(())),
-            ))
+            run_web(job).unwrap_or(crate::player::actions::WorkerResult::Web(fallback))
         });
         if !accepted {
-            break;
+            return false;
         }
     }
+    all_sent
 }
 
 /// What a tab needs the first time it is shown, if anything.
