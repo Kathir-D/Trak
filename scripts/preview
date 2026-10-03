@@ -1,0 +1,74 @@
+#!/bin/sh
+# Build trak from source and run the TUI, for looking at UI changes.
+#
+#     scripts/preview              # build and run the TUI
+#     scripts/preview status       # build and run a one-shot command
+#     scripts/preview --watch      # rebuild and relaunch on every save
+#
+# Why this exists: the installed `trak` is the released binary, so a UI change is
+# invisible until a release. This runs the working tree instead. It shares the
+# real config and token (~/.config/trak), so the Web API tabs work and there is
+# nothing to log into twice.
+#
+# **Release, not debug.** The debug build is slow enough that the animations look
+# broken, which is exactly the wrong thing to judge a UI by. `--release` is the
+# build that matters.
+#
+# To see a change: edit, ^C, run it again. `scripts/preview --watch` does the
+# rebuild for you and relaunches when the build finishes.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$root"
+
+# rustup's shims are not on PATH in a login shell that never read a profile.
+if ! command -v cargo >/dev/null 2>&1; then
+    PATH="$HOME/.cargo/bin:$PATH"
+    export PATH
+fi
+
+watch=0
+for arg in "$@"; do
+    if [ "$arg" = "--watch" ]; then
+        watch=1
+    fi
+done
+
+# `--version` and friends are the binary's own arguments, not cargo's.
+passthrough=""
+for arg in "$@"; do
+    case "$arg" in
+        --watch) ;;
+        *) passthrough="$passthrough $arg" ;;
+    esac
+done
+
+build() {
+    cargo build --release --quiet
+}
+
+if [ "$watch" -eq 1 ]; then
+    # Rebuild and relaunch on every save. The loop is deliberately dumb: build,
+    # run, wait for the file to change, build again.
+    echo "preview: watching src/ -- edit and save, or ^C to stop" >&2
+    trap 'exit 0' INT TERM
+    while :; do
+        build
+        ./target/release/trak $passthrough &
+        trak_pid=$!
+        # Wait for the next change to any source file.
+        snapshot=$(find src Cargo.toml -newer target/release/trak -type f 2>/dev/null | sort)
+        while :; do
+            sleep 1
+            now=$(find src Cargo.toml -newer target/release/trak -type f 2>/dev/null | sort)
+            if [ "$now" != "$snapshot" ]; then
+                break
+            fi
+            kill -0 "$trak_pid" 2>/dev/null || break
+        done
+        wait "$trak_pid" 2>/dev/null || true
+    done
+fi
+
+build
+exec ./target/release/trak $passthrough

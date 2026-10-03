@@ -2145,8 +2145,18 @@ impl WebState {
 /// How many rows the focused tab is showing. Zero means there is nothing to move
 /// a cursor over, which is a different thing from a tab with rows the cursor is
 /// not in yet.
+///
+/// **An open page is its own list.** An album, an artist or a playlist opened with
+/// `enter` or `o` has rows and a cursor of its own, and the tab's own list is not
+/// on screen while it is open -- so counting the tab's rows here left the arrows
+/// moving a cursor nobody could see, and the tracks on that page were reachable
+/// only with the mouse (owner, 2026-10-03: "make sure everything can be
+/// controlled with only a keyboard"). The page wins while it is open.
 pub fn web_rows(app: &App) -> usize {
     let web = &app.web;
+    if web.open.is_some() {
+        return web.open_rows().len();
+    }
     match app.tab {
         Tab::Search => web.group_rows(web.group).len(),
         Tab::Playlists => web.playlists.items.len(),
@@ -2164,6 +2174,9 @@ pub fn web_rows(app: &App) -> usize {
 /// Which row of the focused tab the cursor is on.
 pub fn web_cursor(app: &App) -> usize {
     let web = &app.web;
+    if web.open.is_some() {
+        return web.open_cursor;
+    }
     match app.tab {
         Tab::Search => web.group_row[web.group],
         Tab::Playlists => web.playlist_cursor,
@@ -2187,6 +2200,10 @@ fn web_move(app: &mut App, down: bool, n: usize) {
     } else {
         cur.saturating_sub(n)
     };
+    if app.web.open.is_some() {
+        app.web.open_cursor = next;
+        return;
+    }
     let tab = app.tab;
     let web = &mut app.web;
     match tab {
@@ -2766,6 +2783,15 @@ mod tests {
     fn step(app: App, e: Event) -> (App, Vec<PlayerCommand>) {
         let u = update(app, e);
         (u.app, u.commands)
+    }
+
+    /// An app sitting on a Web API tab, connected, so the tab keys are the ones
+    /// under test rather than the "not connected" toasts.
+    fn on_tab(tab: Tab) -> App {
+        let mut app = with_track();
+        app.tab = tab;
+        app.web.connection = Connection::Connected;
+        app
     }
 
     #[test]
@@ -3439,6 +3465,100 @@ mod tests {
         assert_eq!(next.lyrics.status, LyricsStatus::Idle, "looked up again");
         assert_eq!(next.lyrics.lyrics, None, "and not the old words");
         assert_eq!(next.marquee_offset, 0);
+    }
+
+    /// **`j`/`k` reach an open album, artist or playlist page** (owner, 2026-10-03:
+    /// everything must work from the keyboard alone). The page's tracks used to be
+    /// reachable only by clicking them: `web_move` counted the *tab's* rows while
+    /// the page was what was on screen, so the arrows moved a cursor nobody could
+    /// see and `enter` played whichever row the mouse had last left.
+    #[test]
+    fn the_arrows_move_through_an_open_page() {
+        let mut app = on_tab(Tab::Search);
+        app.web.open = Some(Open::Album("alb1".into()));
+        let track = |name: &str| crate::web::api::Track {
+            id: name.to_lowercase(),
+            name: name.into(),
+            uri: format!("spotify:track:{name}"),
+            duration_ms: 200_000,
+            track_number: None,
+            disc_number: None,
+            artists: vec![crate::web::api::Artist {
+                id: "ar1".into(),
+                name: "A".into(),
+                uri: "spotify:artist:ar1".into(),
+                images: Vec::new(),
+            }],
+            album: None,
+        };
+        app.web.open_track_page = vec![track("One"), track("Two")];
+        assert_eq!(web_rows(&app), 2, "the page's rows, not the tab's");
+        assert_eq!(web_cursor(&app), 0);
+
+        // Down focuses the list, then moves it.
+        let (app, _) = press(app.clone(), 'j');
+        assert!(app.web.list_focus);
+        assert_eq!(web_cursor(&app), 0, "focusing does not skip a row");
+        let (app, _) = press(app, 'j');
+        assert_eq!(web_cursor(&app), 1, "and then the arrows move it");
+        // Enter plays the row the keyboard is on -- the whole point.
+        let (_, cmds) = press(app, '\n');
+        assert_eq!(
+            cmds,
+            vec![PlayerCommand::PlayUri("spotify:track:Two".into())],
+            "enter plays the row under the cursor, with no mouse involved"
+        );
+    }
+
+    /// **The down arrow focuses into a tab, the up arrow off its top row leaves
+    /// it**, and a tab with nothing in it has nothing to focus.
+    #[test]
+    fn down_focuses_into_a_list_and_up_leaves_it() {
+        let mut app = on_tab(Tab::Playlists);
+        assert_eq!(web_rows(&app), 0);
+
+        // Nothing to move to: focus stays off rather than pretending.
+        let (mut app, _) = press(app.clone(), 'j');
+        assert!(!app.web.list_focus, "an empty tab has no list to focus");
+
+        let playlist = |id: &str, name: &str| crate::web::api::Playlist {
+            id: id.into(),
+            name: name.into(),
+            uri: format!("spotify:playlist:{id}"),
+            description: None,
+            images: Vec::new(),
+            // `Some` means the track list came with it, which is what decides
+            // whether trak may add to it.
+            contents: Some(crate::web::api::PlaylistContents {
+                total: Some(2),
+                items: Vec::new(),
+            }),
+        };
+        app.web.playlists = crate::web::api::Page {
+            items: vec![playlist("p1", "One"), playlist("p2", "Two")],
+            next: None,
+        };
+        let (app, _) = press(app, 'j');
+        assert!(app.web.list_focus, "down focuses in");
+        let (app, _) = press(app, 'j');
+        assert_eq!(web_cursor(&app), 1);
+        let (app, _) = press(app, 'k');
+        assert_eq!(web_cursor(&app), 0, "still in the list");
+        assert!(app.web.list_focus);
+        let (app, _) = press(app, 'k');
+        assert!(!app.web.list_focus, "up off the top row leaves it");
+
+        // Escape leaves the list before it leaves the tab.
+        let (app, _) = press(app.clone(), 'j');
+        let (app, _) = press(app, '\x1b');
+        assert!(!app.web.list_focus);
+        assert_eq!(app.tab, Tab::Playlists, "and the tab is still there");
+
+        // Changing tab hands the arrows back to the dashboard.
+        let (app, _) = press(app, 'j');
+        assert!(app.web.list_focus);
+        let (app, _) = press(app, crate::tui::app::ARROW_RIGHT);
+        assert!(!app.web.list_focus, "the focus belonged to that tab");
     }
 
     /// The volume meter is a slider: where you click is the volume you get.
