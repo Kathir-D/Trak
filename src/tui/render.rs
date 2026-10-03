@@ -1519,19 +1519,24 @@ fn lyrics_lines<'a>(app: &App, theme: &'a Theme) -> Vec<Line<'a>> {
     use crate::tui::app::LyricsStatus;
 
     let dim = Theme::dim();
-    let wrap_hint = |t: &str| {
+    // A heading and one line of explanation. Two arguments rather than one plus a
+    // fixed footer, because "no lyrics for this one" used to be printed *and* then
+    // printed again as the explanation of itself.
+    let note = |heading: &str, detail: &str| {
         vec![
-            Line::from(Span::styled(t.to_string(), dim)),
-            Line::from(""),
             Line::from(Span::styled(
-                "no lyrics for this one",
+                heading.to_string(),
                 dim.add_modifier(Modifier::ITALIC),
             )),
-            Line::from(Span::styled(
-                "LRCLIB has most songs but not all of them",
-                dim,
-            )),
+            Line::from(""),
+            Line::from(Span::styled(detail.to_string(), dim)),
         ]
+    };
+    let no_lyrics = || {
+        note(
+            "no lyrics for this one",
+            "LRCLIB has most songs but not all of them",
+        )
     };
 
     match &app.lyrics.status {
@@ -1553,7 +1558,7 @@ fn lyrics_lines<'a>(app: &App, theme: &'a Theme) -> Vec<Line<'a>> {
                 )),
             ]
         }
-        LyricsStatus::NotFound => wrap_hint("no lyrics for this one"),
+        LyricsStatus::NotFound => no_lyrics(),
         LyricsStatus::Failed(why) => {
             let mut out = vec![Line::from(Span::styled(
                 why.clone(),
@@ -1565,13 +1570,13 @@ fn lyrics_lines<'a>(app: &App, theme: &'a Theme) -> Vec<Line<'a>> {
         }
         LyricsStatus::Ready => {
             let Some(lyrics) = app.lyrics.lyrics.as_ref() else {
-                return wrap_hint("nothing to show");
+                return no_lyrics();
             };
             if lyrics.instrumental {
-                return wrap_hint("this one is instrumental");
+                return note("this one is instrumental", "there are no words to show");
             }
             if lyrics.lines.is_empty() {
-                return wrap_hint("no lyrics for this one");
+                return no_lyrics();
             }
             let pos = app.interpolated_position();
             let active = lyrics
@@ -3894,6 +3899,21 @@ mod tests {
 
     /// TODO 6.3: while the user holds the scroll, the tab says so — a view that
     /// quietly stopped following the song looks like a bug.
+    /// "no lyrics for this one" is the heading, not also the explanation: it used
+    /// to be printed twice, which reads as two different pieces of news.
+    #[test]
+    fn a_missing_lyric_says_it_once() {
+        let mut app = lyrics_app(0, None);
+        app.tab = Tab::Lyrics;
+        let text = full_text(&render(100, 30, &app).0);
+        assert_eq!(
+            text.matches("no lyrics for this one").count(),
+            1,
+            "said twice:\n{text}"
+        );
+        assert!(text.contains("LRCLIB has most songs"), "{text}");
+    }
+
     /// A lyric line is as long as the song says it is, and the side tab has no
     /// sideways scroll: a long line used to be cut off at the pane's edge with
     /// the rest of the words unreachable (owner, 2026-10-02).

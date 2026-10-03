@@ -16,3 +16,7 @@
 *.p12
 # Local agent settings
 .claude/settings.local.json
+
+# Python bytecode from the scripts/
+__pycache__/
+*.pyc

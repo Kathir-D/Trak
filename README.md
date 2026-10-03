@@ -13,8 +13,12 @@
 </p>
 
 <p align="center">
-  <img src="docs/images/trak-demo.gif" width="760" alt="Trak in a terminal: album art and the session history, then synced lyrics on the Lyrics tab, the visualizer cycling through waveform, circular and spectrum, full-screen lyrics, and the settings screen.">
-  <br><sub>Version B (no Client ID, Free account) in <a href="https://cmux.dev">cmux</a>, which draws the cover with the Kitty graphics protocol.</sub>
+  <img src="docs/images/trak-demo.gif" width="760" alt="Trak in a terminal: album art and the session history, then the visualizer through three styles, the volume, synced lyrics on the Lyrics tab, full-screen lyrics over the darkened cover, and the settings screen.">
+  <br><sub>Recorded by <code>scripts/record-demo.py</code> against a scripted player, so the frames
+  are repeatable; the cover is the real artwork from Spotify's CDN, the accent is taken from it and
+  the lyrics are the real synced ones from LRCLIB. This is the half-block path, which every terminal
+  can draw — in <a href="https://cmux.dev">cmux</a> the same cover is drawn with the Kitty graphics
+  protocol instead.</sub>
 </p>
 
 > **Status: pre-alpha.** Everything below describes what is built and tested. One part has not

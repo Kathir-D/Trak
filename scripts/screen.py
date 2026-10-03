@@ -36,9 +36,59 @@ CUBE = [
     (255, 255, 255),
 ]
 
+# The rest of the xterm 256-colour palette: 16-231 is the 6x6x6 cube and 232-255 the
+# greys. Without it every 256-colour index above 15 renders as the same grey, which
+# makes a cover look like a placeholder -- the half-block art is *all* 256-colour
+# indices, so it is the one thing this has to get right.
+STEPS = (0, 95, 135, 175, 215, 255)
+PALETTE = list(CUBE)
+for r in STEPS:
+    for g in STEPS:
+        for b in STEPS:
+            PALETTE.append((r, g, b))
+for i in range(24):
+    v = 8 + i * 10
+    PALETTE.append((v, v, v))
+
+
+def palette_index(n):
+    return PALETTE[n] if 0 <= n < len(PALETTE) else None
+
+
+def parse_osc_colour(value):
+    """`rgb:1e1e/1e1e/1e1e` or `#1e1e1e` into an (r, g, b) tuple."""
+    v = value.strip()
+    if v.startswith("rgb:"):
+        parts = v[4:].split("/")
+        try:
+            out = []
+            for p in parts[:3]:
+                p = p.split("(")[0]
+                if len(p) in (1, 2, 4):
+                    out.append(int(p * 2, 16) if len(p) in (1, 3) else int(p, 16))
+                else:
+                    out.append(int(p[:2], 16))
+            return tuple(min(255, max(0, c)) for c in out)
+        except ValueError:
+            return None
+    if v.startswith("#") and len(v) >= 7:
+        try:
+            return tuple(int(v[i : i + 2], 16) for i in (1, 3, 5))
+        except ValueError:
+            return None
+    return None
+
 
 def cell_hex(r, g, b):
     return f"{r:02x}{g:02x}{b:02x}"
+
+
+# A whole escape sequence, for the tail check above: CSI, OSC, the Kitty graphics
+# APC, a character-set switch and the two one-letter sequences crossterm emits.
+COMPLETE_ESCAPE = re.compile(
+    rb"\x1b(?:\[[0-9;?]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|_[^\x1b]*\x1b\\|[()][B0]|[>=])",
+    re.S,
+)
 
 
 class Screen:
@@ -51,6 +101,9 @@ class Screen:
         self.bg = [[None] * w for _ in range(h)]
         self.bold = [[False] * w for _ in range(h)]
         self.cx = self.cy = 0
+        # Set when trak asks for the terminal background, and what it answered.
+        self.queried_background = False
+        self.background = None
         self.cur_fg = self.cur_bg = None
         self.cur_bold = False
         self.pending = b""
@@ -103,8 +156,7 @@ class Screen:
                     rgb = (params[i + 2], params[i + 3], params[i + 4])
                     i += 4
                 elif params[i + 1] == 5 and i + 2 < len(params):
-                    n = params[i + 2]
-                    rgb = CUBE[n % 16] if n < 16 else (128, 128, 128)
+                    rgb = palette_index(params[i + 2]) or CUBE[7]
                     i += 2
                 else:
                     i += 1
@@ -115,6 +167,17 @@ class Screen:
                     self.cur_bg = rgb
             i += 1
 
+    def osc(self, seq):
+        """One OSC string. Trak only asks about the background (OSC 11)."""
+        body = seq[2:].rstrip(b"\x07").rstrip(b"\x1b\\")
+        if body.startswith(b"11;"):
+            value = body[3:].decode("utf-8", "replace")
+            if value.startswith("?"):
+                # A query, not a reply: there is no terminal here to answer it.
+                self.queried_background = True
+                return
+            self.background = parse_osc_colour(value)
+
     def feed(self, data):
         # A multi-byte glyph can be split across two reads, and decoding half of
         # one turns the rest of the stream into mojibake -- which then desyncs the
@@ -122,14 +185,26 @@ class Screen:
         # the rest of it arrives.
         data = self.pending + data
         self.pending = b""
-        for cut in range(len(data), max(len(data) - 4, 0), -1):
+        # Two kinds of tail have to be held back, and holding back only the first
+        # is what made this tool lie: a `38;5;` split across two reads parsed as
+        # text, so a screen came out with colour codes printed on it and the layout
+        # looked torn when it was not.
+        cut = None
+        for c in range(len(data), max(len(data) - 4, 0), -1):
             try:
-                data[:cut].decode("utf-8")
+                data[:c].decode("utf-8")
             except UnicodeDecodeError:
                 continue
-            self.pending = data[cut:]
-            data = data[:cut]
+            cut = c
             break
+        # No prefix decoded: the whole chunk is the front of a glyph, so hold it.
+        cut = 0 if cut is None else cut
+        # An escape sequence whose tail has not arrived yet.
+        tail = data.rfind(b"\x1b")
+        if tail != -1 and cut > tail and not COMPLETE_ESCAPE.match(data[tail:]):
+            cut = tail
+        self.pending = data[cut:]
+        data = data[:cut]
         i, n = 0, len(data)
         while i < n:
             b = data[i]
@@ -157,7 +232,16 @@ class Screen:
                 if m:
                     i += m.end()
                     continue
-                m = re.match(rb"\x1b[()][B0]|\x1b[=>]|\x1b\][^\x07]*\x07", data[i:], re.S)
+                # An OSC string, ended by BEL or by ST (`ESC \`). trak asks the
+                # terminal for its background with OSC 11 at startup, and an OSC
+                # that is not consumed leaks its text into the grid and desyncs
+                # everything after it -- which looks exactly like a layout bug.
+                m = re.match(rb"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)", data[i:], re.S)
+                if m:
+                    self.osc(data[i : i + m.end()])
+                    i += m.end()
+                    continue
+                m = re.match(rb"\x1b[()][B0]|\x1b[=>]", data[i:], re.S)
                 if m:
                     i += m.end()
                     continue

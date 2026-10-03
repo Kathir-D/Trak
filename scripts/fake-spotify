@@ -1,0 +1,67 @@
+#!/usr/bin/env python3
+"""A fake `osascript` for Trak, so a demo or a measurement is repeatable.
+
+Answers like Spotify does, in the times `docs/APPLESCRIPT.md` §4 records (431 ms
+for the batched read, ~120 ms for a write, ~140 ms for a single property), keeps
+the volume in memory so a read-back reflects a write, and logs every call with a
+timestamp. `TRAK_OSASCRIPT=$PWD/scripts/fake-spotify trak` runs against it.
+
+Set `STUB_PAUSED=1` for a stopped dashboard, and `STUB_LOG=/dev/null` to stop the
+call log. `STUB_READ` / `STUB_WRITE` / `STUB_VOL_READ` are the delays in seconds.
+"""
+import os
+import sys
+import time
+
+READ_S = float(os.environ.get("STUB_READ", "0.43"))
+WRITE_S = float(os.environ.get("STUB_WRITE", "0.12"))
+LOG = os.environ.get("STUB_LOG", "/tmp/trak-stub.log")
+STATE = os.environ.get("STUB_STATE", "")
+
+script = sys.stdin.read()
+now = time.time()
+with open(LOG, "a") as fh:
+    tag = ("VOL_WRITE" if "sound volume to" in script
+           else "VOL_READ" if ("sound volume" in script and "player state" not in script)
+           else "STATE_READ" if "current track" in script
+           else "OTHER")
+    fh.write(f"{now:.4f} {tag}\n")
+
+# The volume has to survive between calls, and each call is a separate process,
+# so it lives in a file rather than in the environment.
+VOL_FILE = os.environ.get("STUB_VOL_FILE", "/tmp/trak-fake-spotify-vol")
+try:
+    with open(VOL_FILE) as fh:
+        vol = int(fh.read().strip() or 40)
+except (OSError, ValueError):
+    vol = 40
+try:
+    with open(VOL_FILE, "w") as fh:
+        fh.write(str(vol))
+except OSError:
+    pass
+if "sound volume to" in script:
+    # `set sound volume to N`
+    try:
+        vol = int(script.split("sound volume to")[1].strip().split()[0])
+    except Exception:
+        pass
+    time.sleep(WRITE_S)
+    print("ok")
+    sys.exit(0)
+if "current track" not in script and "sound volume" in script:
+    # One property, one Apple Event: ~140 ms, not the 430 ms of the full read.
+    time.sleep(float(os.environ.get("STUB_VOL_READ", "0.14")))
+    print(vol)
+    sys.exit(0)
+
+time.sleep(READ_S)
+playback = "paused" if os.environ.get("STUB_PAUSED") else "playing"
+# The position advances with the clock so the bar really moves between reads.
+started = float(os.environ.get("STUB_START", "0") or 0)
+position = 12.5 + (time.time() - started) if started else 12.5
+fields = [playback, f"{position:.6f}", str(vol), "false", "false", "Dancing with your eyes closed",
+          "Jane Remover", "Dancing with your eyes closed", "Jane Remover", "231000",
+          "1", "3", "48", "0", "https://i.scdn.co/image/ab67616d0000b2738a821784ac3e69e691d4945f",
+          "https://open.spotify.com/track/1", "spotify:track:1"]
+print(STATE or "\x1f".join(fields))
