@@ -1475,7 +1475,12 @@ fn draw_tabs(f: &mut Frame, area: Rect, app: &App, theme: &Theme, regions: &mut 
         }
     };
     let lines_len = lines.len();
-    f.render_widget(Paragraph::new(lines), body_rect(body, lines_len));
+    // Lyrics wrap; lists do not. A list row is one track and the columns are
+    // already chosen to fit, while a lyric line is whatever the song says and a
+    // narrow pane used to cut it off mid-word with no way to see the rest --
+    // there is no sideways scroll for a tab (owner, 2026-10-02).
+    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+    f.render_widget(paragraph, body_rect(body, lines_len));
 }
 
 /// Where a pane's lines are drawn when they do not fill it.
@@ -3887,6 +3892,30 @@ mod tests {
 
     /// TODO 6.3: while the user holds the scroll, the tab says so — a view that
     /// quietly stopped following the song looks like a bug.
+    /// A lyric line is as long as the song says it is, and the side tab has no
+    /// sideways scroll: a long line used to be cut off at the pane's edge with
+    /// the rest of the words unreachable (owner, 2026-10-02).
+    #[test]
+    fn a_long_lyric_line_wraps_instead_of_being_cut_off() {
+        let long = "and the whole of the rest of it goes on and on well past the edge of the pane";
+        let mut app = lyrics_app(3, None);
+        app.lyrics.lyrics.as_mut().unwrap().lines[1].text = long.into();
+        app.tab = Tab::Lyrics;
+        // A narrow pane, which is where it showed up.
+        for (w, h) in [(76u16, 20u16), (100, 30), (140, 40)] {
+            let (buf, _) = render(w, h, &app);
+            let text = full_text(&buf);
+            let words: Vec<&str> = long.split(' ').collect();
+            // The first words and the last words are both on screen: nothing was
+            // cut off, because the line wrapped.
+            assert!(text.contains(words[0]), "{w}x{h}: {text}");
+            assert!(
+                text.contains(words[words.len() - 1]),
+                "{w}x{h}: the line was cut off, not wrapped:\n{text}"
+            );
+        }
+    }
+
     #[test]
     fn the_lyrics_tab_says_when_the_follow_is_paused() {
         let mut app = lyrics_app(20, Some(9));

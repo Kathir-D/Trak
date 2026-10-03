@@ -760,11 +760,14 @@ impl Connection {
     pub fn notice(self) -> Option<&'static str> {
         match self {
             Connection::Connected => None,
+            // The keys, not the command: the person reading this is looking at
+            // the TUI, and `,` then `s` is a walk through it (owner,
+            // 2026-10-02).
             Connection::NoClientId => {
-                Some("add a Spotify Client ID in `trak config` for search and playlists")
+                Some("press , then s, to connect Spotify -- it walks you through it")
             }
-            Connection::LoggedOut => Some("connect Spotify in `trak config`"),
-            Connection::NeedsRelogin => Some("reconnect Spotify in `trak config`"),
+            Connection::LoggedOut => Some("press , then s, to log in to Spotify"),
+            Connection::NeedsRelogin => Some("press , then s, to reconnect Spotify"),
         }
     }
 }
@@ -4318,7 +4321,7 @@ mod tests {
             let (app, cmds, web) = key(app, c);
             assert!(cmds.is_empty() && web.is_empty(), "{c}");
             let text = app.toast.map(|t| t.text).unwrap_or_default();
-            assert!(text.contains("Client ID"), "{c}: {text}");
+            assert!(text.contains("press , then s"), "{c}: {text}");
 
             let (app, _, web) = key(on(Tab::History), c);
             assert!(web.is_empty(), "{c}");
@@ -4971,13 +4974,16 @@ mod tests {
     #[test]
     fn only_a_disconnected_client_has_something_to_say() {
         assert_eq!(Connection::Connected.notice(), None);
+        // Every one of them names the keys rather than the command: whoever reads
+        // it is looking at the TUI, and `,` then `s` is the way in from there.
         for (c, needle) in [
-            (Connection::NoClientId, "Client ID"),
-            (Connection::LoggedOut, "connect"),
+            (Connection::NoClientId, "connect Spotify"),
+            (Connection::LoggedOut, "log in"),
             (Connection::NeedsRelogin, "reconnect"),
         ] {
             let notice = c.notice().expect("a notice");
             assert!(notice.contains(needle), "{c:?} says {notice:?}");
+            assert!(notice.contains("press , then s"), "{c:?} says {notice:?}");
             assert_eq!(notice.lines().count(), 1, "toasts are one line");
         }
     }

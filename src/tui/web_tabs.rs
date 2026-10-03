@@ -1195,9 +1195,9 @@ mod tests {
     fn an_unconnected_client_is_told_in_every_tab() {
         for tab in Tab::VERSION_A {
             for (connection, want) in [
-                (Connection::NoClientId, "add a Spotify Client ID"),
-                (Connection::LoggedOut, "connect Spotify"),
-                (Connection::NeedsRelogin, "reconnect Spotify"),
+                (Connection::NoClientId, "press , then s"),
+                (Connection::LoggedOut, "press , then s"),
+                (Connection::NeedsRelogin, "press , then s"),
             ] {
                 let mut app = app_on(tab);
                 app.web.connection = connection;
