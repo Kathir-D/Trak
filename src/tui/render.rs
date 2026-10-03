@@ -458,7 +458,9 @@ pub enum GraphicsProtocol {
 /// Written and read on stdin/stdout directly rather than through crossterm,
 /// before any event is read: a reply that arrives while the event reader is
 /// looking would be taken for a keypress (`tui/colour.rs` does the same for its
-/// background query, and the reason is written there).
+/// background query, and the reason is written there). The price, paid once and
+/// shared with that query, is that a key pressed in the first fraction of a second
+/// is read here and dropped -- a launch is not when anybody is typing.
 pub fn query_cell_size() -> Option<(u16, u16)> {
     use std::io::Write;
     use std::os::fd::AsRawFd;
