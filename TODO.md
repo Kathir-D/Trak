@@ -1119,6 +1119,31 @@ built on, which is the whole reason this phase exists.
       > Premium account still gets the real queue from the API, unchanged. `docs/WEB-API.md` §2
       > already records that only the **add** is Premium-gated; this is the read's empty case.
 
+- [x] 13.11 **One cover, one colour scheme** (owner, 2026-10-03: "make sure when tracks change the
+      whole color scheme changes to follow as specified -- only some colors changed to follow picture
+      and some are still of prev song").
+      > There were **two** colour extractors: `accent::dominant_colour` for the accent (borders, the
+      > status line, the focused title) and `accent::palette` for the ramp (the bar, the meter, the
+      > gradient rule). A cover could therefore tint one green and the other orange. Worse, when a
+      > cover had **no usable colour** the old code kept the *previous* song's ramp while the accent
+      > fell back to green -- a blue-grey sleeve left an orange bar under green borders. Now there is
+      > one extractor: `set_art_colour` builds the accent *and* the ramp from `accent::palette`, so
+      > `accent_colour() == palette.primary` always, and a cover with no usable hue falls back to one
+      > flat colour everywhere instead of a synthetic green/teal/orange spread.
+      > `accent::palette` no longer applies its synthetic hue rotation to the no-colour fallback --
+      > only to a cover that really did give one hue.
+- [x] 13.12 **`accent::mix` was a no-op with a named colour.** It destructured `Color::Rgb` and
+      returned its first argument for anything else, so every "mix towards white" and "mix towards
+      > black" in the program was silently doing nothing -- including the tint on the focused tab
+      > that was supposed to stop the white box (owner: "remove the ugly white box when on
+      > selection"). Named colours are now converted to RGB first, and `mix`'s luma question got a
+      > second helper: `brightness`, because `luma_of` is WCAG *relative* luminance (gamma
+      > linearised, for contrast ratios) and calls a bright pink "dark".
+- [x] 13.13 A focused title can never be a white box. Its background is the ramp colour taken toward
+      > black (or lifted toward white when the colour is nearly black), deepening along the run so
+      > the block is lit from one side even when the cover has no hue to gradient through. Asserted
+      > over six palettes from near-black to near-white, and against the *flat block* case.
+
 - [x] 13.9 **The right pane's border is not grey, and focus is visible** (owner, 2026-10-03: "instead
       of a gray border on the right tab, make it something more interesting it doesn't have to be the
       same as right tab but not gray. Keep not said text gray tho and the one being said is colorful

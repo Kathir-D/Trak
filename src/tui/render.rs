@@ -2003,11 +2003,21 @@ fn tab_strip(app: &App, theme: &Theme, avail: usize) -> TabStrip {
 /// flat one, which reads as "grey-ish tab that happens to be highlighted" next to
 /// the album's own colours elsewhere on the screen (owner, 2026-10-03: "make sure
 /// there is something someone can notice if it is in focus, like turn it from gray
-/// to the gradient"). One span per character, each carrying the next colour of the
-/// album's ramp with the matching readable text colour under it, so the strip is
-/// the cover's palette rather than a single swatch of it.
+/// to the gradient which I said").
 ///
-/// One span per character is affordable because this is the focused tab only: ten
+/// **The background is the ramp colour taken most of the way to black.** The first
+/// version used `text_on(colour)` for the text colour and let the ramp colour be the
+/// background, which is right for contrast and wrong for looks: a cover with a pale
+/// colour in its palette put a **white box** around the tab (owner: "remove the ugly
+/// white box when on selection"). A block that is always a deep tint of the album's
+/// own colour cannot come out white, cannot come out black, and reads as selected on
+/// a light terminal as well as a dark one without trak knowing which it is on.
+///
+/// (That fix did not work at all until `accent::mix` learned to mix with a *named*
+/// colour -- it had been returning its first argument for `Color::Black`, which is
+/// what this is made of.)
+///
+/// One span per character is affordable because this is the focused title only: ten
 /// or so cells, once a frame, and only when the tab changes.
 pub fn gradient_title(text: &str, theme: &Theme) -> Vec<Span<'static>> {
     let chars: Vec<char> = text.chars().collect();
@@ -2017,11 +2027,39 @@ pub fn gradient_title(text: &str, theme: &Theme) -> Vec<Span<'static>> {
         .enumerate()
         .map(|(i, c)| {
             let colour = ramp[(i * ramp.len()) / chars.len().max(1)];
+            // The tint deepens along the run, so the block is lit from the left even
+            // when the palette has no hue to gradient through -- a cover that is all
+            // one colour would otherwise give one flat slab, which is the thing this
+            // was written to stop being.
+            let across = i as f32 / chars.len().saturating_sub(1).max(1) as f32;
+            // **Towards black if the colour is bright, towards white if it is dark**,
+            // so the block lands in a band that is visible on any background: a
+            // cover that is nearly black would otherwise give a *black* block, which
+            // is the same invisible selection in the other direction.
+            // `brightness`, not `luma_of`: WCAG relative luminance is gamma
+            // linearised for contrast ratios and answers a different question, so a
+            // bright pink measured "dark" and came out as a pale box. Two earlier
+            // versions of this line got it wrong -- one compared a 0..1 value with
+            // 90, and one used the WCAG luma -- and both put the white box back.
+            // The dark band is the wide one: only a colour this dark (below about a
+            // fifth) needs lifting, and everything else is darkened. A higher cut-off
+            // than that caught Spotify green -- brightness 0.42, which looks like a
+            // mid green -- and lightened it into a pale box instead.
+            let to = if crate::accent::brightness(colour) > 0.22 {
+                Color::Black
+            } else {
+                Color::White
+            };
+            let amount = if matches!(to, Color::Black) {
+                0.55 + 0.25 * across
+            } else {
+                0.34 - 0.22 * across
+            };
             Span::styled(
                 c.to_string(),
                 Style::default()
-                    .fg(colour)
-                    .bg(theme.text_on_colour(colour))
+                    .fg(crate::accent::mix(colour, Color::White, 0.75))
+                    .bg(crate::accent::mix(colour, to, amount))
                     .add_modifier(Modifier::BOLD),
             )
         })
@@ -2232,8 +2270,8 @@ fn draw_footer_keys(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         vec![
             ("space", "play/pause"),
             ("n/p", "next/prev"),
-            ("h/l", "seek"),
             ("←/→", "tab"),
+            ("↑/↓", "list"),
             ("+/-", "vol"),
             ("s", "shuffle"),
             ("r", "repeat"),
@@ -4038,6 +4076,61 @@ mod tests {
             "focused is the plain accent"
         );
         let _ = (top, bottom, left, right);
+    }
+
+    /// **A focused title is never a white box** (owner, 2026-10-03: "remove the
+    /// ugly white box when on selection").
+    ///
+    /// The first version let the ramp colour *be* the background and asked
+    /// `text_on` for the text, which is right for contrast and wrong for looks: a
+    /// cover with a pale colour in its palette produced a near-white block around
+    /// the tab. Asserted over the whole palette space rather than one cover, because
+    /// the pale case is the whole point.
+    #[test]
+    fn a_focused_title_is_a_deep_tint_never_a_white_box() {
+        use crate::accent::Palette;
+        for (r, g, b) in [
+            (250u8, 250u8, 250u8),
+            (250, 120, 200),
+            (120, 250, 120),
+            (250, 250, 120),
+            (10, 10, 10),
+            (29, 185, 84),
+        ] {
+            let theme = Theme {
+                palette: Palette::from_accent(Color::Rgb(r, g, b)),
+                ..Theme::default()
+            };
+            let spans = gradient_title("[2]Playlists", &theme);
+
+            assert_eq!(spans.len(), 12);
+            for span in &spans {
+                let Color::Rgb(bg_r, bg_g, bg_b) = span.style.bg.unwrap_or(Color::Reset) else {
+                    panic!("no background: {span:?}");
+                };
+                // Nowhere near white, and not pure black either: a black block is
+                // the same "invisible selection" problem in the other direction.
+                let luma = 0.299 * bg_r as f64 + 0.587 * bg_g as f64 + 0.114 * bg_b as f64;
+                assert!(
+                    (12.0..=170.0).contains(&luma),
+                    "a pale palette ({r},{g},{b}) gave a background of luma {luma}: \
+                     {span:?}"
+                );
+                // And the ramp is still in there: the cells are not all one colour,
+                // which is the whole point of a gradient run.
+                let colours: Vec<_> = spans
+                    .iter()
+                    .map(|s| format!("{:?}", s.style.bg.unwrap_or(Color::Reset)))
+                    .collect();
+                let _ = colours;
+            }
+            let distinct: std::collections::HashSet<_> =
+                spans.iter().map(|s| format!("{:?}", s.style.bg)).collect();
+            assert!(
+                distinct.len() > 1,
+                "({r},{g},{b}) produced one flat block, not a gradient: {distinct:?}"
+            );
+        }
     }
 
     /// **The art scales with the pane; the text does not** (owner, 2026-10-03:

@@ -62,6 +62,15 @@ its pane, a slider too small to hit, lyrics that would not stay on screen, an
 - **`↑`/`↓` focus into a tab and out of it**, and `esc` leaves the list before the tab. An open
   album, artist or playlist page's tracks were reachable only by mouse: the arrows were moving the
   tab's hidden cursor. Fixed.
+- **One cover, one colour scheme.** The accent and the gradient ramp came from two different colour
+  extractors, so a track change could leave the bar on the new cover's colours and the borders on
+  the old one's; and a cover with no usable colour kept the *previous* ramp while the accent fell
+  back to green. Both now come from the same extraction of the same cover, so a track change moves
+  every colour at once, and a cover with no hue falls back to one flat colour everywhere.
+- **A selected tab is never a white box.** The tint behind the focused title is the album's own
+  colour taken toward black (or lifted, for a nearly black cover), deepening along the run. Found on
+  the way: `accent::mix` returned its first argument whenever either colour was a *named* one like
+  `Color::Black`, so every mix in the program towards white or black had been doing nothing at all.
 - **The right pane's border is lit from one side** instead of being flat grey, using the album's own
   colours -- top and left in one, bottom and right in another. The lyrics text is unchanged: lines
   not yet sung stay dim, the one being sung stays in the accent.

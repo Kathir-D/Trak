@@ -172,18 +172,38 @@ pub fn text_on(accent: Color) -> Color {
 
 /// Luminance of a colour, understanding the four named ones that matter here.
 ///
+/// Public because "is this colour too light or too dark to build a block out of" is
+/// a question [`crate::tui::render::gradient_title`] has to ask, and it should not
+/// have to reimplement the weighting to ask it.
+///
 /// The named colours are *not* all mid-grey: an earlier version of this treated
 /// every non-`Rgb` as 0.5, which made `contrast_ratio(accent, White)` come out at
 /// 2.7:1 for a colour that is really 5:1 against white, and the test that was
 /// meant to prove legibility failed for a colour that was fine. Terminal palette
 /// colours genuinely are unknowable; black and white are not.
-fn luma_of(colour: Color) -> f32 {
+pub fn luma_of(colour: Color) -> f32 {
     match colour {
         Color::Rgb(r, g, b) => luma(r, g, b),
         Color::Black => 0.0,
         Color::White => 1.0,
         _ => 0.5,
     }
+}
+
+/// **How bright a colour looks**, 0.0 to 1.0.
+///
+/// Not [`luma_of`]. That one is WCAG *relative* luminance, which linearises each
+/// channel through the sRGB gamma curve because contrast ratios need it to match how
+/// the eye weights light. For "is this too bright to paint a block behind text" it
+/// is the wrong number: a bright pink (250,120,200) measures 0.38 there and looks
+/// like a light colour to anybody looking at it, which is how a "deep tint" came out
+/// as a pale pink box.
+///
+/// This is HSL's lightness -- the mean of the brightest and darkest channel -- which
+/// is what "bright" means to the person looking at the screen.
+pub fn brightness(colour: Color) -> f32 {
+    let (r, g, b) = to_rgb(colour);
+    (f32::from(r.max(g).max(b)) + f32::from(r.min(g).min(b))) / (2.0 * 255.0)
 }
 
 /// The WCAG contrast ratio between two colours.
@@ -270,6 +290,105 @@ fn a_flat_palette_is_still_flat_after_caching() {
 mod tests {
     use super::*;
     use image::{Rgb, RgbImage};
+
+    /// **A cover with no usable hue gives one flat colour** (owner, 2026-10-03).
+    /// It used to give green with a synthetic teal and orange either side of it,
+    /// because the synthetic rotation was applied to the fallback as well as to a
+    /// real single-hue cover -- so a black-and-white sleeve produced a three-colour
+    /// bar it had no business wearing.
+    #[test]
+    fn a_greyscale_cover_is_one_flat_colour() {
+        use image::{Rgb, RgbImage};
+        let grey = |v: u8| {
+            let mut img = RgbImage::new(24, 24);
+            for p in img.pixels_mut() {
+                *p = Rgb([v, v, v]);
+            }
+            image::DynamicImage::ImageRgb8(img)
+        };
+        for v in [0u8, 40, 128, 250] {
+            let p = palette(&grey(v));
+            assert_eq!(p.primary, SPOTIFY_GREEN_LITERAL, "grey {v}");
+            assert_eq!(p.secondary, p.primary, "grey {v}: no synthetic spread");
+            assert_eq!(p.tertiary, p.primary, "grey {v}: no synthetic spread");
+            let ramp = p.ramp(7);
+            assert!(
+                ramp.windows(2).all(|w| w[0] == w[1]),
+                "grey {v} ramp is not flat: {ramp:?}"
+            );
+        }
+        // A cover with one real hue still spreads from it, because that colour *is*
+        // the cover's.
+        let mut img = RgbImage::new(24, 24);
+        for p in img.pixels_mut() {
+            *p = Rgb([200, 40, 40]);
+        }
+        let one = palette(&image::DynamicImage::ImageRgb8(img));
+        assert_ne!(one.secondary, one.primary, "a real hue spreads");
+    }
+
+    /// **A named colour is a colour to mix with** (owner, 2026-10-03). `mix` used
+    /// to destructure `Color::Rgb` and hand back its first argument for anything
+    /// else, so every "mix towards white" and "mix towards black" in the program was
+    /// a no-op -- and a no-op looks exactly like a mix that happened to come out the
+    /// same colour, which is how the white box on a selected tab survived a fix.
+    #[test]
+    fn a_named_colour_mixes_like_any_other() {
+        assert_eq!(
+            mix(Color::Rgb(200, 100, 50), Color::White, 0.0),
+            Color::Rgb(200, 100, 50),
+            "t=0 is the first colour"
+        );
+        assert_eq!(
+            mix(Color::Rgb(200, 100, 50), Color::White, 1.0),
+            Color::Rgb(255, 255, 255),
+            "t=1 is the second"
+        );
+        let half = match mix(Color::Rgb(200, 100, 50), Color::White, 0.5) {
+            Color::Rgb(r, g, b) => (r, g, b),
+            other => panic!("not rgb: {other:?}"),
+        };
+        assert!(
+            half.0 > 200 && half.1 > 150 && half.2 > 150,
+            "half way to white is {half:?}, which is not half way to white"
+        );
+        // And the other way, which is what a deep tint of a cover is.
+        let dark = match mix(Color::Rgb(200, 100, 50), Color::Black, 0.62) {
+            Color::Rgb(r, g, b) => (r, g, b),
+            other => panic!("not rgb: {other:?}"),
+        };
+        assert!(
+            dark.0 < 120 && dark.1 < 90 && dark.2 < 70,
+            "62% towards black is {dark:?}, which is not darker"
+        );
+        // Every named colour goes through: none of them returns the input untouched.
+        for named in [
+            Color::Black,
+            Color::Red,
+            Color::Green,
+            Color::Yellow,
+            Color::Blue,
+            Color::Magenta,
+            Color::Cyan,
+            Color::Gray,
+            Color::DarkGray,
+            Color::LightRed,
+            Color::LightGreen,
+            Color::LightYellow,
+            Color::LightBlue,
+            Color::LightMagenta,
+            Color::LightCyan,
+            Color::White,
+        ] {
+            assert!(
+                !matches!(
+                    mix(Color::Rgb(120, 60, 200), named, 0.5),
+                    Color::Rgb(120, 60, 200)
+                ),
+                "{named:?} mixed to the other colour unchanged"
+            );
+        }
+    }
 
     fn solid(r: u8, g: u8, b: u8) -> image::DynamicImage {
         let mut img = RgbImage::new(8, 8);
@@ -680,11 +799,45 @@ impl Palette {
     }
 }
 
+/// The 16 named colours as RGB, so a mix with one is a mix rather than a no-op.
+///
+/// **This function used to return its first argument whenever either side was a
+/// named colour**, because it destructured `Color::Rgb` and gave up on anything
+/// else. Every call that mixed towards `Color::White` or `Color::Black` -- which is
+/// most of them -- was therefore returning the colour unchanged and nobody could see
+/// it, because "no highlight" and "a highlight that came out the same colour" look
+/// identical until you write the test (owner, 2026-10-03, "remove the ugly white
+/// box": the tint asked for here was never applied at all).
+fn to_rgb(colour: Color) -> (u8, u8, u8) {
+    match colour {
+        Color::Rgb(r, g, b) => (r, g, b),
+        Color::Black => (0, 0, 0),
+        Color::Red => (205, 0, 0),
+        Color::Green => (0, 205, 0),
+        Color::Yellow => (205, 205, 0),
+        Color::Blue => (0, 0, 238),
+        Color::Magenta => (205, 0, 205),
+        Color::Cyan => (0, 205, 205),
+        Color::Gray => (229, 229, 229),
+        Color::DarkGray => (127, 127, 127),
+        Color::LightRed => (255, 0, 0),
+        Color::LightGreen => (0, 255, 0),
+        Color::LightYellow => (255, 255, 0),
+        Color::LightBlue => (92, 92, 255),
+        Color::LightMagenta => (255, 0, 255),
+        Color::LightCyan => (0, 255, 255),
+        Color::White => (255, 255, 255),
+        // Index, a `Crossterm` colour and anything a future ratatui adds have no
+        // RGB here. Black is the least surprising answer for "I do not know what
+        // this is": mixing towards it darkens, which is what every caller wants.
+        _ => (0, 0, 0),
+    }
+}
+
 /// Interpolate two colours in HSL, taking the short way round the hue circle.
 pub fn mix(a: Color, b: Color, t: f32) -> Color {
-    let (Color::Rgb(r1, g1, b1), Color::Rgb(r2, g2, b2)) = (a, b) else {
-        return a;
-    };
+    let (r1, g1, b1) = to_rgb(a);
+    let (r2, g2, b2) = to_rgb(b);
     let t = t.clamp(0.0, 1.0);
     let (h1, s1, l1) = hsl(r1, g1, b1);
     let (h2, s2, l2) = hsl(r2, g2, b2);
@@ -738,12 +891,24 @@ fn from_hsl(h: f32, s: f32, l: f32) -> Color {
 /// colour the interface should not draw.
 pub fn palette(image: &image::DynamicImage) -> Palette {
     let bins = hue_bins(image);
-    let primary = bins
-        .first()
-        .map(|bin| bin.1)
-        .unwrap_or(SPOTIFY_GREEN_LITERAL);
+    // **No usable colour in the cover means one flat colour, not a synthetic
+    // rainbow.** A black-and-white sleeve used to come back as green with a
+    // synthetic teal and orange either side of it, so the bar wore three colours
+    // the cover had never seen while the borders wore one (owner, 2026-10-03:
+    // "only some colors changed to follow picture and some are still of prev
+    // song"). One colour is the honest answer when there is no hue to spread.
+    let Some(primary) = bins.first().map(|bin| bin.1) else {
+        let flat = Palette {
+            primary: SPOTIFY_GREEN_LITERAL,
+            secondary: SPOTIFY_GREEN_LITERAL,
+            tertiary: SPOTIFY_GREEN_LITERAL,
+        };
+        return flat;
+    };
     Palette {
         primary,
+        // One real hue and nothing else: spread it synthetically, because the cover
+        // did give us a colour and a gradient built from it is still its colour.
         secondary: pick_separate(&bins, primary, 1)
             .unwrap_or_else(|| rotate_rgb(primary, SYNTHETIC_ROTATION)),
         tertiary: pick_separate(&bins, primary, 2)

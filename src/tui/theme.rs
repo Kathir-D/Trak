@@ -150,28 +150,27 @@ impl Theme {
     /// no colour" from "the colour is unchanged" without keeping the old value
     /// around -- and, more usefully, whether a redraw is needed at all.
     pub fn set_art_colour(&mut self, image: &image::DynamicImage) -> bool {
-        let found = accent::dominant_colour(image).map(accent::ensure_contrast);
-        let usable = found.filter(|c| accent::is_usable(*c));
-        let mut next = match usable {
-            Some(c) => Palette {
-                primary: c,
-                secondary: accent::palette(image).secondary,
-                tertiary: accent::palette(image).tertiary,
-            },
-            // No usable colour in the cover: keep whatever ramp is in place. A
-            // black-and-white sleeve should leave the interface alone, and
-            // jumping to a synthetic ramp would be a worse answer than the green
-            // it already had.
-            None => self.palette,
-        };
-        // Every colour in the ramp has to be drawable.
+        // **One extractor, not two.** This used to take the accent from
+        // `dominant_colour` and the rest of the ramp from `palette`, which are two
+        // different analyses of the same pixels, and the interface could end up
+        // showing one song in the borders and another in the bar. Worse, when a
+        // cover had no usable colour the old code kept the *previous* ramp while
+        // the accent fell back to green, so a blue-grey sleeve left the previous
+        // song's orange bar under a green border (owner, 2026-10-03: "only some
+        // colors changed to follow picture and some are still of prev song").
+        //
+        // `accent::palette` bins the cover's usable pixels by hue and falls back to
+        // green itself when there are none, so the accent and the ramp are now the
+        // same three colours and always from the same cover.
+        let mut next = accent::palette(image);
+        // Belt and braces: every colour in the ramp has to be drawable.
         for c in [&mut next.primary, &mut next.secondary, &mut next.tertiary] {
             if !accent::is_usable(*c) {
                 *c = SPOTIFY_GREEN;
             }
         }
-        let changed = usable != self.art_colour || next != self.palette;
-        self.art_colour = usable;
+        let changed = Some(next.primary) != self.art_colour || next != self.palette;
+        self.art_colour = Some(next.primary);
         self.palette = next;
         changed
     }
@@ -367,19 +366,75 @@ mod tests {
         }
     }
 
-    /// A monochrome cover is a real answer, not a failure: it leaves the accent
-    /// alone rather than picking grey out of the noise.
+    /// A monochrome cover is a real answer, not a failure: trak's own green rather
+    /// than grey out of the noise.
+    ///
+    /// It used to *keep the accent alone*, which sounds harmless and was not: the
+    /// ramp stayed on the previous cover's colours while the accent stayed green,
+    /// and the interface showed two songs at once (owner, 2026-10-03). Now a cover
+    /// with no usable colour puts **every** colour back to the fallback, so there is
+    /// one answer rather than two.
     #[test]
-    fn a_greyscale_cover_leaves_the_accent_alone() {
+    fn a_greyscale_cover_falls_back_to_one_colour_everywhere() {
         use image::{Rgb, RgbImage};
         let mut img = RgbImage::new(32, 32);
         for p in img.pixels_mut() {
             *p = Rgb([128, 128, 128]);
         }
         let mut t = Theme::new(Accent::Art, Border::Rounded);
-        assert!(!t.set_art_colour(&image::DynamicImage::ImageRgb8(img)));
-        assert_eq!(t.art_colour, None);
-        assert_eq!(t.accent_colour(), SPOTIFY_GREEN);
+        t.set_art_colour(&image::DynamicImage::ImageRgb8(img));
+        assert_eq!(
+            t.accent_colour(),
+            SPOTIFY_GREEN,
+            "not grey out of the noise"
+        );
+        for colour in [t.palette.primary, t.palette.secondary, t.palette.tertiary] {
+            assert_eq!(
+                colour, SPOTIFY_GREEN,
+                "the ramp has to agree with the accent: {colour:?}"
+            );
+        }
+    }
+
+    /// **The accent and the ramp are always the same cover.** Two extractors, one
+    /// for the accent and one for the ramp, meant a cover could tint the bar one
+    /// way and the borders another; and a cover with no usable colour left the
+    /// previous song's ramp under a fresh green accent.
+    #[test]
+    fn one_cover_never_shows_as_two_songs() {
+        use image::{Rgb, RgbImage};
+        let cover = |r: u8, g: u8, b: u8| {
+            let mut img = RgbImage::new(32, 32);
+            for p in img.pixels_mut() {
+                *p = Rgb([r, g, b]);
+            }
+            image::DynamicImage::ImageRgb8(img)
+        };
+        // A colourful cover, then a washed-out one: the second must not leave the
+        // first one's colours behind in the ramp.
+        let mut t = Theme::new(Accent::Art, Border::Rounded);
+        assert!(t.set_art_colour(&cover(230, 90, 30)), "an orange cover");
+        let orange = t.palette.primary;
+        assert_ne!(orange, SPOTIFY_GREEN);
+        assert_eq!(t.accent_colour(), t.palette.primary, "one voice");
+
+        assert!(
+            t.set_art_colour(&cover(150, 160, 170)),
+            "a washed-out cover is a change too"
+        );
+        assert_ne!(
+            t.palette.primary, orange,
+            "the previous cover's colour is gone from the ramp"
+        );
+        assert_eq!(t.accent_colour(), t.palette.primary, "still one voice");
+        // The ramp never spans two covers: its endpoints are this cover's colours.
+        let ramp = t.palette.ramp(9);
+        assert!(
+            ramp.iter().all(|c| *c == t.palette.primary
+                || *c == t.palette.secondary
+                || *c == t.palette.tertiary),
+            "a ramp colour from somewhere else: {ramp:?}"
+        );
     }
 
     /// Setting the same cover twice is not a change, so the caller can skip a
