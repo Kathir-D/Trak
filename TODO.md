@@ -1080,7 +1080,12 @@ the dashboard had been built on.
       accepts the redirect URI, but nobody has clicked "Allow" in the browser yet, so search,
       playlists, queue, library and the token refresh are still unverified against a real account.
       > The account also needs Spotify Premium, and the app must list **Web API** under "APIs used"
-      > (a first attempt was created with only Web Playback SDK).
+      > (the first attempt was created with only Web Playback SDK; the owner added it).
+      > **State at the end of 2026-10-03:** the Client ID is saved in the owner's config and the
+      > authorize endpoint accepts the redirect URI (`curl` on `/api/token` and `/api/authorize`, both
+      > without an "invalid redirect" or "invalid_client" answer), but the browser approval was never
+      > clicked, so **no Web API request has ever been made**. trak's own flow was driven up to the
+      > waiting state twice, in a pty, against the real Spotify.
 
 ---
 
