@@ -912,6 +912,80 @@ fn inner(r: Rect) -> Rect {
 
 /// A bordered pane with a title. The title may be styled per span, which is how
 /// the selected tab gets the accent background (TODO 4.2).
+/// Paint a block's four edges, each in its own colour.
+///
+/// ratatui styles a whole border with one `Style`, so a border that is lit from
+/// one side has to be drawn cell by cell. The glyphs come from the resolved
+/// [`BorderType`] rather than being spelled out here, so every border style in the
+/// settings -- rounded, sharp, double, none -- keeps its own characters.
+///
+/// `styles` is `[top, right, bottom, left]`, which is the order
+/// [`crate::tui::theme::edge_styles`] returns. The four corner cells belong to the
+/// top and bottom edges, so the sides skip them: a corner drawn twice is a corner
+/// with the wrong colour and nobody can say why.
+///
+/// **Every cell it draws is `DIM`.** This is the unfocused look, and it has to be
+/// reliably quieter than the focused pane's plain accent: with the default green
+/// palette the two were the same colour to the byte, so "focused" was a border that
+/// happened to be a bit brighter on some covers and identical on others (owner,
+/// 2026-10-03: "make sure there is something someone can notice if it is in focus").
+/// `DIM` is the right tool because a terminal blends it towards whatever background
+/// it has, so this reads as quieter on a light terminal too without trak having to
+/// know which one it is on.
+fn paint_edges(f: &mut Frame, area: Rect, theme: &Theme, styles: [Style; 4]) {
+    if area.width < 2 || area.height < 2 {
+        return;
+    }
+    let Some(kind) = theme.border.to_ratatui() else {
+        return;
+    };
+    let (h, v) = match kind {
+        ratatui::widgets::BorderType::Rounded => ("─", "│"),
+        ratatui::widgets::BorderType::Plain => ("─", "│"),
+        ratatui::widgets::BorderType::Double => ("═", "║"),
+        ratatui::widgets::BorderType::QuadrantInside => ("▁", "▏"),
+        ratatui::widgets::BorderType::QuadrantOutside => ("▔", "▕"),
+        ratatui::widgets::BorderType::Thick => ("━", "┃"),
+    };
+    let dimmed = styles.map(|s| s.add_modifier(Modifier::DIM));
+    let put = |f: &mut Frame, x: u16, y: u16, glyph: &str, style: Style| {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(glyph.to_string(), style))),
+            Rect {
+                x,
+                y,
+                width: 1,
+                height: 1,
+            },
+        );
+    };
+    let last_x = area.x + area.width - 1;
+    let last_y = area.y + area.height - 1;
+    for x in area.x..=last_x {
+        put(f, x, area.y, h, dimmed[0]);
+        put(f, x, last_y, h, dimmed[2]);
+    }
+    for y in (area.y + 1)..last_y {
+        put(f, area.x, y, v, dimmed[3]);
+        put(f, last_x, y, v, dimmed[1]);
+    }
+    let corner = |f: &mut Frame, x: u16, y: u16, style: Style| {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(v.to_string(), style))),
+            Rect {
+                x,
+                y,
+                width: 1,
+                height: 1,
+            },
+        );
+    };
+    corner(f, area.x, area.y, dimmed[0]);
+    corner(f, last_x, area.y, dimmed[0]);
+    corner(f, area.x, last_y, dimmed[2]);
+    corner(f, last_x, last_y, dimmed[2]);
+}
+
 fn pane_block<'a>(title: impl Into<Line<'a>>, theme: &Theme, focused: bool) -> Block<'a> {
     let mut b = Block::bordered()
         .title(title.into())
@@ -1561,8 +1635,47 @@ fn draw_tabs(f: &mut Frame, area: Rect, app: &App, theme: &Theme, regions: &mut 
     // somewhere else.
     // Two border cells, plus the one space each side of the title inside it.
     let strip = tab_strip(app, theme, (area.width as usize).saturating_sub(4));
-    let block = pane_block(strip.line(), theme, false);
+    // **The pane is focused when the arrows are driving its list.** The owner asked
+    // for `↓` to focus into a tab (2026-10-03) and for focus to be *noticeable*,
+    // and a border that is the same grey whether or not the keys are pointed at
+    // this list cannot say anything. Focused, the border takes the album's accent,
+    // which is also what stops it being the flat grey slab the owner also asked
+    // about: a pane's border is the one thing on screen that is neither text nor
+    // picture, so it is where a colour can go without competing with either.
+    let focused = app.web.list_focus;
+    let block = pane_block(strip.line(), theme, focused);
     f.render_widget(block, area);
+    // **The right pane's border is not grey.** Owner, 2026-10-03: "instead of a gray
+    // border on the right tab, make it something more interesting ... but keep the
+    // not-said text gray, and the one being said is colorful, that's good". So the
+    // text is left exactly as it was -- upcoming lines dim, the sung line in the
+    // accent -- and the *border* is where the album's colours go: lit from one
+    // side, top and left in one colour and bottom and right in another, which is
+    // the cheapest depth a terminal can do and is a different thing from the flat
+    // accent border round Now Playing rather than a copy of it.
+    //
+    // Focused, the border is the plain accent instead: a lit-from-one-side edge is
+    // for "here is a pane", and the focus has to be a different signal again.
+    if !focused {
+        paint_edges(
+            f,
+            area,
+            theme,
+            crate::tui::theme::edge_styles(&theme.palette),
+        );
+        // The edges went over the top border, and the tab strip is drawn *on* that
+        // border, so the strip is put back. Repainting a one-row title is cheaper
+        // than teaching `paint_edges` where the title is.
+        f.render_widget(
+            Paragraph::new(strip.line()),
+            Rect {
+                x: area.x + 1,
+                y: area.y,
+                width: area.width.saturating_sub(2),
+                height: 1,
+            },
+        );
+    }
     let body = inner(area);
     if body.width == 0 || body.height == 0 {
         return;
@@ -3824,6 +3937,225 @@ mod tests {
                 "{cell:?}: {fitted:?} does not fill {hole:?}"
             );
         }
+    }
+
+    /// **The right pane's border is not grey, and the focus is visible** (owner,
+    /// 2026-10-03: "instead of a gray border on the right tab, make it something
+    /// more interesting ... make sure there is something someone can notice if it is
+    /// in focus").
+    ///
+    /// Both halves are about colour on the border *cells*, which is why they have to
+    /// be read from the buffer rather than from the style that was passed in: the
+    /// unfocused pane is lit from one side (four different colours, top/left one and
+    /// bottom/right another) and the focused one is the flat accent.
+    #[test]
+    fn the_right_pane_says_which_pane_it_is_and_whether_it_has_the_keys() {
+        use ratatui::style::Color;
+
+        let mut app = app_at(160, 40);
+        app.tab = Tab::Lyrics;
+        // The side pane is found by its own left border rather than by recomputing
+        // the split: the first vertical rule that is not the terminal's own edge is
+        // where the side pane starts, whatever width the layout gave it.
+        let edges = |app: &App| {
+            let (buf, _regions) = render(160, 40, app);
+            let mid_y = 20;
+            let pane = Rect {
+                x: (1..158)
+                    .find(|x| {
+                        row_text(&buf, mid_y, *x, 1) == "│"
+                            && row_text(&buf, mid_y, *x + 1, 1) == "│"
+                    })
+                    .expect("two panes side by side")
+                    + 1,
+                y: 0,
+                width: 0,
+                height: 40,
+            };
+            let pane = Rect {
+                width: 160 - pane.x,
+                ..pane
+            };
+            let mid_x = pane.x + pane.width / 2;
+            (
+                buf[(mid_x, pane.y)].fg,
+                buf[(mid_x, pane.y + pane.height - 1)].fg,
+                buf[(pane.x, mid_y)].fg,
+                buf[(pane.x + pane.width - 1, mid_y)].fg,
+            )
+        };
+
+        let (top, bottom, left, right) = edges(&app);
+        for (name, colour) in [
+            ("top", top),
+            ("bottom", bottom),
+            ("left", left),
+            ("right", right),
+        ] {
+            assert_ne!(
+                colour,
+                Color::DarkGray,
+                "the {name} edge of the unfocused side pane is still grey"
+            );
+        }
+        assert!(
+            top != bottom || left != right,
+            "the border is one flat colour, which is the grey problem again: \
+             top {top:?} bottom {bottom:?} left {left:?} right {right:?}"
+        );
+
+        // Focused, the border is the plain accent: a *different* signal, not the
+        // same one louder. Read from the *sides*, which no title can sit on -- the
+        // tab strip is drawn over the top border, so a top-border cell in the
+        // middle of the pane belongs to a label and carries that label's colour.
+        // And every one of them is `DIM`, which is what makes the focused pane's
+        // plain accent reliably louder -- on the default green palette the two were
+        // otherwise the same colour to the byte.
+        let dim_at = |app: &App, x: u16, y: u16| {
+            let (buf, _regions) = render(160, 40, app);
+            buf[(x, y)].modifier.contains(Modifier::DIM)
+        };
+        // The side pane's left border is the second of the adjacent pair: the
+        // Now Playing pane's right border stands next to it, and the two panes are
+        // drawn with no gutter between them.
+        let (buf, _) = render(160, 40, &app);
+        let pair = (1..158)
+            .find(|x| row_text(&buf, 20, *x, 1) == "│" && row_text(&buf, 20, *x + 1, 1) == "│")
+            .expect("two panes side by side");
+        let pane_x = pair + 1;
+        assert!(dim_at(&app, pane_x, 20), "the unfocused edge is not dim");
+        let mut focused = app.clone();
+        focused.web.list_focus = true;
+        let theme = Theme::default();
+        assert!(
+            !dim_at(&focused, pane_x, 20),
+            "the focused edge is dim too, so focus is not visible"
+        );
+        let (buf, _regions) = render(160, 40, &focused);
+        assert_eq!(
+            buf[(pane_x, 20)].fg,
+            theme.accent_colour(),
+            "focused is the plain accent"
+        );
+        let _ = (top, bottom, left, right);
+    }
+
+    /// **The art scales with the pane; the text does not** (owner, 2026-10-03:
+    /// "make sure everything scales properly with increased/decreased screen size,
+    /// picture scaling properly but not text").
+    ///
+    /// Swept across the sizes a person actually has, at three cell sizes -- a
+    /// narrow font, a normal one and the wide one the owner's terminal reports --
+    /// asserting the two halves separately, because they are two different claims:
+    ///
+    /// - the fitted cover always fills the pane it was given in at least one
+    ///   direction, and never spills outside it, at any size or cell;
+    /// - the text block underneath is the *same number of rows* whatever the
+    ///   terminal is, because text is measured in cells and a terminal cannot
+    ///   scale it. A title that grew a row because the window got wider would be
+    ///   the picture scaling and the text not.
+    #[test]
+    fn the_picture_scales_with_the_pane_and_the_text_does_not() {
+        let square = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            640,
+            640,
+            image::Rgb([120, 60, 200]),
+        ));
+        let wide = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            1600,
+            400,
+            image::Rgb([20, 180, 120]),
+        ));
+        for cell in [(8u16, 17u16), (10, 20), (21, 34)] {
+            let images = Images::halfblocks(cell);
+            for (w, h) in [
+                (60u16, 20u16),
+                (80, 24),
+                (100, 30),
+                (120, 34),
+                (160, 45),
+                (200, 55),
+                (240, 70),
+            ] {
+                let hole = Rect::new(0, 0, w, h);
+                for (name, image) in [("square", &square), ("wide", &wide)] {
+                    let fitted = images.fit(hole, image);
+                    // Inside the hole, always: a cover that spills is a cover over
+                    // the transport controls.
+                    assert!(
+                        fitted.x >= hole.x
+                            && fitted.y >= hole.y
+                            && fitted.x + fitted.width <= hole.x + hole.width
+                            && fitted.y + fitted.height <= hole.y + hole.height,
+                        "{name} {cell:?} in {hole:?} fitted {fitted:?}, which is outside it"
+                    );
+                    if hole.width < 8 || hole.height < 4 {
+                        continue;
+                    }
+                    // And it fills it: a fitted rect with slack on *both* axes is a
+                    // letterboxed picture in a pane with dead space around it, which
+                    // is what the owner reported.
+                    let slack_x = hole.width - fitted.width;
+                    let slack_y = hole.height - fitted.height;
+                    let slack = slack_x.min(slack_y);
+                    // One cell of slack, because `fit` rounds to whole cells.
+                    assert!(
+                        slack <= 1,
+                        "{name} {cell:?} in {hole:?} fitted {fitted:?}: {slack} cells of \
+                         slack on both axes, so the picture does not fill its pane"
+                    );
+                    // The aspect ratio survives: a wide cover in a wide pane is
+                    // wider than it is tall, a square one is not.
+                    let image_ratio = image.width() as f64 / image.height() as f64;
+                    let cell_ratio = cell.1 as f64 / cell.0 as f64;
+                    let got = fitted.width as f64 / fitted.height.max(1) as f64;
+                    // The tolerance is **half a cell of height, in width**. `fit`
+                    // rounds the height to whole cells, so for a cover that is
+                    // several cells wide per cell of height the width can be out by
+                    // half a cell times the ratio -- four cells for a 4:1 cover in a
+                    // tall font, which is the picture being the right size to the
+                    // nearest cell rather than a distortion.
+                    let want_ratio = image_ratio * cell_ratio;
+                    let slack = want_ratio / 2.0 + 1.0;
+                    assert!(
+                        (fitted.width as f64 - want_ratio * fitted.height.max(1) as f64).abs()
+                            <= slack,
+                        "{name} {cell:?} in {hole:?}: fitted {fitted:?} is {got} against a \
+                         wanted {want_ratio}, which is {slack} cells out"
+                    );
+                }
+            }
+        }
+        // The text block is the same height whatever the terminal is.
+        let mut text_heights: Vec<u16> = Vec::new();
+        for (w, h) in [(60u16, 20u16), (100, 30), (160, 45), (240, 70)] {
+            let mut app = app_at(w, h);
+            app.settings.show_art = true;
+            let (buf, regions) = render(w, h, &app);
+            // A terminal too small for the art pane has no art rect, and nothing
+            // to say about scaling there; the sweep above covers the fitting.
+            let Some(art) = regions.art else {
+                continue;
+            };
+            let below: String = (art.y + art.height..h)
+                .map(|y| row_text(&buf, y, 0, w))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                below.contains("Census"),
+                "{w}x{h}: the title is below the art"
+            );
+            text_heights.push(below.lines().filter(|l| !l.trim().is_empty()).count() as u16);
+        }
+        assert!(
+            text_heights.windows(2).all(|p| p[0] == p[1]),
+            "the text block changes height with the terminal: {text_heights:?}"
+        );
+        assert!(
+            text_heights.len() >= 3,
+            "only {} sizes drew the dashboard at all: {text_heights:?}",
+            text_heights.len()
+        );
     }
 
     /// The longest run of rows with nothing but background in `x0..x1`.

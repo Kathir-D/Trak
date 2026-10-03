@@ -1119,6 +1119,26 @@ built on, which is the whole reason this phase exists.
       > Premium account still gets the real queue from the API, unchanged. `docs/WEB-API.md` §2
       > already records that only the **add** is Premium-gated; this is the read's empty case.
 
+- [x] 13.9 **The right pane's border is not grey, and focus is visible** (owner, 2026-10-03: "instead
+      of a gray border on the right tab, make it something more interesting it doesn't have to be the
+      same as right tab but not gray. Keep not said text gray tho and the one being said is colorful
+      that's good").
+      > The lyrics text is left exactly as it was -- upcoming lines dim, the sung line in the accent.
+      > The *border* is where the album's colours go: lit from one side (top and left one colour,
+      > bottom and right another) via `theme::edge_styles`, which had been written for this and never
+      > used. ratatui styles a whole border with one `Style`, so the four edges are painted cell by
+      > cell with the glyphs taken from the resolved `BorderType`, and the tab strip is repainted
+      > afterwards because it is drawn *on* the top border.
+      > Every unfocused edge cell is `DIM`, which is what makes the focused pane's plain accent
+      > reliably louder: with the default green palette the lit-from-one-side edge and the flat accent
+      > were the same colour to the byte, so "focused" was invisible on some covers.
+- [x] 13.10 **The picture scales with the pane and the text does not**, swept and asserted (owner,
+      2026-10-03). Seven terminal sizes at three cell sizes (8x17, 10x20 and the 21x34 the owner's
+      terminal reports), a square and a 4:1 cover: the fitted rect is always inside its hole, always
+      fills it in at least one direction to within a cell, and keeps its aspect to within half a cell
+      of height -- while the text block under the art is the *same number of rows* at every size,
+      because text is measured in cells and a terminal cannot scale it.
+
 - [x] 13.6 A 410 from the personal lists says what to do about it, instead of "answered HTTP 410".
       > Measured on the owner's real account, 2026-10-03: with the app in development mode and the
       > account not on its user list, `GET /me/playlists` and `GET /me/tracks` answer **410 Gone**

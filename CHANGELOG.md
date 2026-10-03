@@ -62,6 +62,16 @@ its pane, a slider too small to hit, lyrics that would not stay on screen, an
 - **`↑`/`↓` focus into a tab and out of it**, and `esc` leaves the list before the tab. An open
   album, artist or playlist page's tracks were reachable only by mouse: the arrows were moving the
   tab's hidden cursor. Fixed.
+- **The right pane's border is lit from one side** instead of being flat grey, using the album's own
+  colours -- top and left in one, bottom and right in another. The lyrics text is unchanged: lines
+  not yet sung stay dim, the one being sung stays in the accent.
+- **Focus is visible.** The side pane's border is `DIM` when unfocused and the plain accent when the
+  arrows are driving its list. With the default green palette the two were previously the same
+  colour to the byte, so focusing a list did nothing you could see.
+- **`↑`/`↓` and the picture.** Swept seven terminal sizes at three cell sizes: the cover is always
+  inside its pane, fills it to within a cell, and keeps its aspect; the text under it is the same
+  number of rows whatever the window is, because a terminal cannot scale text.
+
 - **`scripts/preview`** builds the working tree and runs it, so UI changes can be seen without a
   release.
 
