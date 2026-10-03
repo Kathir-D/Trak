@@ -287,7 +287,9 @@ class Screen:
         out = []
         for row in self.chars:
             line = "".join(row).rstrip()
-            line = re.sub(r"\x1b?\[[0-9;?]*[A-Za-z]", "", line)
+            # **With** the ESC: without it this also matched a tab label like
+            # `[History]` and quietly ate its first letter.
+            line = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", line)
             out.append(line)
         return "\n".join(out)
 

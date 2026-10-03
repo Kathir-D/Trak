@@ -3382,6 +3382,23 @@ mod tests {
         assert_eq!(viz.x, 1, "hard against the pane's edge: {viz:?}");
     }
 
+    /// The tab strip at a wide terminal: every tab fits, so there is no elision and
+    /// the selected one keeps its brackets. A 200-column pane used to draw
+    /// `istory]` -- the strip is the pane's *title*, and a title that does not fit
+    /// is clipped, so the geometry of the pane decides whether the label is whole.
+    #[test]
+    fn a_wide_strip_draws_every_tab_and_keeps_the_selected_one_bracketed() {
+        for (w, h) in [(200u16, 62u16), (240u16, 80u16), (140, 40), (110, 34)] {
+            let (buf, _) = render(w, h, &app_at(w, h));
+            let strip = full_text(&buf).lines().nth(1).unwrap_or_default().to_string();
+            assert!(strip.contains("History"), "{w}x{h}: {strip}");
+            assert!(
+                strip.contains("[History]"),
+                "{w}x{h}: the selected tab lost its brackets: {strip}"
+            );
+        }
+    }
+
     /// The cover and the text together have to fill the pane. This is the test
     /// for the dead space a tall or a very wide terminal used to show: a cover
     /// frozen at twenty rows in a fifty-row pane, with thirty rows of nothing
