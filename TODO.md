@@ -1119,6 +1119,32 @@ built on, which is the whole reason this phase exists.
       > Premium account still gets the real queue from the API, unchanged. `docs/WEB-API.md` §2
       > already records that only the **add** is Premium-gated; this is the read's empty case.
 
+- [x] 13.6 A 410 from the personal lists says what to do about it, instead of "answered HTTP 410".
+      > Measured on the owner's real account, 2026-10-03: with the app in development mode and the
+      > account not on its user list, `GET /me/playlists` and `GET /me/tracks` answer **410 Gone**
+      > while `GET /me/player/queue` answers the allowlist **403** -- same token, same minute. So the
+      > 410 is the same root cause in a different costume, and now says to add the account to the
+      > app's user list on the dashboard. Spotify documents no 410 here; `docs/WEB-API.md` §2 has
+      > the measured table so the next agent does not have to spend somebody's account finding out.
+- [x] 13.7 **The `h`/`l` seek is gone**, and `[input] seek_step` with it (owner, 2026-10-03: "remove
+      the seek option it seems kinda stupid, just make arrow keys always navigation"). The arrows
+      have been navigation since 2026-10-01 and `h`/`l` were a second, older way to do something
+      else, next to a bar you can already click.
+      > A `seek_step` left in somebody's config is **ignored** like any other unknown key rather than
+      > refused, so an existing file keeps starting trak -- `config.rs` has a test for exactly that,
+      > because "it stops working on upgrade" is the failure mode worth pinning. `seek_step` was the
+      > only float setting trak had, so `set_number` and `number_text` went with it, and SPEC §8, the
+      > README and the Keys panel were updated in the same commit: `every_key_the_spec_lists_has_a_row`
+      > and `the_settings_screen_lists_every_key` read the docs, so a key with no row is a failing
+      > build rather than a stale document.
+- [x] 13.8 `scripts/preview`: build the working tree and run it, so a UI change can be looked at
+      without cutting a release. Release, not debug -- the debug build is slow enough that the
+      animations look broken, which is the wrong thing to judge a UI by. `--watch` rebuilds and
+      relaunches on every save.
+      > It reports what it is doing on stderr, because a script that spends its first minute
+      > compiling and then draws a full-screen TUI looks exactly like one that hung if you only look
+      > at the pane (owner: "it just doesn't show anything").
+
 - [ ] 12.10 The first real Web API login **[owner]**. **Search is verified against the real API;
       the personal lists are not, and the blocker is one click on the dashboard.**
       > The login completed for real on 2026-10-03 (token written, `0600`, scopes granted), which
