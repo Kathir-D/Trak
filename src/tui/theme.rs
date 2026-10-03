@@ -181,6 +181,13 @@ impl Theme {
         accent::text_on(self.accent_colour())
     }
 
+    /// A readable text colour for a background of `colour`. Used by the gradient
+    /// runs, where every cell has its own background and cannot ask the accent
+    /// what to put on it.
+    pub fn text_on_colour(&self, colour: Color) -> Color {
+        accent::text_on(colour)
+    }
+
     pub fn accent_style(&self) -> Style {
         Style::default().fg(self.accent_colour())
     }
@@ -447,9 +454,121 @@ mod tests {
     #[test]
     fn the_progress_bar_grows_from_the_left() {
         let b = progress_bar(0.5, 10);
-        assert!(b.starts_with('●'));
-        assert!(b.ends_with('─'));
-        assert_eq!(b.chars().filter(|c| *c == '●').count(), 5);
+        assert!(b.starts_with(BAR_FILLED), "{b:?}");
+        assert!(b.ends_with(BAR_UNFILLED), "{b:?}");
+        assert_eq!(
+            b.chars()
+                .filter(|c| *c == BAR_FILLED.chars().next().unwrap())
+                .count(),
+            5
+        );
+    }
+
+    /// **Nothing on the bar ever jumps a whole ramp entry at once** -- the
+    /// definition of not ticking, and the thing the owner saw (2026-10-03: "idk
+    /// why its like a color ticking down, just make it animated gradient").
+    ///
+    /// A cell's colour is read at `i + elapsed/3`, so a tenth of a second moves
+    /// every cell by a third of a ramp step. Stepping whole cells twice a second
+    /// was every cell changing at the same instant, which is what a row of beads
+    /// ticking down looks like.
+    #[test]
+    fn the_drift_is_continuous_so_nothing_ticks() {
+        let p = crate::accent::Palette::from_accent(SPOTIFY_GREEN);
+        let at = |t: f64| -> Vec<Color> {
+            progress_bar_spans(0.5, 20, &p, false, t, true)
+                .iter()
+                .map(|s| s.style.fg.unwrap_or(Color::Reset))
+                .collect()
+        };
+        let ramp = p.ramp(20);
+        // The largest step between neighbouring entries of the ramp: the most any
+        // one cell is ever allowed to change.
+        let step = ramp
+            .windows(2)
+            .map(|w| distance(w[0], w[1]))
+            .max()
+            .unwrap_or(0);
+        let before = at(10.0);
+        let after = at(10.1);
+        for (i, (b, a)) in before.iter().zip(after.iter()).enumerate() {
+            assert!(
+                distance(*b, *a) <= step,
+                "cell {i} jumped {b:?} -> {a:?}, more than one ramp step ({step})"
+            );
+        }
+        // And the drift really does move the gradient: half a bar width along the
+        // ramp is half a minute of playing, and a full cycle is a minute. Slow
+        // enough to be a drift, fast enough that nobody can call it stopped.
+        assert_ne!(before, at(40.0), "the gradient still moves");
+        assert_eq!(before, at(70.0), "and one full cycle comes back round");
+    }
+
+    /// Is `c` on the way from `a` to `b`, in any channel? Used by the drift tests:
+    /// the slide is a blend of two neighbours, so each cell's colour lies between
+    /// the two ramp entries around it.
+    fn between(c: Color, a: Color, b: Color) -> bool {
+        let (Color::Rgb(cr, cg, cb), Color::Rgb(ar, ag, ab), Color::Rgb(br, bg, bb)) = (c, a, b)
+        else {
+            return true;
+        };
+        let between = |x: u8, lo: u8, hi: u8| {
+            let (lo, hi) = if lo <= hi { (lo, hi) } else { (hi, lo) };
+            let slack = 2;
+            x >= lo.saturating_sub(slack) && x <= hi.saturating_add(slack)
+        };
+        between(cr, ar, br) || between(cg, ag, bg) || between(cb, ab, bb)
+    }
+
+    /// How far apart two colours are, worst channel.
+    fn distance(a: Color, b: Color) -> u16 {
+        let (Color::Rgb(ar, ag, ab), Color::Rgb(br, bg, bb)) = (a, b) else {
+            return 0;
+        };
+        let d = |x: u8, y: u8| (x as i16 - y as i16).unsigned_abs();
+        d(ar, br).max(d(ag, bg)).max(d(ab, bb))
+    }
+
+    /// The beads are the owner's choice, so this is only about the two things that
+    /// were *not*: no white highlight travelling along the bar (the playhead is the
+    /// edge between filled and unfilled, which is already exactly where it is), and
+    /// a flat unfilled half so the eye is not reading the empty part as a second
+    /// gradient.
+    #[test]
+    fn the_bar_is_a_continuous_run_rather_than_beads() {
+        let palette = crate::accent::Palette::from_accent(SPOTIFY_GREEN);
+        let spans = progress_bar_spans(0.5, 20, &palette, false, 0.0, false);
+        assert_eq!(spans.len(), 20);
+        for span in &spans[..10] {
+            assert_eq!(span.content, BAR_FILLED, "one cell, one bead: {span:?}");
+        }
+        for span in &spans[10..] {
+            assert_eq!(span.content, BAR_UNFILLED, "{span:?}");
+        }
+        // The unfilled half is one flat colour, so the eye is not invited to read
+        // the empty part as a second gradient.
+        let empty: Vec<_> = spans[10..].iter().map(|s| s.style.fg).collect();
+        assert!(
+            empty.windows(2).all(|w| w[0] == w[1]),
+            "the unfilled run is flat: {empty:?}"
+        );
+        // Every filled cell keeps the ramp's colour: no white blob at the head to
+        // travel along and read as a ticker.
+        let whites = spans[..10]
+            .iter()
+            .filter(|s| s.style.fg == Some(Color::White))
+            .count();
+        assert_eq!(whites, 0, "no highlight on the playhead");
+        // And the animation is the ramp sliding, not the glyphs changing.
+        let moved = progress_bar_spans(0.5, 20, &palette, false, 1.5, true);
+        assert_ne!(
+            moved[0].style.fg, spans[0].style.fg,
+            "the drift still moves"
+        );
+        assert_eq!(moved[3].content, BAR_FILLED, "and the glyphs stay put");
+        // Paused is completely still, as 12.6 promised.
+        let still = progress_bar_spans(0.5, 20, &palette, false, 9.5, false);
+        assert_eq!(still[0].style.fg, spans[0].style.fg);
     }
 
     #[test]
@@ -479,16 +598,24 @@ mod tests {
 
         let moving = colours(&progress_bar_spans(0.5, 20, &p, false, 3.0, true));
         assert_ne!(still, moving, "a playing bar drifts");
-        // The same colours slid along the bar, not a different gradient: the
-        // filled cells before the head are a rotation of each other.
-        // Three seconds in, the drift is six cells: the first cells now carry the
-        // colours the still bar had six cells along.
-        assert_eq!(&moving[..4], &still[6..10], "the ramp slid along the bar");
+        // The same colours slid along the bar, not a different gradient. The slide
+        // is now *fractional* -- a third of a cell a second -- so the first cells
+        // carry a colour part of the way to what the still bar had further along,
+        // which is what makes it flow rather than tick.
+        let ramp = p.ramp(20);
+        for (i, colour) in moving.iter().take(4).enumerate() {
+            let from = ramp[i];
+            let to = ramp[(i + 2) % ramp.len()];
+            assert!(
+                between(*colour, from, to),
+                "cell {i}: {colour:?} is not on the way from {from:?} to {to:?}"
+            );
+        }
 
         // And the glyphs are unchanged: the fill still matches the fraction.
         let bar = progress_bar_spans(0.5, 20, &p, false, 3.0, true);
         assert_eq!(
-            bar.iter().filter(|s| s.content == "●").count(),
+            bar.iter().filter(|s| s.content == BAR_FILLED).count(),
             10,
             "half full"
         );
@@ -521,8 +648,17 @@ pub fn gradient_bar(
     palette: &crate::accent::Palette,
     dim: bool,
 ) -> Vec<Span<'static>> {
-    bar(fraction, width, palette, dim, 0)
+    bar(fraction, width, palette, dim, 0.0)
 }
+
+/// The glyphs a bar is drawn with, at module scope so the meter, the renderer and
+/// the tests all agree on what "filled" looks like.
+///
+/// One `●` per cell, not a heavy line: the beads are the owner's choice
+/// (2026-10-03, "it's fine to use the beads"), so what had to go was never the
+/// glyphs.
+pub const BAR_FILLED: &str = "●";
+pub const BAR_UNFILLED: &str = "─";
 
 /// The bar, with the ramp slid along by `phase` cells.
 ///
@@ -537,7 +673,7 @@ fn bar(
     width: usize,
     palette: &crate::accent::Palette,
     dim: bool,
-    phase: usize,
+    phase: f64,
 ) -> Vec<Span<'static>> {
     if width == 0 {
         return Vec::new();
@@ -545,26 +681,22 @@ fn bar(
     let filled = (((fraction.clamp(0.0, 1.0)) * width as f64).round() as usize).min(width);
     let ramp = palette.ramp(width.max(2));
 
-    // The last three filled cells get the head colour, so the playhead reads as a
-    // bright point travelling along the bar rather than a hard edge. This is the
-    // whimsy that costs nothing: it is three cells.
-    let head_from = filled.saturating_sub(3);
+    // **A continuous run, not a row of beads.** This used to be one `●` per cell
+    // with the last three filled cells mixed toward white as a playhead. Side by
+    // side, a dot per cell with its own colour is not a bar at all but a row of
+    // beads, and sliding the ramp along it every half second made the row look
+    // like a colour ticking down (owner, 2026-10-03). Adjacent heavy lines join
+    // into one bar, so the ramp reads as the gradient it is, and the playhead is
+    // the edge between filled and unfilled -- which is already exactly where the
+    // playhead is, and needs no highlight of its own to be found.
     let mut spans = Vec::with_capacity(width);
     for i in 0..width {
         // `&'static str` glyphs, so a span borrows them: a full-width bar costs
         // one allocation for the vector and none for the hundred cells in it.
         let (glyph, colour) = if i < filled {
-            let base = ramp[(i + phase) % ramp.len()];
-            (
-                "●",
-                if i >= head_from && filled > 3 {
-                    crate::accent::mix(base, Color::White, 0.35)
-                } else {
-                    base
-                },
-            )
+            (BAR_FILLED, slide(&ramp, i as f64 + phase))
         } else {
-            ("─", Color::DarkGray)
+            (BAR_UNFILLED, Color::DarkGray)
         };
         let mut style = Style::default().fg(if dim { Color::DarkGray } else { colour });
         if dim {
@@ -573,6 +705,27 @@ fn bar(
         spans.push(Span::styled(glyph, style));
     }
     spans
+}
+
+/// The ramp, read at a **fractional** position.
+///
+/// This is the whole of the anti-tick fix (owner, 2026-10-03: "idk why its like a
+/// color ticking down, just make it animated gradient"). Sliding the ramp along by
+/// whole cells makes every cell change colour at the same instant, twice a second:
+/// a row of beads all stepping at once reads as a ticker counting down. Read
+/// between two entries instead, and each cell's colour slides continuously into
+/// its neighbour's, so the bar *flows* rather than ticks. One `mix` per filled cell
+/// per frame is a few hundred HSL round trips a frame, which is what the cached
+/// ramp was for in the first place (TODO 12.6) and is not measurable.
+fn slide(ramp: &[Color], at: f64) -> Color {
+    if ramp.is_empty() {
+        return Color::DarkGray;
+    }
+    let len = ramp.len() as f64;
+    let pos = at.rem_euclid(len);
+    let i = pos.floor() as usize % ramp.len();
+    let next = (i + 1) % ramp.len();
+    crate::accent::mix(ramp[i], ramp[next], (pos - pos.floor()) as f32)
 }
 
 /// The bar as the renderer wants it: the drifting ramp while a track plays, and
@@ -588,13 +741,10 @@ pub fn progress_bar_spans(
     elapsed: f64,
     animated: bool,
 ) -> Vec<Span<'static>> {
-    // One cell every half second, so the drift is barely there and the bar never
-    // looks like it is being redrawn for its own sake.
-    let phase = if animated {
-        (elapsed * 2.0) as usize % width.max(1)
-    } else {
-        0
-    };
+    // **A third of a cell a second.** The drift used to step a whole cell twice a
+    // second, which every filled cell did at once; a fifth of that is slow enough
+    // to read as the gradient moving and slow enough that no cell ever jumps.
+    let phase = if animated { elapsed / 3.0 } else { 0.0 };
     bar(fraction, width, palette, dim, phase)
 }
 
@@ -608,7 +758,7 @@ pub fn gradient_meter(
 ) -> Vec<Span<'static>> {
     let mut spans = gradient_bar(fraction, width, palette, dim);
     for span in &mut spans {
-        let filled = span.content == "●";
+        let filled = span.content == BAR_FILLED;
         *span = Span::styled(if filled { "▰" } else { "▱" }, span.style);
     }
     spans

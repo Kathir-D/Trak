@@ -455,6 +455,15 @@ pub struct WebState {
     /// Whether `/` has focused the input. While it is focused, every printable
     /// key is a character rather than a command.
     pub search_focus: bool,
+    /// Whether the arrow keys are driving the list in the focused tab, or the
+    /// dashboard.
+    ///
+    /// `j`/`k` move a row whichever way round they arrive, so a `↓` cannot be told
+    /// from a `j` by the time it gets here. The owner asked for the down arrow to
+    /// *focus into* the tab and the arrows to move around inside it (2026-10-03),
+    /// and a focus flag is what makes that visible rather than merely true: while
+    /// it is set, the pane says so and `↑` off the top row leaves again.
+    pub list_focus: bool,
     pub query: String,
     /// The query whose results are on screen. A response for anything else is
     /// dropped rather than shown, because a slow request for "ma" landing after
@@ -612,6 +621,7 @@ impl Default for WebState {
             connection: Connection::default(),
             hint_shown: false,
             search_focus: false,
+            list_focus: false,
             query: String::new(),
             search_shown: String::new(),
             results: SearchResults::default(),
@@ -1830,10 +1840,31 @@ fn web_tab_key(
     match c {
         '/' => {
             app.web.search_focus = true;
+            // Typing is not navigating, and the arrows have to mean one thing at
+            // a time (owner: everything reachable from the keyboard alone).
+            app.web.list_focus = false;
             true
         }
         'j' | 'k' => {
             let down = c == 'j';
+            // `↓` focuses into the list and `↑` off the top row leaves it, so the
+            // arrows alone can get a row and back out again. A tab with nothing in
+            // it has nothing to focus, and says so rather than pretending.
+            let rows = web_rows(app);
+            if rows == 0 {
+                app.web.list_focus = false;
+                return true;
+            }
+            if !app.web.list_focus {
+                if down {
+                    app.web.list_focus = true;
+                }
+                return true;
+            }
+            if !down && web_cursor(app) == 0 {
+                app.web.list_focus = false;
+                return true;
+            }
             web_move(app, down, 1);
             true
         }
@@ -1854,9 +1885,14 @@ fn web_tab_key(
             true
         }
         '\x1b' => {
-            // Back out of a page before back out of the tab, or out of the tab
-            // before quitting: a person who opened an album and pressed escape
-            // did not mean to leave trak.
+            // Out of the list, then out of a page, then out of the tab, and only
+            // then out of trak: a person who opened an album and pressed escape
+            // did not mean to leave trak, and neither did one who moved a cursor
+            // and pressed escape.
+            if app.web.list_focus {
+                app.web.list_focus = false;
+                return true;
+            }
             if app.web.close_page() {
                 return true;
             }
@@ -2106,10 +2142,12 @@ impl WebState {
 }
 
 /// Move the cursor within whichever list the tab is showing.
-fn web_move(app: &mut App, down: bool, n: usize) {
-    let tab = app.tab;
-    let web = &mut app.web;
-    let len = match tab {
+/// How many rows the focused tab is showing. Zero means there is nothing to move
+/// a cursor over, which is a different thing from a tab with rows the cursor is
+/// not in yet.
+pub fn web_rows(app: &App) -> usize {
+    let web = &app.web;
+    match app.tab {
         Tab::Search => web.group_rows(web.group).len(),
         Tab::Playlists => web.playlists.items.len(),
         Tab::Liked => web.liked.items.len(),
@@ -2120,25 +2158,37 @@ fn web_move(app: &mut App, down: bool, n: usize) {
             LibrarySection::Recent => web.library.recent.items.len(),
         },
         _ => 0,
-    };
-    // No rows means no move, rather than a cursor at 0 in an empty list that
-    // looks selected.
-    if len == 0 {
-        return;
     }
-    let cur = match tab {
+}
+
+/// Which row of the focused tab the cursor is on.
+pub fn web_cursor(app: &App) -> usize {
+    let web = &app.web;
+    match app.tab {
         Tab::Search => web.group_row[web.group],
         Tab::Playlists => web.playlist_cursor,
         Tab::Liked => web.liked_cursor,
         Tab::Queue => web.queue_cursor,
         Tab::Library => web.library_cursor,
         _ => 0,
-    };
+    }
+}
+
+fn web_move(app: &mut App, down: bool, n: usize) {
+    let len = web_rows(app);
+    // No rows means no move, rather than a cursor at 0 in an empty list that
+    // looks selected.
+    if len == 0 {
+        return;
+    }
+    let cur = web_cursor(app);
     let next = if down {
         (cur + n).min(len.saturating_sub(1))
     } else {
         cur.saturating_sub(n)
     };
+    let tab = app.tab;
+    let web = &mut app.web;
     match tab {
         Tab::Search => web.group_row[web.group] = next,
         Tab::Playlists => web.playlist_cursor = next,
@@ -2255,13 +2305,25 @@ fn handle_key(app: &mut App, c: char, commands: &mut Vec<PlayerCommand>, web: &m
             app.settings_open = true;
             crate::tui::settings::open(app);
         }
-        '\t' | ARROW_RIGHT => app.tab = app.tab.next(),
+        // Changing tab hands the arrows back to the dashboard: the list focus
+        // belongs to the tab it was given in, and a cursor left "focused" on a tab
+        // nobody is looking at is how a `j` ends up somewhere nobody expected.
+        '\t' | ARROW_RIGHT => {
+            app.web.list_focus = false;
+            app.tab = app.tab.next();
+        }
         // Shift-Tab arrives as an unbound sentinel from the event loop.
-        'Z' | ARROW_LEFT => app.tab = app.tab.prev(),
+        'Z' | ARROW_LEFT => {
+            app.web.list_focus = false;
+            app.tab = app.tab.prev();
+        }
         // One table, not one arm per digit: the number a tab is drawn with and
         // the key that selects it are the same fact, and two tables is one of
         // them being wrong.
-        c if Tab::from_digit(c).is_some() => app.tab = Tab::from_digit(c).unwrap_or(app.tab),
+        c if Tab::from_digit(c).is_some() => {
+            app.web.list_focus = false;
+            app.tab = Tab::from_digit(c).unwrap_or(app.tab);
+        }
         'j' => {
             let next = app.history_cursor + 1;
             app.select(next);

@@ -166,6 +166,16 @@ pub struct Images {
     /// The cover as one colour per cell, for the lyrics page, and what it was
     /// sampled for. Kept because resampling it on every frame is wasted work.
     backdrop: Option<Backdrop>,
+    /// Set when the protocol was rebuilt this frame, so the caller can repaint.
+    ///
+    /// A Kitty placement covers exactly the cells it was encoded for, and the new
+    /// cover's placement is a different picture at a possibly different size, so
+    /// the *terminal* is left holding cells the new image does not cover. ratatui
+    /// cannot fix that: those cells are the image's own, and its diff never writes
+    /// them. The result is the old cover's grey placeholder boxes and stripes left
+    /// on screen beside the new one (owner, 2026-10-03, "remove those random
+    /// smaller gray boxes"). The only cure is to clear the screen and draw again.
+    repaint: bool,
 }
 
 /// The cover sampled one colour per cell, keyed by the image and the rectangle.
@@ -193,6 +203,7 @@ impl Default for Images {
             protocol: None,
             built_for: None,
             backdrop: None,
+            repaint: false,
         }
     }
 }
@@ -227,6 +238,7 @@ impl Images {
             protocol: None,
             built_for: None,
             backdrop: None,
+            repaint: false,
         }
     }
 
@@ -242,6 +254,7 @@ impl Images {
             protocol: None,
             built_for: None,
             backdrop: None,
+            repaint: false,
         }
     }
 
@@ -249,6 +262,12 @@ impl Images {
     /// (10, 20) in Terminal.app; the art has to be sized in cells, not pixels.
     pub fn cell_size(&self) -> (u16, u16) {
         self.backend.cell()
+    }
+
+    /// Whether the image was re-encoded since this was last asked, and clear the
+    /// answer. The caller repaints the whole screen when it is true.
+    pub fn repainted(&mut self) -> bool {
+        std::mem::take(&mut self.repaint)
     }
 
     /// Use the cell size the terminal reports instead of the one that was
@@ -309,6 +328,9 @@ impl Images {
         if self.built_for.as_ref() != Some(&key) {
             self.protocol = Some(self.backend.protocol_for(image.clone(), sized));
             self.built_for = Some(key);
+            // A new picture, or the same picture at a new size. Either way the
+            // terminal is holding cells the new placement will not cover.
+            self.repaint = true;
         }
         let Some(protocol) = &mut self.protocol else {
             return;
@@ -1534,14 +1556,11 @@ fn draw_visualizer(f: &mut Frame, hole: Rect, app: &App, theme: &Theme) {
 }
 
 fn draw_tabs(f: &mut Frame, area: Rect, app: &App, theme: &Theme, regions: &mut Regions) {
-    let selected_style = Style::default()
-        .fg(theme.accent_text())
-        .bg(theme.accent_colour());
     // The segments come first: the title is built from them and the clickable
     // rects come from them, so a tab cannot be drawn in one place and clicked
     // somewhere else.
     // Two border cells, plus the one space each side of the title inside it.
-    let strip = tab_strip(app, selected_style, (area.width as usize).saturating_sub(4));
+    let strip = tab_strip(app, theme, (area.width as usize).saturating_sub(4));
     let block = pane_block(strip.line(), theme, false);
     f.render_widget(block, area);
     let body = inner(area);
@@ -1774,7 +1793,7 @@ impl TabStrip {
 ///
 /// Elision is marked with `‹` and `›` rather than being silent, so a missing tab
 /// reads as "there are more" and not as "that is all of them".
-fn tab_strip(app: &App, selected: Style, avail: usize) -> TabStrip {
+fn tab_strip(app: &App, theme: &Theme, avail: usize) -> TabStrip {
     // Both label forms, because the selected one is narrower than the unselected
     // one for a numbered tab: `[6]Lyrics` against ` 6 Lyrics `. Measuring the
     // strings is what stops the selected tab being the one that does not fit.
@@ -1845,10 +1864,11 @@ fn tab_strip(app: &App, selected: Style, avail: usize) -> TabStrip {
         }
         segments.push((width as u16, text.clone()));
         width += text.chars().count();
-        spans.push(Span::styled(
-            text,
-            if is_sel { selected } else { Style::default() },
-        ));
+        if is_sel {
+            spans.extend(gradient_title(&text, theme));
+        } else {
+            spans.push(Span::styled(text, Style::default()));
+        }
         gap = true;
     }
     if hidden_after > 0 {
@@ -1862,6 +1882,37 @@ fn tab_strip(app: &App, selected: Style, avail: usize) -> TabStrip {
         let _ = width;
     }
     TabStrip { segments, spans }
+}
+
+/// A focused title as a **gradient run** rather than one flat accent block.
+///
+/// The focused tab used to be `accent_text` on `accent_colour`: one colour, and a
+/// flat one, which reads as "grey-ish tab that happens to be highlighted" next to
+/// the album's own colours elsewhere on the screen (owner, 2026-10-03: "make sure
+/// there is something someone can notice if it is in focus, like turn it from gray
+/// to the gradient"). One span per character, each carrying the next colour of the
+/// album's ramp with the matching readable text colour under it, so the strip is
+/// the cover's palette rather than a single swatch of it.
+///
+/// One span per character is affordable because this is the focused tab only: ten
+/// or so cells, once a frame, and only when the tab changes.
+pub fn gradient_title(text: &str, theme: &Theme) -> Vec<Span<'static>> {
+    let chars: Vec<char> = text.chars().collect();
+    let ramp = theme.palette.ramp(chars.len().max(2));
+    chars
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let colour = ramp[(i * ramp.len()) / chars.len().max(1)];
+            Span::styled(
+                c.to_string(),
+                Style::default()
+                    .fg(colour)
+                    .bg(theme.text_on_colour(colour))
+                    .add_modifier(Modifier::BOLD),
+            )
+        })
+        .collect()
 }
 
 fn history_lines<'a>(app: &'a App, theme: &'a Theme) -> Vec<Line<'a>> {
@@ -3069,7 +3120,7 @@ mod tests {
         let shown = |tab: Tab| {
             let mut app = app_at(100, 30);
             app.tab = tab;
-            let strip = tab_strip(&app, Style::default(), 60);
+            let strip = tab_strip(&app, &Theme::default(), 60);
             let labels: Vec<String> = strip.segments.iter().map(|(_, t)| t.clone()).collect();
             let at = labels.iter().position(|l| l.starts_with('[')).unwrap_or(99);
             (at, labels.len())
@@ -3674,6 +3725,49 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// **A re-encoded cover asks for a repaint, exactly once** (owner, 2026-10-03,
+    /// "remove those random smaller gray boxes"). A Kitty placement covers only the
+    /// cells it was encoded for, so a new cover at a new size leaves the old
+    /// placement's cells on the terminal and ratatui cannot write them -- they are
+    /// the image's own. The renderer cannot clear the screen from inside a frame,
+    /// so it raises the flag and the loop does it.
+    #[test]
+    fn a_new_cover_asks_for_a_repaint_once() {
+        let square = || {
+            image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+                640,
+                640,
+                image::Rgb([10, 20, 30]),
+            ))
+        };
+        let tall = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            300,
+            900,
+            image::Rgb([40, 50, 60]),
+        ));
+        let mut images = Images::halfblocks((10, 20));
+        assert!(!images.repainted(), "nothing has been drawn yet");
+
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 12)).unwrap();
+        let a = PathBuf::from("/tmp/a.png");
+        let b = PathBuf::from("/tmp/b.png");
+        let _ = term.draw(|f| images.draw(f, &a, &square(), f.area()));
+        assert!(images.repainted(), "the first cover asks");
+        assert!(!images.repainted(), "and only once");
+
+        let _ = term.draw(|f| images.draw(f, &a, &square(), f.area()));
+        assert!(!images.repainted(), "an unchanged cover is quiet");
+
+        let _ = term.draw(|f| images.draw(f, &b, &square(), f.area()));
+        assert!(images.repainted(), "a new cover asks, same size or not");
+
+        // And a resize asks, because the placement was encoded for the old size.
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(24, 8)).unwrap();
+        let _ = term.draw(|f| images.draw(f, &b, &tall, f.area()));
+        assert!(images.repainted(), "a smaller terminal asks");
+        assert!(!images.repainted(), "once is once");
     }
 
     /// The cell size reply, parsed. The terminal answers height first, and a

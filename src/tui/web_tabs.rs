@@ -440,20 +440,26 @@ fn library_lines(app: &App, theme: &Theme) -> Vec<Line<'static>> {
 /// The three section names with the one showing picked out, drawn the way the
 /// tab strip picks out the selected tab: the same control, one level down.
 fn section_strip(section: LibrarySection, theme: &Theme) -> Line<'static> {
-    let selected = Style::default()
-        .fg(theme.accent_text())
-        .bg(theme.accent_colour());
     let mut spans = Vec::new();
     for one in LibrarySection::ALL {
         // Both forms are padded the same width, so the strip has the same shape
         // whichever section is showing and the selected one reads as a filled
         // block rather than a bracketed word in a gap.
-        let (label, style) = if one == section {
-            (format!(" [{}] ", one.label()), selected)
+        //
+        // And the selected one is the album's gradient rather than one flat
+        // accent, for the same reason the focused tab is (owner, 2026-10-03):
+        // this strip is the only thing on the screen saying which of three lists
+        // you are looking at, so it should look like the rest of the picture.
+        let label = if one == section {
+            format!(" [{}] ", one.label())
         } else {
-            (format!(" {} ", one.label()), Style::default())
+            format!(" {} ", one.label())
         };
-        spans.push(Span::styled(label, style));
+        if one == section {
+            spans.extend(crate::tui::render::gradient_title(&label, theme));
+        } else {
+            spans.push(Span::styled(label, Style::default()));
+        }
     }
     Line::from(spans)
 }

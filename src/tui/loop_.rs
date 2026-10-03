@@ -783,22 +783,49 @@ fn event_loop<B: ratatui::backend::Backend>(
         if check_size {
             last_size_check = Instant::now();
         }
-        if draw_if_changed(terminal, &mut last_frame, check_size, |f| {
-            crate::tui::render::draw_with(f, &app, &theme, &mut regions, &mut images);
-            if settings_open {
-                crate::tui::settings::render(f, f.area(), &app, &theme);
-            }
-            // Last, so it sees every cell: NO_COLOR and 16/256-colour
-            // terminals are handled once here, not by each widget (11.6).
-            if light {
-                crate::tui::colour::for_light_background(f.buffer_mut());
-            }
-            crate::tui::colour::apply(f.buffer_mut(), depth);
-            crate::tui::bidi::fence(f.buffer_mut());
-        })
+        if paint_frame(
+            terminal,
+            &mut last_frame,
+            check_size,
+            &app,
+            &theme,
+            &mut regions,
+            &mut images,
+            settings_open,
+            light,
+            depth,
+        )
         .is_err()
         {
             break;
+        }
+        // **A new cover means a full repaint.** A Kitty placement covers exactly
+        // the cells it was encoded for, so the terminal keeps the cells the new
+        // one does not cover, and ratatui's diff cannot write them: they are the
+        // image's own. What stays on screen is the old cover's grey placeholder
+        // boxes and stripes (owner, 2026-10-03, "remove those random smaller gray
+        // boxes"). Clearing and painting again in the same frame costs one extra
+        // paint on the frames where the cover changes and is invisible; leaving it
+        // to the next frame would blink.
+        if images.repainted() {
+            let _ = terminal.clear();
+            last_frame = None;
+            if paint_frame(
+                terminal,
+                &mut last_frame,
+                true,
+                &app,
+                &theme,
+                &mut regions,
+                &mut images,
+                settings_open,
+                light,
+                depth,
+            )
+            .is_err()
+            {
+                break;
+            }
         }
 
         // 7. Tell the app how many history rows fit, whenever that changes, so
@@ -1490,6 +1517,42 @@ const SIZE_EVERY: Duration = Duration::from_secs(1);
 fn light_background(depth: crate::tui::colour::Depth) -> bool {
     depth != crate::tui::colour::Depth::None
         && crate::tui::colour::query_background().is_some_and(crate::tui::colour::is_light)
+}
+
+/// One painted frame, in one place.
+///
+/// It is a function rather than inline code because the event loop paints a
+/// second time over a cleared screen whenever the cover was re-encoded (see
+/// `Images::repainted`), and two copies of "draw the dashboard, then the
+/// settings screen, then fix the colours for this terminal" would be two copies
+/// to keep in step. `force` skips the "nothing changed" check, which is what the
+/// repaint needs: the buffer is identical and only the terminal is stale.
+#[allow(clippy::too_many_arguments)]
+fn paint_frame<B: ratatui::backend::Backend>(
+    terminal: &mut Terminal<B>,
+    last_frame: &mut Option<ratatui::buffer::Buffer>,
+    force: bool,
+    app: &App,
+    theme: &Theme,
+    regions: &mut crate::tui::render::Regions,
+    images: &mut crate::tui::render::Images,
+    settings_open: bool,
+    light: bool,
+    depth: crate::tui::colour::Depth,
+) -> std::io::Result<bool> {
+    draw_if_changed(terminal, last_frame, force, |f| {
+        crate::tui::render::draw_with(f, app, theme, regions, images);
+        if settings_open {
+            crate::tui::settings::render(f, f.area(), app, theme);
+        }
+        // Last, so it sees every cell: NO_COLOR and 16/256-colour terminals are
+        // handled once here, not by each widget (11.6).
+        if light {
+            crate::tui::colour::for_light_background(f.buffer_mut());
+        }
+        crate::tui::colour::apply(f.buffer_mut(), depth);
+        crate::tui::bidi::fence(f.buffer_mut());
+    })
 }
 
 fn draw_if_changed<B: ratatui::backend::Backend>(
