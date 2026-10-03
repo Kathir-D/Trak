@@ -75,6 +75,13 @@ Rules:
 - The layout is computed from the terminal size on every resize. Borders must never wrap or tear.
   Below the breakpoints (tuned in TODO 3.x) the right pane moves under Now Playing, then collapses
   to the compact strip (title, artist, progress, controls).
+- **Nothing is left blank for the sake of the layout.** The Now Playing pane is as wide as its
+  content needs — a square cover is about twice as many cells across as it is down, so the height it
+  is given decides the width (within 30 cells and half the terminal). The cover then takes every row
+  the text does not need, up to the height at which it fills that width, and whatever neither of
+  them fills is split evenly above and below the block rather than dumped in one gap. A tab pane
+  with a short block in it centres the block. Measured across 30x8 to 256x90 (owner, 2026-10-02:
+  the dashboard had been laid out for one size and showed a third of a tall screen as empty).
 - **Art vs visualizer** is a toggle (`a`). When the visualizer is shown there is **no art anywhere**,
   but the accent colour still comes from the cover (fetch it invisibly).
 - **Right-pane tabs** are one strip in both versions (built in 7.13; the earlier "B has three,
@@ -88,7 +95,8 @@ Rules:
   - Info: everything AppleScript exposes (see section 5).
   - The five Web API tabs are drawn in Version B too, so the layout never changes shape when a
     Client ID is added: each one opens with a one-line notice (`Connection::notice`) saying what
-    is missing and where to fix it (`trak config`, then `s` for the guided setup), and is otherwise
+    is missing and where to fix it -- by key, not by command: `press , then s`, and on the standalone
+    settings screen `s` alone -- and is otherwise
     empty. (The first-ever launch also shows the one-time hint about `,` and the Client ID.)
 - Full-screen lyrics (`L`) draw over the album cover, darkened so the words stay readable; with no
   cover (or art turned off) they draw on the plain background.
@@ -155,11 +163,18 @@ carries the citations. The four rules below are not optional reading — each on
 invalidates a decision this section previously made.
 
 - Auth: Authorization Code + PKCE, **loopback redirect on an explicit IP literal**.
-  The redirect URI registered in the dashboard is exactly `http://127.0.0.1` —
-  **no port, no path** — and Trak binds an ephemeral port per login and sends the
-  matching `redirect_uri` in the authorization request. `localhost` is **banned**
-  by Spotify and must never appear in a request. Registering a fixed port is the
-  fallback if the dashboard rejects the no-path form.
+  The redirect URI registered in the dashboard is exactly
+  `http://127.0.0.1:8888/callback` — an explicit loopback IP literal, an explicit
+  port and a path. `localhost` is **banned** by Spotify and must never appear in a
+  request. Trak prefers the registered port at login and falls back to an
+  ephemeral one, which Spotify allows for loopback literals, so a busy port costs
+  nothing.
+  > **Changed 2026-10-02.** This used to be `http://127.0.0.1` with no port and no
+  > path, on the strength of the Spotify guide's prose about registering a loopback
+  > literal "without any port number". **The dashboard refuses that form** — "This
+  > redirect URI is not secure", measured against the real one — while the guide's
+  > own examples all carry a port (`http://127.0.0.1:8000/callback`). The port is
+  > conventional; `docs/WEB-API.md` §1 carries the evidence.
 - Developer mode is assumed, not requested: it **requires the app owner to hold
   Spotify Premium** and **caps the app at 5 allowlisted users**. Trak is a
   personal tool so this is fine, but an un-allowlisted account gets a 403 and the

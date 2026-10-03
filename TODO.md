@@ -1023,6 +1023,67 @@ Requires Sonar installed and running (`brew install --cask kathir-d/tap/sonar`) 
 
 ---
 
+## Phase 12 — Reports from the field (2026-10-02)
+
+Everything here came from the owner running 0.1.1 on a second machine: a different
+terminal size, a crash, and "it feels slow". None of it was visible on the machine
+the dashboard had been built on.
+
+- [x] 12.1 The dashboard has no dead space at any size. The cover is now as wide as its content
+      needs (a square cover is about twice as many cells across as it is down, so the height it is
+      given decides the width, within 30 cells and half the terminal), it takes every row the text
+      does not need up to the height at which it fills that width, and the surplus is split evenly
+      above and below the block. A tab pane with a short block in it centres it. The gradient rule
+      follows the block instead of the floor of the pane.
+      > The report was a screenshot of a 200x62 terminal: the cover was frozen at twenty rows in a
+      > sixty-row pane with the text at the top and a third of the screen empty under it. The
+      > "46 % of the width" split was the cause -- a wide terminal gave a small cover in a large
+      > empty box. Pinned by `the_now_playing_pane_has_no_gap_inside_its_block` at six sizes.
+- [x] 12.2 The visualizer loses its gradient spine. A second gradient beside a gradient, at the
+      cost of two of the pane's columns, read as a stray bar of colour.
+      > `theme::spine` is gone; the visualizer takes the cover's whole rectangle.
+- [x] 12.3 A keypress is acted on in the frame it arrives in. Every queued terminal event is read
+      per frame (bounded at 64) and the frame wait is skipped after input; a command pressed while
+      a write is in flight is **held** rather than dropped, with volume steps adding up.
+      > Measured on a pty with a fake `osascript`: six keys and a quit went from 673 ms to 139 ms.
+      > A held key used to repeat three times a second, and half of every burst of keypresses was
+      > silently dropped by `app.busy`.
+- [x] 12.4 The meter and the bar move on the keypress. They are the user's own state; the
+      read-back still decides whether a write landed (COMPAT rule 5), it no longer decides when the
+      screen catches up. Volume also reads one property (`Player::volume`) instead of the 17-field
+      batch, because the step needs the current volume and the read-back needs the value Spotify
+      took.
+      > A volume keypress went from three full state reads (~1.5 s) to the write reaching Spotify in
+      > **302 ms**, with the meter moving at once.
+- [x] 12.5 **Crash**: the idle card is 34 cells wide and was drawn into a 31-cell terminal with no
+      clamp, so ratatui panicked on an index outside the buffer. Found by fuzzing the TUI in a pty.
+      > `Clear` clips nothing, so a too-big widget is a panic and not a small card. The unit tests
+      > had walked 25, 35, 50 and 80 columns and never 31.
+- [x] 12.6 Gradients are cached by (palette, width) and the bar's ramp drifts while a track plays.
+      > Every gradient on screen interpolated a few hundred colours in HSL, twice per colour, ten
+      > times a second, for a gradient that only changes when the cover does. Premade crates
+      > (`tui-gradient-block`, `tui-rule`, `ratatui-glamour`) are all thin wrappers around
+      > `colorgrad` and none of them draw a bar with a moving head; see the commit message.
+- [x] 12.7 Lyrics wrap in the side tab. A long line was cut off at the pane's edge with the rest of
+      the words unreachable, because a tab has no sideways scroll.
+- [x] 12.8 The guided setup is written for somebody who has never made a Spotify app: what to
+      click, what to paste, and what "it worked" looks like, in the dashboard's own words. The panel
+      scrolls to the step the cursor is on. Every Web API notice names the **keys** (`press , then
+      s`) rather than a command.
+- [x] 12.9 The registered redirect URI is `http://127.0.0.1:8888/callback`, not `http://127.0.0.1`.
+      > The dashboard refuses the port-less form with "This redirect URI is not secure" (measured on
+      > the real dashboard 2026-10-02) while the guide's own examples all carry a port. A login
+      > prefers the registered port so the URI sent to Spotify is character for character the
+      > registered one, and falls back to an ephemeral one, which the guide allows for loopback
+      > literals. `docs/WEB-API.md` §1 corrected rather than left contradicting the dashboard.
+- [ ] 12.10 The first real Web API login **[owner]**. The Client ID works and the authorize endpoint
+      accepts the redirect URI, but nobody has clicked "Allow" in the browser yet, so search,
+      playlists, queue, library and the token refresh are still unverified against a real account.
+      > The account also needs Spotify Premium, and the app must list **Web API** under "APIs used"
+      > (a first attempt was created with only Web Playback SDK).
+
+---
+
 ## Backlog (not committed to; do not start without the owner)
 
 - Rebindable keys.

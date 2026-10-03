@@ -139,6 +139,23 @@ on the worker, not a module of its own.
 - **A frame identical to the last one is not sent** (`draw_if_changed` in `loop_.rs`, TODO 11.5):
   the Kitty cover's placeholder row overshoots `unicode-width`, so ratatui's diff would otherwise
   rewrite part of a paused screen every 100 ms.
+- **Every queued terminal event is read per frame, and the frame wait is skipped after input.**
+  crossterm hands over one event per `read` and a frame was 100 ms, so a burst was taken one key per
+  frame: six keys took 673 ms, a held key repeated three times a second, and the *second* `+`/`l`/`n`
+  of a burst was dropped entirely by `app.busy` rather than queued. One command is now held behind
+  the one in flight (volume steps add up) and a frame that has just handled input does not then wait
+  (139 ms for those six keys). **Measured on a pty with a fake `osascript`** that answers in the
+  times `docs/APPLESCRIPT.md` §4 records; the harness lives in `target/scratch/` and is not committed.
+- **The display moves before AppleScript answers.** The meter, the bar and the repeat mode are the
+  user's own state and are drawn on the keypress; the read-back still decides whether a write
+  *landed* (COMPAT rule 5), it just no longer decides when the screen catches up. Volume keys also
+  read one property instead of the 17-field batch (`Player::volume`, ~140 ms against ~430 ms), which
+  took a volume keypress from ~1.5 s to the write reaching Spotify in 302 ms.
+- **Gradients are cached by (palette, width)** (`accent.rs`). Every gradient on screen asked for a
+  ramp every frame and each ramp interpolated a few hundred colours in HSL, twice per colour; the
+  ramp only changes when the cover does. The bar's ramp also **drifts** one cell every half second
+  while a track plays — free, because the bar is already changing — and is completely still when
+  paused.
 
 ## Testing strategy
 
@@ -153,5 +170,7 @@ on the worker, not a module of its own.
 | `install.sh` | `tests/install_sh.rs` runs the real script against a `file://` mirror of a packed release |
 | Web API | Fake `Library` + recorded JSON fixtures; no live network in CI |
 | Real Spotify / real audio / cmux | Manual: `spikes/verify.sh`, the `examples/*-probe` programs, `scripts/screen.py`; the Sonar/headless rows are TODO phase 10, recorded in `docs/COMPAT.md` |
+| The whole TUI | **Fuzzed in a pty.** A `pty.fork()`, a winsize, a fake `osascript` that answers in the measured times, and a stream of random keys at odd sizes and colour depths; anything that dies, panics or fails to leave the alternate screen is a bug. This is how the idle card's out-of-range `Clear` was found (2026-10-02) — a unit test at 35 columns had missed it, because the card is 34 wide. It is a scratch harness under `target/scratch/`, not a committed test, because CI has no pty to give it |
+| Input latency | The same harness, timed: write six keys and a `q`, and time the exit; watch the fake `osascript`'s log for when a write actually reached it |
 
 CI must be green with **no Spotify installed, no network, no audio device**.

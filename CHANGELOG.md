@@ -7,6 +7,65 @@ is in [`docs/RELEASING.md`](docs/RELEASING.md).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-02
+
+Reports from the owner running 0.1.1 on a second machine, at a different terminal
+size: a dashboard with a third of the screen empty, keypresses that felt slow, and
+a crash in the settings screen.
+
+### Fixed
+
+- **A crash.** The idle card (`Spotify isn't running`) is 34 cells wide and was
+  drawn into a narrower terminal without a clamp, so ratatui panicked on an index
+  outside the buffer. Found by fuzzing the whole TUI in a pty across terminal
+  sizes and key streams.
+- **Keys are acted on in the frame they arrive in.** Every queued terminal event
+  is read per frame and the frame wait is skipped after input; a command pressed
+  while a write is in flight is held rather than dropped, with volume steps
+  adding up. Six keys and a quit: **673 ms -> 139 ms**. A held key used to repeat
+  three times a second and half of every burst of keypresses was silently
+  discarded.
+- **The volume meter and the progress bar move on the keypress** instead of after
+  two AppleScript round trips, and a volume keypress reads one property rather
+  than the 17-field batch: the write now reaches Spotify **302 ms** after the key
+  (was about 1.5 s).
+- **Lyrics wrap in the side tab.** A long line was cut off at the pane's edge with
+  the rest of the words unreachable.
+- A config value longer than the comment column gets a space before its comment.
+
+### Changed
+
+- **The dashboard has no dead space at any size.** The Now Playing pane is as wide
+  as its content needs (a square cover is about twice as many cells across as it
+  is down, so the height it is given decides the width), the cover takes every row
+  the text does not need up to the height at which it fills that width, and the
+  surplus is split evenly above and below the block. A tab pane with a short
+  block in it centres it. Checked from 30x8 to 256x90.
+- **The visualizer loses its gradient spine** -- a second gradient beside a
+  gradient, at the cost of two columns of the pane -- and takes the cover's whole
+  rectangle.
+- **Gradients are cached** by palette and width, so a few hundred HSL
+  interpolations a frame became a memcpy. The bar's ramp now drifts one cell
+  every half second while a track plays, and is completely still when paused.
+- **The guided Spotify setup is written for a first-timer**: what to click, what to
+  paste and what "it worked" looks like, in the dashboard's own words. The panel
+  scrolls to the step you are on. Every Web API notice names the **keys**
+  (`press , then s`) rather than a command.
+- **Register `http://127.0.0.1:8888/callback` as the redirect URI.** 0.1.1 said to
+  register `http://127.0.0.1`, on the strength of Spotify's guide prose about
+  registering a loopback literal "without any port number" -- but the dashboard
+  refuses that form ("This redirect URI is not secure", measured 2026-10-02) while
+  the guide's own examples all carry a port. **If you added a Client ID before
+  0.2.0, add this URI to your app in the Spotify dashboard.** A login prefers that
+  exact port and falls back to an ephemeral one, which Spotify allows for loopback
+  literals. `docs/WEB-API.md` §1 is corrected.
+
+### Still unverified
+
+Every Web API tab, the login itself and the token refresh: the Client ID and the
+redirect URI are accepted by Spotify, but nobody has completed a browser approval
+yet, so search, playlists, queue and library have still never met a real account.
+
 ## [0.1.1] - 2026-10-02
 
 ### Fixed

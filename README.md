@@ -138,11 +138,24 @@ open an artist or album, `P` add to a playlist, `X` remove from the open playlis
 | Now Playing, art, lyrics, visualizer, history, CLI | ✅ | ✅ |
 | Search, playlists, queue, liked songs, library | tabs explain what to add | ✅ *(unverified live)* |
 
-To switch to A: `trak config`, press `s` on the settings screen, and follow the four steps (open
-the dashboard, create an app with the redirect URI `http://127.0.0.1`, paste the Client ID, log
-in). Trak keeps the token in `~/.config/trak/token.json` with mode `0600`; see
-[`SECURITY.md`](SECURITY.md). Spotify's development mode limits an app to a handful of users, so
-each person creates their own.
+To switch to A: press `,` inside Trak (or run `trak config`), then `s` for the guided setup. It
+walks you through it in four steps, and copies the one string you have to paste:
+
+1. Open the [Spotify developer dashboard](https://developer.spotify.com/dashboard) and press
+   **Create app**.
+2. Paste this into **Redirect URI** — exactly, it must match:
+   ```
+   http://127.0.0.1:8888/callback
+   ```
+   Tick **Web API**, press **Save**. (`localhost` is rejected by Spotify, and so is the
+   port-less form `http://127.0.0.1`.)
+3. Open the app's **Settings** page and paste the **Client ID** — the 32 letters and numbers.
+4. Press enter and **Allow** in the browser.
+
+Trak keeps the token in `~/.config/trak/token.json` with mode `0600`; see
+[`SECURITY.md`](SECURITY.md). The account that creates the app needs Spotify **Premium**, and
+Spotify's development mode limits an app to a handful of users, so each person creates their own.
+`?` lists every key; `q` saves and closes.
 
 ## Settings
 
