@@ -4,11 +4,14 @@
 //! Four constraints come from `docs/WEB-API.md` and every one of them is a
 //! decision rather than a default:
 //!
-//! - **The registered redirect URI is `http://127.0.0.1`, no port and no path**
-//!   (§1). Spotify allows a dynamic port *only* for a loopback IP literal
-//!   registered without one, so every login binds an ephemeral port and sends
-//!   the matching `redirect_uri`. A fixed port would mean trak fails to log in
-//!   whenever it is taken, which on a laptop is an ordinary Tuesday.
+//! - **The registered redirect URI is a loopback IP literal with an explicit
+//!   port** -- `http://127.0.0.1:8888/callback` (§1). Spotify's own guide lists
+//!   `http://127.0.0.1:8000/callback` as a legal form, and the dashboard *rejects*
+//!   the port-less form with "This redirect URI is not secure" (measured against
+//!   the real dashboard on 2026-10-02, after the port-less form in the prose of
+//!   the guide turned out to be unregisterable). A login tries that exact port
+//!   first and falls back to an ephemeral one, which the guide allows for loopback
+//!   literals, so a busy port costs nothing.
 //! - **`localhost` is banned** (§1, quoted: "localhost is not allowed as redirect
 //!   URI"). Not a style preference: the rule is enforced. Every URL and every
 //!   request body this module builds is asserted to not contain it.
@@ -41,15 +44,22 @@ use sha2::{Digest, Sha256};
 
 use crate::web::token::{Store, StoreError, Token, TokenResponse};
 
-/// The redirect URI to register in the Spotify dashboard, verbatim
-/// (docs/WEB-API.md §1): an explicit loopback IP literal, no port, no path.
+/// The redirect URI to register in the Spotify dashboard, verbatim.
 ///
-/// The dynamic port trak binds at login time is *added* to this, and only this
-/// form may be, because "the only exception [to exact match] is for loopback IP
-/// literals, which can dynamically be assigned ports". The dashboard's
-/// acceptance of a no-path form is still unconfirmed; TODO 7.3 owns that check
-/// and the fixed-port fallback.
-pub const REGISTERED_REDIRECT_URI: &str = "http://127.0.0.1";
+/// A loopback IP literal with an explicit port and a path. Spotify's guide gives
+/// `http://127.0.0.1:8000/callback` as a legal example and says `localhost` is
+/// not allowed at all; the port number is conventional rather than special,
+/// because a loopback literal may use a dynamically assigned port. The port-less
+/// form the guide's prose also mentions cannot be registered: the dashboard
+/// answers it with "This redirect URI is not secure" (2026-10-02).
+pub const REGISTERED_REDIRECT_URI: &str = "http://127.0.0.1:8888/callback";
+
+/// The path the browser comes back to. Part of the registered URI, and matched
+/// by [`Loopback`] whatever path the request arrives on.
+const CALLBACK_PATH: &str = "/callback";
+
+/// The port the registered URI names, which a login prefers when it is free.
+const REGISTERED_PORT: u16 = 8888;
 
 /// Where the browser is sent to authorize.
 ///
@@ -723,8 +733,9 @@ impl Auth {
 
 /// The loopback socket the browser is redirected back to.
 ///
-/// Bound on an ephemeral port, because the registered redirect URI has no port
-/// and a dynamic one is only allowed for a loopback IP literal
+/// Bound on the port the registered URI names when that is free, and on an
+/// ephemeral one when it is not -- which the guide allows, because loopback IP
+/// literals are the exception to the exact-match rule
 /// (docs/WEB-API.md §1). Everything about it is `127.0.0.1`: `localhost` is
 /// explicitly not allowed as a redirect URI, and this is where that rule would
 /// otherwise be easiest to break by writing `localhost` once.
@@ -736,7 +747,14 @@ struct Loopback {
 
 impl Loopback {
     fn bind(timeout: Duration) -> Result<Self, AuthError> {
-        let listener = TcpListener::bind(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)))
+        // The registered port first, so the URI sent to Spotify is character for
+        // character the one the user registered. A port that is already taken
+        // falls back to an ephemeral one rather than failing the login.
+        let preferred = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, REGISTERED_PORT));
+        let listener = TcpListener::bind(preferred)
+            .or_else(|_| {
+                TcpListener::bind(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)))
+            })
             .map_err(|_| AuthError::Bind)?;
         // Non-blocking so the wait is a poll against a deadline rather than an
         // `accept` that can sit forever. The alternative is a thread per login
@@ -755,7 +773,11 @@ impl Loopback {
     /// The `redirect_uri` for this attempt: the registered URI with this
     /// attempt's port on it.
     fn redirect_uri(&self) -> String {
-        format!("http://{}:{}", Ipv4Addr::LOCALHOST, self.port)
+        format!(
+            "http://{}:{}{CALLBACK_PATH}",
+            Ipv4Addr::LOCALHOST,
+            self.port
+        )
     }
 
     /// Wait for the redirect and return the code in it, having checked that the
@@ -1335,13 +1357,22 @@ mod tests {
     }
 
     fn send_to(url: &str, query: &str) -> Result<(), AuthError> {
-        let port = param(url, "redirect_uri")
-            .and_then(|uri| uri.rsplit(':').next().and_then(|p| p.parse().ok()))
+        // The port and the path out of `http://127.0.0.1:8888/callback`: the
+        // redirect URI is not a bare authority any more, and the browser follows
+        // the same path a real one would.
+        let uri = param(url, "redirect_uri");
+        let (port, path) = uri
+            .as_deref()
+            .and_then(|u| u.strip_prefix("http://"))
+            .and_then(|rest| rest.split_once(':'))
+            .and_then(|(_, host)| host.split_once('/'))
+            .and_then(|(host, tail)| Some((host.parse().ok()?, format!("/{tail}"))))
             .ok_or(AuthError::Bind)?;
         let mut stream =
             TcpStream::connect((Ipv4Addr::LOCALHOST, port)).map_err(|_| AuthError::Bind)?;
-        let request =
-            format!("GET /?{query} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nUser-Agent: test\r\n\r\n");
+        let request = format!(
+            "GET {path}?{query} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nUser-Agent: test\r\n\r\n"
+        );
         stream
             .write_all(request.as_bytes())
             .map_err(|_| AuthError::NoRedirect)?;
@@ -1507,20 +1538,55 @@ mod tests {
         );
     }
 
-    /// The registered URI, pinned to the exact form §1 says to register: an
-    /// explicit loopback IP literal, with no port and no path after the scheme.
-    /// A port here would need a fixed port at login time, and a path is the one
-    /// thing the doc flags as unconfirmed.
+    /// The registered URI, pinned to the exact form the dashboard accepts: a
+    /// loopback IP literal with an explicit port and a path.
+    ///
+    /// It used to be `http://127.0.0.1`, on the strength of the guide's prose
+    /// about registering a loopback literal "without any port number". The
+    /// dashboard rejects that form outright -- "This redirect URI is not secure",
+    /// measured on 2026-10-02 -- while the guide's own examples all carry a port,
+    /// so the port is in the registered string and the login prefers the same port.
     #[test]
-    fn the_registered_redirect_uri_is_a_loopback_literal_with_no_port_and_no_path() {
-        assert_eq!(REGISTERED_REDIRECT_URI, "http://127.0.0.1");
+    fn the_registered_redirect_uri_is_a_loopback_literal_with_a_port_and_a_path() {
+        assert_eq!(REGISTERED_REDIRECT_URI, "http://127.0.0.1:8888/callback");
         let authority = REGISTERED_REDIRECT_URI
             .strip_prefix("http://")
             .expect("http");
-        assert_eq!(authority, "127.0.0.1", "an explicit IP literal");
-        assert!(!authority.contains(':'), "no port");
-        assert!(!authority.contains('/'), "no path");
+        let (host, tail) = authority.split_once(':').expect("a port");
+        assert_eq!(host, "127.0.0.1", "an explicit IP literal");
+        assert_eq!(tail, "8888/callback", "the port and the callback path");
         assert!(!REGISTERED_REDIRECT_URI.contains("localhost"));
+        assert!(!authority.contains('?'), "no query");
+    }
+
+    /// A login prefers the registered port, so the URI sent to Spotify is
+    /// character for character the one the user registered; a port that is taken
+    /// falls back to an ephemeral one, which the guide allows for loopback.
+    #[test]
+    fn a_login_prefers_the_registered_port_and_falls_back_when_it_is_taken() {
+        // Whether the registered port is free depends on what else is running,
+        // and the unit tests run in parallel, so this asserts both shapes rather
+        // than one: the registered port when it is free, an ephemeral one when it
+        // is not, and always a loopback URI with the callback path.
+        let first = Loopback::bind(Duration::from_millis(1)).expect("bind");
+        if first.port == REGISTERED_PORT {
+            assert_eq!(
+                first.redirect_uri(),
+                REGISTERED_REDIRECT_URI,
+                "character for character what the user registered"
+            );
+        }
+        // Hold the registered port ourselves, so the next login cannot have it.
+        let held = StdListener::bind(SocketAddr::V4(SocketAddrV4::new(
+            Ipv4Addr::LOCALHOST,
+            REGISTERED_PORT,
+        )));
+        if held.is_ok() {
+            let second = Loopback::bind(Duration::from_millis(1)).expect("bind");
+            assert_ne!(second.port, REGISTERED_PORT, "it is taken");
+            assert!(second.redirect_uri().starts_with("http://127.0.0.1:"));
+            assert!(second.redirect_uri().ends_with(CALLBACK_PATH));
+        }
     }
 
     /// The port is bound per login and sent in the request, which is the only
@@ -1641,7 +1707,11 @@ mod tests {
 
         // The port the login bound is free again.
         let port = param(browser.opened().first().expect("url"), "redirect_uri")
-            .and_then(|uri| uri.rsplit(':').next().and_then(|p| p.parse().ok()))
+            .as_deref()
+            .and_then(|uri| uri.split_once("://"))
+            .and_then(|(_, rest)| rest.split_once(':'))
+            .and_then(|(_, host)| host.split('/').next())
+            .and_then(|p| p.parse().ok())
             .expect("a port to check");
         StdListener::bind(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)))
             .expect("the port was released");

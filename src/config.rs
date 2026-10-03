@@ -774,7 +774,9 @@ fn kv(out: &mut String, key: &str, value: impl std::fmt::Display, comment: &str)
     let line = format!("{key} = {value}");
     out.push_str(&line);
     if !comment.is_empty() {
-        for _ in line.len()..COMMENT_COLUMN {
+        // At least one space, so a value longer than the comment column (a
+        // 32-character Client ID, say) does not come out as `..."# comment`.
+        for _ in line.len().min(COMMENT_COLUMN - 1)..COMMENT_COLUMN {
             out.push(' ');
         }
         out.push_str("# ");
@@ -2122,6 +2124,24 @@ client_id = ""             # empty = Version B
     fn the_file_that_is_written_is_the_specs_file() {
         let toml = Config::default().to_toml();
         assert!(toml.contains(SPEC), "not SPEC's shape:\n{toml}");
+    }
+
+    /// A value longer than the comment column still gets a space before its
+    /// comment. A 32-character Client ID does, and without this it was written
+    /// as `client_id = "..."# empty = Version B` (2026-10-02).
+    #[test]
+    fn a_value_longer_than_the_comment_column_is_still_spaced() {
+        let toml = Config {
+            spotify: Spotify {
+                client_id: "e7d2504e3b0f49faab742cb8315b83fc".into(),
+            },
+            ..Config::default()
+        }
+        .to_toml();
+        assert!(
+            toml.contains("client_id = \"e7d2504e3b0f49faab742cb8315b83fc\" #"),
+            "no space before the comment:\n{toml}"
+        );
     }
 
     /// Every key at a non-default value, through the filesystem, and back.

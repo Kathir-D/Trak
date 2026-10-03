@@ -47,9 +47,9 @@ const CLIENT_ID_LEN: usize = 32;
 
 /// The four steps, in the order they are done.
 const STEPS: [&str; 4] = [
-    "Open the Spotify developer dashboard",
-    "Create an app and add the redirect URI",
-    "Paste the app's Client ID",
+    "Make an app on Spotify's developer site",
+    "Add the redirect URI and save",
+    "Paste the Client ID trak needs",
     "Log in with Spotify",
 ];
 
@@ -299,7 +299,14 @@ pub fn render(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 
     let dim = Theme::dim();
     let bold = Style::default().add_modifier(Modifier::BOLD);
-    let mut lines: Vec<Line<'static>> = Vec::new();
+    // One block of lines per step, so the view can be scrolled to the step the
+    // cursor is on. Without that a terminal too short for all four explanations
+    // simply cut the last one off, and step 4 -- the login -- was the one that
+    // disappeared.
+    let mut blocks: Vec<Vec<Line<'static>>> = Vec::with_capacity(STEPS.len());
+    // One column is kept clear on the right as well, so no word touches either
+    // border.
+    let room = usize::from(parts[0].width).saturating_sub(EXPLAIN_INDENT.len() + 1);
     for (i, title) in STEPS.iter().enumerate() {
         let here = i == s.step;
         let mark = if here { "▸" } else { " " };
@@ -308,33 +315,54 @@ pub fn render(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         } else {
             Style::default()
         };
-        // One column is kept clear on the right as well, so no word touches
-        // either border.
-        let room = usize::from(parts[0].width).saturating_sub(EXPLAIN_INDENT.len() + 1);
+        let mut block: Vec<Line<'static>> = Vec::new();
         for (n, row) in word_wrap(title, room).into_iter().enumerate() {
             let head = if n == 0 {
                 format!(" {mark} {}  ", i + 1)
             } else {
                 EXPLAIN_INDENT.to_string()
             };
-            lines.push(Line::from(Span::styled(format!("{head}{row}"), style)));
+            block.push(Line::from(Span::styled(format!("{head}{row}"), style)));
         }
-        // Every step explains itself; in a short terminal only the one the
-        // cursor is on does, so the screen is never torn.
-        if !compact || here {
-            for text in explain(i, app) {
-                for row in word_wrap(&text, room) {
-                    lines.push(Line::from(Span::styled(
-                        format!("{EXPLAIN_INDENT}{row}"),
-                        dim,
-                    )));
-                }
+        // Every step explains itself; in a short terminal only the one the cursor
+        // is on does, so all four steps still fit and the screen is never torn.
+        // In a short terminal every step keeps its title and the step the cursor
+        // is on keeps its first line -- the one that says what to press -- so the
+        // shape of all four steps is still on screen. `j` scrolls to the rest.
+        let texts = explain(i, app);
+        for text in texts.iter().take(if compact {
+            usize::from(here)
+        } else {
+            usize::MAX
+        }) {
+            for row in word_wrap(text, room) {
+                block.push(Line::from(Span::styled(
+                    format!("{EXPLAIN_INDENT}{row}"),
+                    dim,
+                )));
             }
         }
         if !compact {
-            lines.push(Line::default());
+            block.push(Line::default());
         }
+        blocks.push(block);
     }
+
+    // Scroll so the current step's last line is on screen. The cursor is always
+    // visible at any terminal size, which is the whole point of a wizard.
+    let height = parts[0].height as usize;
+    let total: usize = blocks.iter().map(Vec::len).sum();
+    let upto = blocks[..=s.step.min(blocks.len() - 1)]
+        .iter()
+        .map(Vec::len)
+        .sum::<usize>();
+    let scroll = upto.saturating_sub(height);
+    let lines: Vec<Line<'static>> = blocks
+        .into_iter()
+        .flatten()
+        .skip(scroll)
+        .take(if total > height { height } else { total })
+        .collect();
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), parts[0]);
 
     let footer = if let Some(why) = &s.error {
@@ -348,7 +376,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         Line::from(Span::styled(" enter saves it, esc cancels ", dim))
     } else {
         Line::from(Span::styled(
-            " enter do it · c copy URI · x log out · j/k move · q back ",
+            " enter do this step · c copy the URI · x log out · j/k move · q back ",
             dim,
         ))
     };
@@ -396,31 +424,45 @@ fn word_wrap(text: &str, width: usize) -> Vec<String> {
 }
 
 /// The lines under one step. Plain strings so a test can read them.
+///
+/// Written for somebody who has never made a Spotify app before: each step says
+/// what to click, what to type, and what "it worked" looks like. The words
+/// "redirect URI", "Client ID" and "Web API" are the dashboard's own, so the
+/// instructions and the page use the same words -- but nothing is left to
+/// inference (owner, 2026-10-02).
 pub fn explain(step: usize, app: &App) -> Vec<String> {
     let s = &app.setup;
     match step {
-        0 => vec!["enter opens it. Log in and press \"Create app\".".into()],
+        0 => vec![
+            "press enter -- your browser opens the Spotify developer site.".into(),
+            "Log in with your Spotify account if it asks, then press \"Create app\".".into(),
+        ],
         1 => vec![
-            "Redirect URI (exactly, no port, never localhost):".into(),
-            format!("  {REGISTERED_REDIRECT_URI}"),
-            "enter or c copies it. Tick \"Web API\" and save.".into(),
+            format!("paste this into \"Redirect URI\": {REGISTERED_REDIRECT_URI}"),
+            "Any name and description will do. Never use \"localhost\".".into(),
+            "Tick \"Web API\", press \"Save\", and this page is done.".into(),
         ],
         2 => {
             let shown = match &s.typing {
                 Some(line) => format!("{line}▏"),
-                None if app.config.spotify.client_id.is_empty() => "not set".to_string(),
+                None if app.config.spotify.client_id.is_empty() => {
+                    "press enter, then paste it here".to_string()
+                }
                 None => app.config.spotify.client_id.clone(),
             };
             vec![
                 shown,
-                "enter to type or paste it (the 32 characters on the app's Settings page).".into(),
+                "It is on the app's \"Settings\" page: 32 letters and numbers.".into(),
+                "press enter to save it, esc to cancel.".into(),
             ]
         }
         _ => vec![match &s.login {
-            LoginState::Idle => "enter opens your browser to approve trak.".to_string(),
-            LoginState::Waiting => "waiting for the browser... finish it there.".to_string(),
-            LoginState::Failed(why) => format!("{why} -- enter to try again."),
-            LoginState::Done => "connected. enter logs in again, x logs out.".to_string(),
+            LoginState::Idle => "press enter -- your browser opens to approve trak.".into(),
+            LoginState::Waiting => "Your browser is open. Click \"Allow\", then come back.".into(),
+            LoginState::Failed(why) => format!("{why} -- press enter to try again."),
+            LoginState::Done => {
+                "That is everything -- search, playlists and your library work now.".into()
+            }
         }],
     }
 }
@@ -476,15 +518,25 @@ mod tests {
         assert_eq!(drain(&mut s), [Effect::Open(DASHBOARD_URL.into())]);
         s.handle('j', "", false);
         s.handle('\n', "", false);
-        assert_eq!(drain(&mut s), [Effect::Copy("http://127.0.0.1".into())]);
+        assert_eq!(
+            drain(&mut s),
+            [Effect::Copy(REGISTERED_REDIRECT_URI.into())]
+        );
         s.handle('c', "", false);
-        assert_eq!(drain(&mut s), [Effect::Copy("http://127.0.0.1".into())]);
+        assert_eq!(
+            drain(&mut s),
+            [Effect::Copy(REGISTERED_REDIRECT_URI.into())]
+        );
     }
 
     #[test]
-    fn the_dashboard_is_https_and_the_uri_has_no_port_or_localhost() {
+    /// What the guided setup sends the user to, and what it tells them to type,
+    /// are both pinned: the dashboard rejects anything else, so a change here is
+    /// a change to what the instructions have to say (measured 2026-10-02).
+    fn the_dashboard_is_https_and_the_uri_is_the_form_the_dashboard_accepts() {
         assert!(DASHBOARD_URL.starts_with("https://"));
-        assert_eq!(REGISTERED_REDIRECT_URI, "http://127.0.0.1");
+        assert_eq!(REGISTERED_REDIRECT_URI, "http://127.0.0.1:8888/callback");
+        assert!(!REGISTERED_REDIRECT_URI.contains("localhost"));
     }
 
     #[test]
@@ -641,8 +693,8 @@ mod tests {
                     assert!(inner.starts_with(' '), "{width}: {row}\n{text}");
                 }
             }
-            // The URI is never split across rows, so it can be read and typed.
-            assert!(text.contains("http://127.0.0.1"), "{width}\n{text}");
+            // The URI is never split across rows, so it can be read and copied.
+            assert!(text.contains(REGISTERED_REDIRECT_URI), "{width}\n{text}");
         }
     }
 
@@ -664,12 +716,12 @@ mod tests {
     fn every_step_has_an_explanation_on_screen_when_there_is_room() {
         let mut app = App::new();
         app.setup.open("", false);
-        let text = drawn(70, 24, &app);
+        let text = drawn(70, 40, &app);
         for needle in [
-            "developer dashboard",
-            "http://127.0.0.1",
-            "not set",
-            "opens your browser",
+            "Create app",
+            REGISTERED_REDIRECT_URI,
+            "paste it here",
+            "approve trak",
         ] {
             assert!(text.contains(needle), "{needle}\n{text}");
         }
@@ -683,7 +735,7 @@ mod tests {
         for n in ["1 ", "2 ", "3 ", "4 "] {
             assert!(text.contains(n), "{n}\n{text}");
         }
-        assert!(text.contains("enter opens it"), "{text}");
+        assert!(text.contains("press enter"), "{text}");
     }
 
     #[test]
@@ -702,9 +754,12 @@ mod tests {
         app.setup.open(ID, false);
         app.setup.login = LoginState::Failed("trak: Spotify refused the login".into());
         let text = drawn(70, 24, &app);
+        // The step the cursor is on is scrolled into view at any size, so a
+        // failure is readable on a terminal too short for all four steps.
         assert!(
-            text.contains("refused the login -- enter to try again"),
+            text.contains("refused the login -- press enter to try"),
             "{text}"
         );
+        assert!(text.contains("4  Log in with Spotify"), "{text}");
     }
 }

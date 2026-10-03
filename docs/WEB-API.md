@@ -55,28 +55,39 @@ validations to all newly created apps… all clients to migrate by **November
 > dynamically assigned port number to the redirect URI in the authorization
 > request."
 
-So the guided setup in `trak config` (TODO 7.3) must tell the user to register
-exactly:
+**A dynamic port is still allowed, but the port-less registration is not
+registerable.** The guide's own list of examples is:
+
+> `https://example.com/callback` · `http://127.0.0.1:8000/callback` ·
+> `http://[::1]:8000/callback`
+
+**Measured against the real dashboard on 2026-10-02:** entering `http://127.0.0.1`
+is refused with a red **"This redirect URI is not secure. Learn more here."**, and
+`http://127.0.0.1:8888/callback` is accepted. So the port-less form the prose
+describes cannot be created through the dashboard at all — the prose and the form
+disagree. What Trak therefore tells the user to register, verbatim, is:
 
 ```
-http://127.0.0.1
+http://127.0.0.1:8888/callback
 ```
 
-with no port and no path, and Trak then binds a free ephemeral port per login and
-sends the matching `redirect_uri` in the authorization request. The alternative
-(a fixed port) means `trak` fails to log in whenever that port is taken, which on a
-laptop is a real occurrence. Prefer the dynamic port.
+The port number is conventional, not special. Because "the only exception [to exact
+match] is for loopback IP literals, which can dynamically be assigned ports", a
+login **prefers** the registered port (so the URI sent to Spotify is character for
+character the registered one) and falls back to an ephemeral port when 8888 is
+taken, which costs nothing and is the same "dynamic port" allowance the guide
+gives. `REGISTERED_REDIRECT_URI` in `src/web/auth.rs` is the single source of that
+string, and the guided setup copies it rather than spelling it out.
+
+**Still unconfirmed:** whether Spotify checks the *port* against the registered one
+for a loopback literal. The guide's dynamic-port allowance says it does not, and
+Trak sends a matching URI whenever it can bind the registered port, so both
+readings work; a real login settles it (**[owner]**, TODO 7.3).
 
 The exact-match rule still holds for everything that is not a loopback IP literal
 ("The definition of the redirect URI must exactly match… The only exception is for
-loopback IP literals, which can dynamically be assigned ports").
-
-**Unresolved:** the page renders a stray `Error:` string at the top of its body
-(a docs-site build artefact). It is not clear whether the dashboard accepts a bare
-`http://127.0.0.1` with no path, or insists on something like
-`http://127.0.0.1/callback`. The prose says to register it "without any port
-number" and does not mention a path, so read the no-path form as intended, but
-this is the one thing to confirm during the first real login (**[owner]**, TODO 7.3).
+loopback IP literals, which can dynamically be assigned ports"), which is why the
+`/callback` path is in the registered string and is the path the login listens on.
 
 ## 2. Developer mode: Premium required, 5 users
 

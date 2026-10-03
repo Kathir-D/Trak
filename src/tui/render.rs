@@ -876,7 +876,12 @@ fn draw_stacked(
 /// Deliberately does not say what trak is about to do beyond that, and never
 /// launches on its own (COMPAT rule 2).
 fn draw_idle_card(f: &mut Frame, area: Rect, theme: &Theme) {
-    let card_w = (area.width * 2 / 3).clamp(34, 64);
+    // Clamped to the area as well as to the card's own bounds. A card 34 cells
+    // wide drawn into a 31-cell terminal put `Clear` one column past the end of
+    // the buffer, and ratatui panics on an index outside it rather than clipping:
+    // a terminal narrower than the card was a crash, not a small card (found by
+    // fuzzing, owner, 2026-10-02).
+    let card_w = (area.width * 2 / 3).clamp(34, 64).min(area.width);
     let card_h = 9.min(area.height);
     let card = Rect {
         x: area.x + area.width.saturating_sub(card_w) / 2,
@@ -2348,7 +2353,19 @@ mod tests {
 
     #[test]
     fn rendering_works_with_nothing_playing() {
-        for (w, h) in [(80u16, 24u16), (50, 14), (35, 10), (25, 6)] {
+        // Every width from the floor up, because the idle card has a minimum size
+        // and a terminal narrower than it used to be a panic rather than a small
+        // card.
+        let mut sizes: Vec<(u16, u16)> = (30..=90).map(|w| (w, 24)).collect();
+        sizes.extend([
+            (80u16, 24u16),
+            (50, 14),
+            (35, 10),
+            (25, 6),
+            (30, 8),
+            (30, 9),
+        ]);
+        for (w, h) in sizes {
             let backend = ratatui::backend::TestBackend::new(w, h);
             let mut term = ratatui::Terminal::new(backend).unwrap();
             let theme = Theme::default();
