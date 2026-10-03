@@ -3390,7 +3390,11 @@ mod tests {
     fn a_wide_strip_draws_every_tab_and_keeps_the_selected_one_bracketed() {
         for (w, h) in [(200u16, 62u16), (240u16, 80u16), (140, 40), (110, 34)] {
             let (buf, _) = render(w, h, &app_at(w, h));
-            let strip = full_text(&buf).lines().nth(1).unwrap_or_default().to_string();
+            let strip = full_text(&buf)
+                .lines()
+                .nth(1)
+                .unwrap_or_default()
+                .to_string();
             assert!(strip.contains("History"), "{w}x{h}: {strip}");
             assert!(
                 strip.contains("[History]"),
