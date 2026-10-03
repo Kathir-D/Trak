@@ -1119,16 +1119,26 @@ built on, which is the whole reason this phase exists.
       > Premium account still gets the real queue from the API, unchanged. `docs/WEB-API.md` §2
       > already records that only the **add** is Premium-gated; this is the read's empty case.
 
-- [ ] 12.10 The first real Web API login **[owner]**. The Client ID works and the authorize endpoint
+- [ ] 12.10 The first real Web API login **[owner]**. **Search is verified against the real API;
+      the personal lists are not, and the blocker is one click on the dashboard.**
+      > The login completed for real on 2026-10-03 (token written, `0600`, scopes granted), which
+      > closes the "no Web API request has ever been made" state below. `GET /search` answers 200
+      > with real results. `GET /me/playlists` and `GET /me/tracks` answer **410 Gone**, and
+      > `GET /me/player/queue` answers the allowlist 403 — same token, same minute — because the
+      > owner's account **has not been added to the app's user list** on the dashboard. That is the
+      > one remaining [owner] step, and it is why the Queue tab's "not on the allowlist" line is the
+      > honest report rather than a trak bug. `docs/WEB-API.md` §2 carries the measured table.
+      >
+      > Earlier state, kept for the record: the Client ID works and the authorize endpoint accepts
+      > the redirect URI, but nobody had clicked "Allow", so no request had ever been made. trak's
+      > own flow was driven up to the waiting state twice, in a pty, against the real Spotify.
+      >
+      > The account also needs Spotify Premium for `A` (add to queue), and the app must list **Web
+      > API** under "APIs used" (the first attempt was created with only Web Playback SDK; the
+      > owner added it).
+ The Client ID works and the authorize endpoint
       accepts the redirect URI, but nobody has clicked "Allow" in the browser yet, so search,
       playlists, queue, library and the token refresh are still unverified against a real account.
-      > The account also needs Spotify Premium, and the app must list **Web API** under "APIs used"
-      > (the first attempt was created with only Web Playback SDK; the owner added it).
-      > **State at the end of 2026-10-03:** the Client ID is saved in the owner's config and the
-      > authorize endpoint accepts the redirect URI (`curl` on `/api/token` and `/api/authorize`, both
-      > without an "invalid redirect" or "invalid_client" answer), but the browser approval was never
-      > clicked, so **no Web API request has ever been made**. trak's own flow was driven up to the
-      > waiting state twice, in a pty, against the real Spotify.
 
 ---
 

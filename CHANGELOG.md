@@ -32,6 +32,12 @@ its pane, a slider too small to hit, lyrics that would not stay on screen, an
   also cleared by the next keystroke, so a user who pressed enter and pressed
   something else never saw it. A notice now survives moving around the panel.
 
+- **A 410 from the personal lists explains itself.** Measured on a real account:
+  in development mode with the account not on the app's user list, Spotify answers
+  410 Gone to the playlists and liked-songs reads and 403 to the queue -- the same
+  cause in two costumes. It now says to add the account to the app's user list
+  rather than "answered HTTP 410".
+
 ### Changed
 
 - **The Queue tab is never just empty.** What Spotify will play next is not

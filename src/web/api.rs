@@ -539,6 +539,19 @@ pub enum ApiError {
     /// Premium-only, and this is the expected answer for a Free account.
     #[error("adding to the queue needs Spotify Premium")]
     PremiumOnly,
+    /// HTTP 410. **Measured on the owner's real account, 2026-10-03:** with a
+    /// development-mode app and the account not on its allowlist, Spotify answers
+    /// `410 Gone` to `GET /me/playlists` and `GET /me/tracks` -- the two tabs that
+    /// list the person's own library -- while `GET /me/player/queue` answers the
+    /// 403 that reads as [`ApiError::NotAllowlisted`]. So 410 is the same root
+    /// cause wearing a different status code, and the fix is the same one, which
+    /// is why this is a sentence rather than "answered HTTP 410".
+    ///
+    /// Spotify documents no 410 for these endpoints; this is what the endpoint
+    /// actually did. Recorded in `docs/WEB-API.md` so the next agent does not have
+    /// to rediscover it with somebody's account.
+    #[error("Spotify's developer mode is not serving the personal lists yet")]
+    GoneInDevMode,
     /// HTTP 429. `retry_after` is the *capped* wait — the value Spotify sent
     /// clipped to [`RETRY_AFTER_CAP`] — and it is what trak holds the next
     /// request for.
@@ -591,6 +604,9 @@ impl ApiError {
             }
             ApiError::NotAllowlisted => {
                 "spotify: this account is not on trak's 5-user developer allowlist".to_string()
+            }
+            ApiError::GoneInDevMode => {
+                "spotify: developer mode is not serving the personal lists — add this account to the app's user list on the Spotify dashboard".to_string()
             }
             ApiError::PremiumOnly => {
                 "spotify: adding to the queue needs Spotify Premium".to_string()
@@ -923,6 +939,7 @@ impl SpotifyLibrary {
                 });
             }
             404 => return Err(ApiError::NotFound),
+            410 => return Err(ApiError::GoneInDevMode),
             429 => return Err(self.throttle(reply)),
             _ => {}
         }
@@ -2954,6 +2971,7 @@ mod tests {
             401 => "Unauthorized",
             403 => "Forbidden",
             404 => "Not Found",
+            410 => "Gone",
             429 => "Too Many Requests",
             500 => "Internal Server Error",
             _ => "Error",
@@ -3880,6 +3898,32 @@ mod tests {
             error.notice()
         );
         assert!(error.needs_relogin());
+    }
+
+    /// **A 410 is the allowlist in another costume** (measured on the owner's real
+    /// account, 2026-10-03). `GET /me/playlists` and `GET /me/tracks` answered 410
+    /// while `GET /me/player/queue` answered the 403 above, on the same token, in
+    /// the same minute. "Spotify answered HTTP 410" is not something a user can
+    /// act on; the one line has to name the thing they can do.
+    #[test]
+    fn a_410_says_what_to_do_about_it() {
+        for call in ["playlists", "liked"] {
+            // A fresh mock per call: `page` may ask more than once, and a mock
+            // with one answer left answers the second with a 500.
+            let mock = failing("GET", 410, r#"{"error":{"status":410,"message":"Gone"}}"#);
+            let error = match call {
+                "playlists" => mock.client().playlists(None).expect_err("gone"),
+                _ => mock.client().liked_tracks(None).expect_err("gone"),
+            };
+            assert_eq!(error, ApiError::GoneInDevMode, "{call}");
+            let notice = error.notice();
+            assert!(notice.contains("dashboard"), "{call}: {notice}");
+            assert!(
+                notice.contains("user list"),
+                "{call}: the fix has to be named: {notice}"
+            );
+            assert!(!notice.contains("410"), "{call}: not a status code");
+        }
     }
 
     /// And the same status on the one endpoint Spotify documents as Premium-only.

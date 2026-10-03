@@ -204,6 +204,32 @@ Note `User.product` is gone, so the API can no longer be used to detect Premium.
 trak must not depend on it — the Premium-only failure surfaces as the 403 on
 `POST /me/player/queue` instead, which is the honest signal anyway.
 
+### Measured on a real account, 2026-10-03: what an un-allowlisted account gets
+
+The owner's account authorized trak successfully (the token is real, `0600`, and
+the scopes are all there), and this is what the five tabs actually got back with
+the app in development mode and **the account not yet added to the app's user
+list**:
+
+| Tab | Request | Answer |
+| --- | --- | --- |
+| Search | `GET /search` | **200**, real results |
+| Playlists | `GET /me/playlists` | **410 Gone** |
+| Liked | `GET /me/tracks` | **410 Gone** |
+| Queue | `GET /me/player/queue` | **403**, reading as "not on the allowlist" |
+| Library | `GET /me/albums` | not reached — the tab had not been opened |
+
+Two things worth writing down rather than rediscovering:
+
+1. **410 is the allowlist in another costume.** The same token, in the same
+   minute, got 410 from the two `/me` list endpoints and 403 from the third. So
+   `ApiError::GoneInDevMode` exists and says what to do about it; without it the
+   user sees "spotify: answered HTTP 410", which is not actionable. Spotify
+   documents no 410 here — this is what the endpoint did.
+2. **Adding the account to the app's user list on the dashboard is the fix**, and
+   it is the only step left that needs a human. Until it is done, Playlists,
+   Liked and Queue cannot be verified, and trak's one-line error says so by name.
+
 ### Renamed response fields
 
 - Playlist: `tracks` → `items`, `tracks.tracks` → `items.items`,
