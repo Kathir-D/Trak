@@ -1098,11 +1098,13 @@ fn draw_now_playing(
     // depend on a display setting: a click on a hidden bar must not seek.
     let bar_index = lines.len();
     if app.settings.show_progress {
-        lines.push(Line::from(crate::tui::theme::gradient_bar(
+        lines.push(Line::from(crate::tui::theme::progress_bar_spans(
             progress(app),
             title_w,
             &theme.palette,
             !app.is_playing(),
+            app.tick_secs,
+            app.is_playing(),
         )));
     }
 

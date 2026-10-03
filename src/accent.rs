@@ -237,6 +237,35 @@ pub fn luma(r: u8, g: u8, b: u8) -> f32 {
     0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b)
 }
 
+/// The cache is a cache, not a shortcut round the maths: a ramp asked for
+/// twice is the same ramp, and a ramp asked for after the palette changed is
+/// a different one.
+#[test]
+fn a_cached_ramp_is_the_same_ramp() {
+    let p = Palette::from_accent(Color::Rgb(200, 40, 90));
+    assert_eq!(p.ramp(17), p.compute_ramp(17));
+    assert_eq!(p.ramp(1), p.compute_ramp(1));
+    let q = Palette::from_accent(Color::Rgb(10, 200, 90));
+    assert_ne!(
+        p.ramp(9),
+        q.ramp(9),
+        "a different palette is a different ramp"
+    );
+    assert_eq!(p.ramp(0), Vec::<Color>::new());
+}
+
+/// A flat palette is one colour repeated, cached like any other.
+#[test]
+fn a_flat_palette_is_still_flat_after_caching() {
+    let flat = Palette {
+        primary: Color::Rgb(1, 2, 3),
+        secondary: Color::Rgb(1, 2, 3),
+        tertiary: Color::Rgb(1, 2, 3),
+    };
+    assert_eq!(flat.ramp(5), vec![Color::Rgb(1, 2, 3); 5]);
+    assert_eq!(flat.ramp(5), flat.ramp(5));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -536,7 +565,7 @@ mod tests {
 /// whole interface ends up the same hue as one piece of text. A ramp reads as
 /// designed rather than configured, and it costs nothing at render time once the
 /// colours are in the theme.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Palette {
     /// The accent: what borders, the title and the bar head use.
     pub primary: Color,
@@ -546,6 +575,17 @@ pub struct Palette {
     /// to the other.
     pub tertiary: Color,
 }
+
+thread_local! {
+    /// Ramps already computed, by palette and width.
+    static RAMPS: std::cell::RefCell<std::collections::HashMap<(Palette, usize), Vec<Color>>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// How many ramps to keep before starting again. A dashboard asks for five or six
+/// widths; this is generous enough that a resize storm still hits the cache and
+/// small enough that a long session with many covers cannot grow it without end.
+const RAMP_CACHE_MAX: usize = 64;
 
 /// How far apart two hues have to be before a second colour is worth using.
 /// 24° is about where two hues stop reading as "the same colour, lighter".
@@ -586,6 +626,33 @@ impl Palette {
         if len == 0 {
             return Vec::new();
         }
+        // **Cached.** Every gradient on screen asks for a ramp every frame: the
+        // bar, the meter, the rule, the title and the tab strip, which between
+        // them interpolate a few hundred colours ten times a second, and each
+        // one of those is two HSL round trips. The ramp only changes when the
+        // cover does, so it is computed once per (palette, width) and copied
+        // after that -- which is a memcpy rather than a few hundred conversions.
+        //
+        // Thread-local because rendering is one thread, and because the unit tests
+        // run in parallel: a shared cache would be a shared `RefCell` between
+        // tests. It is bounded rather than allowed to grow with the number of
+        // tracks: a handful of widths per palette, and it is emptied wholesale
+        // when it gets silly.
+        RAMPS.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            if cache.len() > RAMP_CACHE_MAX {
+                cache.clear();
+            }
+            if let Some(hit) = cache.get(&(*self, len)) {
+                return hit.clone();
+            }
+            let ramp = self.compute_ramp(len);
+            cache.insert((*self, len), ramp.clone());
+            ramp
+        })
+    }
+
+    fn compute_ramp(&self, len: usize) -> Vec<Color> {
         if self.primary == self.secondary && self.secondary == self.tertiary {
             return vec![self.primary; len];
         }

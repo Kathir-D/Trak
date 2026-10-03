@@ -461,6 +461,40 @@ mod tests {
         assert_eq!(format_time(-3.0), "0:00");
     }
 
+    /// The bar's ramp drifts while a track plays and is completely still when it
+    /// does not. The phase is the ramp's offset in cells, so a shifted bar is the
+    /// same bar with the colours slid along it.
+    #[test]
+    fn the_bar_drifts_only_while_something_is_playing() {
+        let p = crate::accent::Palette::from_accent(SPOTIFY_GREEN);
+        let colours = |spans: &[Span<'static>]| -> Vec<Color> {
+            spans
+                .iter()
+                .map(|s| s.style.fg.unwrap_or(Color::Reset))
+                .collect()
+        };
+        let still = colours(&progress_bar_spans(0.5, 20, &p, false, 0.0, false));
+        let later = colours(&progress_bar_spans(0.5, 20, &p, false, 3.0, false));
+        assert_eq!(still, later, "a paused bar does not move");
+
+        let moving = colours(&progress_bar_spans(0.5, 20, &p, false, 3.0, true));
+        assert_ne!(still, moving, "a playing bar drifts");
+        // The same colours slid along the bar, not a different gradient: the
+        // filled cells before the head are a rotation of each other.
+        // Three seconds in, the drift is six cells: the first cells now carry the
+        // colours the still bar had six cells along.
+        assert_eq!(&moving[..4], &still[6..10], "the ramp slid along the bar");
+
+        // And the glyphs are unchanged: the fill still matches the fraction.
+        let bar = progress_bar_spans(0.5, 20, &p, false, 3.0, true);
+        assert_eq!(
+            bar.iter().filter(|s| s.content == "●").count(),
+            10,
+            "half full"
+        );
+        assert_eq!(bar.len(), 20);
+    }
+
     /// The only characters allowed in a bar or a meter: one cell wide everywhere.
     #[test]
     fn bars_use_only_single_width_characters() {
@@ -487,6 +521,24 @@ pub fn gradient_bar(
     palette: &crate::accent::Palette,
     dim: bool,
 ) -> Vec<Span<'static>> {
+    bar(fraction, width, palette, dim, 0)
+}
+
+/// The bar, with the ramp slid along by `phase` cells.
+///
+/// The one animation in the dashboard, and it is here because it costs nothing
+/// where it matters: the bar is already changing on every frame while a track
+/// plays, so sliding the colours costs no extra frame, and a paused trak passes
+/// `phase = 0` and is completely still (owner, 2026-10-02). It is a slow drift,
+/// not a pulse -- the playhead is the thing that carries meaning, so nothing else
+/// on the bar is allowed to compete with it.
+fn bar(
+    fraction: f64,
+    width: usize,
+    palette: &crate::accent::Palette,
+    dim: bool,
+    phase: usize,
+) -> Vec<Span<'static>> {
     if width == 0 {
         return Vec::new();
     }
@@ -498,15 +550,19 @@ pub fn gradient_bar(
     // whimsy that costs nothing: it is three cells.
     let head_from = filled.saturating_sub(3);
     let mut spans = Vec::with_capacity(width);
-    for (i, colour) in (0..width).zip(ramp.iter()) {
+    for i in 0..width {
+        // `&'static str` glyphs, so a span borrows them: a full-width bar costs
+        // one allocation for the vector and none for the hundred cells in it.
         let (glyph, colour) = if i < filled {
-            let base = *colour;
-            let colour = if i >= head_from && filled > 3 {
-                crate::accent::mix(base, Color::White, 0.35)
-            } else {
-                base
-            };
-            ("●", colour)
+            let base = ramp[(i + phase) % ramp.len()];
+            (
+                "●",
+                if i >= head_from && filled > 3 {
+                    crate::accent::mix(base, Color::White, 0.35)
+                } else {
+                    base
+                },
+            )
         } else {
             ("─", Color::DarkGray)
         };
@@ -517,6 +573,29 @@ pub fn gradient_bar(
         spans.push(Span::styled(glyph, style));
     }
     spans
+}
+
+/// The bar as the renderer wants it: the drifting ramp while a track plays, and
+/// a still one when it does not.
+///
+/// `elapsed` is the app's own tick counter, so this needs no clock of its own and
+/// stops the moment the music does.
+pub fn progress_bar_spans(
+    fraction: f64,
+    width: usize,
+    palette: &crate::accent::Palette,
+    dim: bool,
+    elapsed: f64,
+    animated: bool,
+) -> Vec<Span<'static>> {
+    // One cell every half second, so the drift is barely there and the bar never
+    // looks like it is being redrawn for its own sake.
+    let phase = if animated {
+        (elapsed * 2.0) as usize % width.max(1)
+    } else {
+        0
+    };
+    bar(fraction, width, palette, dim, phase)
 }
 
 /// The volume meter: the same ramp as the bar but in its own glyphs, so the two
