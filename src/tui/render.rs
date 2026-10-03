@@ -251,6 +251,23 @@ impl Images {
         self.backend.cell()
     }
 
+    /// Use the cell size the terminal reports instead of the one that was
+    /// measured on somebody else's machine.
+    ///
+    /// Everything about the art is sized in cells -- a square cover is about twice
+    /// as many cells across as it is down -- so a cell size that is wrong by a
+    /// factor of two makes the cover the wrong size and leaves the pane half
+    /// empty. The defaults were measured once, in one terminal, at one font size
+    /// (TODO 1.4), and they were wrong on the owner's other machine: a cover came
+    /// out at a third of the pane with a third of the screen empty under it.
+    pub fn set_cell_size(&mut self, cell: (u16, u16)) {
+        if cell.0 == 0 || cell.1 == 0 {
+            return;
+        }
+        let Backend::Fixed { font, .. } = &mut self.backend;
+        *font = cell;
+    }
+
     /// The cell rectangle the image occupies inside `area`, keeping the aspect
     /// ratio. Square cover art in a wide, short pane is letterboxed, not
     /// stretched: a wide rectangle of a square album is not what anybody wants to
@@ -430,6 +447,72 @@ pub enum GraphicsProtocol {
 /// The cell size comes from TODO 1.4's measurements rather than from a query:
 /// (8, 17) in cmux, which is Ghostty, and (10, 20) in Terminal.app. Halfblocks
 /// only needs the ratio to be roughly 1:2, so its cell size barely matters.
+/// Ask the terminal how big a cell is: `CSI 16 t` answers `CSI 6 ; h ; w t`.
+///
+/// **The single most useful thing a terminal can be asked** for this program: the
+/// art is measured in cells, so an assumed cell size is an assumed cover size.
+/// Ghostty, cmux, kitty, iTerm2, WezTerm and xterm all answer it; one that does
+/// not costs the caller a round trip and nothing else, because `None` means "use
+/// the default you already have".
+///
+/// Written and read on stdin/stdout directly rather than through crossterm,
+/// before any event is read: a reply that arrives while the event reader is
+/// looking would be taken for a keypress (`tui/colour.rs` does the same for its
+/// background query, and the reason is written there).
+pub fn query_cell_size() -> Option<(u16, u16)> {
+    use std::io::Write;
+    use std::os::fd::AsRawFd;
+    use std::time::{Duration, Instant};
+
+    let mut out = std::io::stdout();
+    out.write_all(b"\x1b[16t\x1b[5n").ok()?;
+    out.flush().ok()?;
+    let fd = std::io::stdin().as_raw_fd();
+    let deadline = Instant::now() + Duration::from_millis(300);
+    let mut got: Vec<u8> = Vec::new();
+    while parse_cell_size(&got).is_none() {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one valid pollfd, and a buffer `read` may fill up to its length.
+        if unsafe { libc::poll(&mut pfd, 1, left.as_millis() as i32) } <= 0 {
+            break;
+        }
+        let mut buf = [0u8; 128];
+        let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
+        if n <= 0 {
+            break;
+        }
+        got.extend_from_slice(&buf[..n as usize]);
+    }
+    parse_cell_size(&got)
+}
+
+/// The `h` and `w` out of a `CSI 6 ; h ; w t` reply, in that order: the terminal
+/// answers height first.
+pub fn parse_cell_size(reply: &[u8]) -> Option<(u16, u16)> {
+    let text = String::from_utf8_lossy(reply);
+    let start = text.find("\x1b[6;")?;
+    let rest = &text[start + 4..];
+    let end = rest.find('t')?;
+    let mut parts = rest[..end].split(';');
+    let height: u16 = parts.next()?.trim().parse().ok()?;
+    let width: u16 = parts.next()?.trim().parse().ok()?;
+    // A cell is a handful of pixels across and a dozen or so down. Anything
+    // outside that is a terminal answering something else, or in pixels-per-cell
+    // form (CSI 16 t also has a "report text area size" variant in characters).
+    if !(2..=100).contains(&width) || !(4..=200).contains(&height) {
+        return None;
+    }
+    Some((width, height))
+}
+
 pub fn detect_protocol(
     term_program: &str,
     term: &str,
@@ -491,6 +574,18 @@ pub struct Regions {
     pub volume: Option<Rect>,
 }
 
+/// The cells a drawn volume meter answers a click on: itself, plus a band around
+/// it wide enough to aim at. See `Regions::hit`.
+fn volume_band(drawn: Rect) -> Rect {
+    let x = drawn.x.saturating_sub(2);
+    Rect {
+        x,
+        y: drawn.y.saturating_sub(1),
+        width: drawn.width.saturating_add(4),
+        height: drawn.height.saturating_add(3),
+    }
+}
+
 impl Regions {
     /// What is at this cell, if anything.
     pub fn hit(&self, col: u16, row: u16) -> Option<Hit> {
@@ -515,11 +610,23 @@ impl Regions {
             }
         }
         if let Some(v) = self.volume
-            && v.contains((col, row).into())
             && v.width > 1
+            && volume_band(v).contains((col, row).into())
         {
-            // The first cell is 0 and the last is 100, so both ends are
-            // reachable with a click rather than only by a drag past the edge.
+            // **The target is bigger than the drawing.** A one-row,
+            // one-cell-precise slider is a slider nobody can hit without looking
+            // (owner, 2026-10-03), so the clickable band is the meter's row, the
+            // row above it, the two rows below it (the gradient rule and the pane
+            // border) and the two cells at either end. The x mapping still follows
+            // the drawn meter, so where you click is still the volume you get --
+            // the band is only easier to land on.
+            //
+            // It cannot steal from the progress bar above or the transport
+            // controls beside it: those are checked first, so a click that was
+            // meant for one of those still is.
+            //
+            // The first cell of the meter is 0 and the last is 100, so both ends
+            // are reachable with a click rather than only by a drag past the edge.
             let f = col.saturating_sub(v.x) as f64 / (v.width - 1) as f64;
             return Some(Hit::Volume(f.clamp(0.0, 1.0)));
         }
@@ -1290,12 +1397,16 @@ fn draw_now_playing(
         let meter_w = (text_body.width as usize)
             .saturating_sub(label.len() + 6)
             .max(1);
-        regions.volume = Some(Rect {
+        let drawn = Rect {
             x: text_body.x + label.len() as u16,
             y: text_body.y + meter_row as u16,
             width: meter_w as u16,
             height: 1,
-        });
+        };
+        // The stored region is the meter **as drawn**, so the x mapping is honest
+        // and the layout code above stays a description of the picture. The
+        // clickable band around it is applied in `Regions::hit`.
+        regions.volume = Some(drawn);
     }
 
     let shown = lines.len().min(text_body.height as usize);
@@ -3035,8 +3146,9 @@ mod tests {
         }
     }
 
-    /// The volume meter's two ends are 0 and 100, and it sits on the row the
-    /// renderer drew it on.
+    /// The volume meter's two ends are 0 and 100, it sits on the row the renderer
+    /// drew it on, and the target around it is several times the size of the
+    /// drawing (owner, 2026-10-03: a one-row slider is hard to hit).
     #[test]
     fn the_volume_meter_is_clickable_end_to_end() {
         let app = app_at(100, 30);
@@ -3045,7 +3157,41 @@ mod tests {
         assert!(row_text(&buf, v.y, v.x.saturating_sub(4), 4).contains("vol"));
         assert_eq!(regions.hit(v.x, v.y), Some(Hit::Volume(0.0)));
         assert_eq!(regions.hit(v.x + v.width - 1, v.y), Some(Hit::Volume(1.0)));
-        assert_eq!(regions.hit(v.x + v.width, v.y), None);
+        // Two cells of slack either side, so the ends are forgiving, and a click
+        // just past the slack is not a volume click at all.
+        assert_eq!(regions.hit(v.x + v.width, v.y), Some(Hit::Volume(1.0)));
+        assert_eq!(regions.hit(v.x + v.width + 1, v.y), Some(Hit::Volume(1.0)));
+        assert_eq!(regions.hit(v.x + v.width + 2, v.y), None);
+        // The slack reaches two cells left on the meter's own row, where there is
+        // nothing else.
+        assert_eq!(
+            regions.hit(v.x.saturating_sub(2), v.y),
+            Some(Hit::Volume(0.0))
+        );
+        // The row above answers too -- the duration line and the transport
+        // buttons were dead space before. Where the band overlaps a transport
+        // button the button still wins, because controls are checked first.
+        assert!(
+            matches!(
+                regions.hit(v.x.saturating_sub(2), v.y - 1),
+                Some(Hit::Control(_))
+            ),
+            "the transport buttons win over the volume band"
+        );
+        let right = v.x + v.width - 1;
+        assert_eq!(regions.hit(right, v.y - 1), Some(Hit::Volume(1.0)));
+        // And the rows below: the gradient rule was dead space before.
+        assert_eq!(
+            regions.hit(v.x + 1, v.y + 1),
+            Some(Hit::Volume(1.0 / (v.width - 1) as f64)),
+            "the rule under the meter is part of the target"
+        );
+        // Still the meter's x mapping, not the band's: the two slack cells do not
+        // stretch it out.
+        assert_eq!(
+            regions.hit(v.x + 1, v.y),
+            Some(Hit::Volume(1.0 / (v.width - 1) as f64))
+        );
         // At 100 % the label still sits two cells clear of a full meter (the
         // `▰` glyph overhangs its cell in real fonts; seen in cmux).
         let mut full = app_at(100, 30);
@@ -3528,6 +3674,63 @@ mod tests {
         }
     }
 
+    /// The cell size reply, parsed. The terminal answers height first, and a
+    /// nonsense answer is refused rather than believed: an assumed cell size is
+    /// only as good as a measured one.
+    #[test]
+    fn the_cell_size_reply_is_parsed_and_believed_only_when_it_makes_sense() {
+        assert_eq!(parse_cell_size(b"\x1b[6;17;8t"), Some((8, 17)));
+        assert_eq!(
+            parse_cell_size(b"junk\x1b[6;34;21t more junk"),
+            Some((21, 34))
+        );
+        // Not an answer at all.
+        assert_eq!(parse_cell_size(b""), None);
+        assert_eq!(parse_cell_size(b"\x1b[?62;1;2c"), None);
+        // Plausible for a *character* report rather than a pixel one: refused.
+        assert_eq!(parse_cell_size(b"\x1b[6;80;200t"), None);
+        assert_eq!(parse_cell_size(b"\x1b[6;17;0t"), None);
+    }
+
+    /// The measured cell size is the one the art is sized with, and the default is
+    /// kept when nothing answers.
+    #[test]
+    fn the_measured_cell_size_is_the_one_that_sizes_the_art() {
+        let mut images = Images::halfblocks((10, 20));
+        assert_eq!(images.cell_size(), (10, 20));
+        images.set_cell_size((21, 34));
+        assert_eq!(images.cell_size(), (21, 34), "believed");
+        images.set_cell_size((0, 0));
+        assert_eq!(images.cell_size(), (21, 34), "a nonsense answer is ignored");
+    }
+
+    /// A square cover fills the pane it is given, whatever the cell size. This is
+    /// the bug the query fixes: with a cell size measured on another machine, the
+    /// cover came out at half the width it should have and the pane was half empty.
+    #[test]
+    fn a_square_cover_fills_a_pane_whatever_the_cell_size() {
+        let square = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            640,
+            640,
+            image::Rgb([120, 60, 200]),
+        ));
+        for cell in [(10u16, 20u16), (21, 34)] {
+            let images = Images::halfblocks(cell);
+            let hole = Rect::new(0, 0, 90, 50);
+            let fitted = images.fit(hole, &square);
+            // A square cover is `ch / cw` times as wide as it is tall, in cells.
+            let want = fitted.height as f64 * cell.1 as f64 / cell.0 as f64;
+            assert!(
+                (fitted.width as f64 - want).abs() <= 1.0,
+                "{cell:?}: fitted {fitted:?}, expected about {want} across"
+            );
+            assert!(
+                fitted.width + 1 >= hole.width || fitted.height + 1 >= hole.height,
+                "{cell:?}: {fitted:?} does not fill {hole:?}"
+            );
+        }
+    }
+
     /// The longest run of rows with nothing but background in `x0..x1`.
     fn longest_blank_run(
         buf: &ratatui::buffer::Buffer,
@@ -3992,7 +4195,6 @@ mod tests {
 mod protocol_tests {
     use super::{GraphicsProtocol, detect_protocol};
 
-    /// The owner's terminal, and the one 1.4 measured. If this changes, 1.4's
     /// conclusions change with it.
     #[test]
     fn cmux_is_recognised_as_kitty() {

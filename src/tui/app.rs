@@ -2656,8 +2656,17 @@ fn apply_state(app: &mut App, s: PlayerState) {
     // A new track's title starts at its beginning, and the last track's chorus
     // does not follow it: showing the wrong lyrics under a new title is worse
     // than showing none.
-    app.marquee_offset = 0;
-    app.lyrics = LyricsState::default();
+    //
+    // **Only for a new track.** A poll arrives about once a second and repeats
+    // the same track every time, so resetting here made the lyrics pane blink
+    // between the words and the song's title for as long as it was open, threw
+    // away the follow position every second, and sent the same lookup to LRCLIB
+    // over and over (owner, 2026-10-03). The reset is a statement about a *change*
+    // of track, and belongs behind the check for one.
+    if track_changed {
+        app.marquee_offset = 0;
+        app.lyrics = LyricsState::default();
+    }
     // The visualizer follows the music, so a new track gets a new shape and a
     // pause decays the bars rather than freezing them (TODO 8.4).
     if track_changed {
@@ -3325,6 +3334,49 @@ mod tests {
         let (app, _) = press(app, ARROW_LEFT);
         let (app, _) = press(app, ARROW_RIGHT);
         assert_eq!(app.web.query, "a");
+    }
+
+    /// A poll that repeats the track the user is already on must not disturb the
+    /// lyrics: not the words, not the follow position, and not the lookup that is
+    /// in flight (owner, 2026-10-03).
+    #[test]
+    fn polling_the_same_track_leaves_the_lyrics_alone() {
+        let mut app = with_track();
+        let state = playing();
+        let lines = vec![crate::lyrics::LyricLine {
+            time_secs: 3.0,
+            text: "keep these words".into(),
+        }];
+        let lyrics = crate::lyrics::Lyrics {
+            lines,
+            synced: true,
+            source: "test".into(),
+            instrumental: false,
+        };
+        app.lyrics.status = LyricsStatus::Ready;
+        app.lyrics.lyrics = Some(lyrics.clone());
+        app.lyrics.uri = app.track().and_then(|t| t.uri.clone());
+        app.lyrics.scrolled_to = Some(2);
+        app.lyrics.follow_hold = 1.5;
+        app.marquee_offset = 3;
+
+        // Three polls, as the event loop would deliver them.
+        for _ in 0..3 {
+            let (next, _) = step(app.clone(), Event::PlayerState(Box::new(state.clone())));
+            assert_eq!(next.lyrics.status, LyricsStatus::Ready, "still here");
+            assert_eq!(next.lyrics.lyrics.as_ref(), Some(&lyrics));
+            assert_eq!(next.lyrics.scrolled_to, Some(2), "the view survives");
+            assert_eq!(next.lyrics.follow_hold, 1.5, "and so does the follow");
+            assert_eq!(next.marquee_offset, 3, "the title does not re-scroll");
+        }
+
+        // A different track does reset it: the last chorus must not follow.
+        let mut other = state;
+        other.track.uri = Some("spotify:track:other".into());
+        let (next, _) = step(app, Event::PlayerState(Box::new(other)));
+        assert_eq!(next.lyrics.status, LyricsStatus::Idle, "looked up again");
+        assert_eq!(next.lyrics.lyrics, None, "and not the old words");
+        assert_eq!(next.marquee_offset, 0);
     }
 
     /// The volume meter is a slider: where you click is the volume you get.

@@ -371,6 +371,17 @@ fn event_loop<B: ratatui::backend::Backend>(
     // before any event is read (TODO 1.4's ordering requirement).
     //
     let mut images = crate::tui::render::Images::from_terminal();
+    // Ask the terminal how big a cell is, and believe it over the size that was
+    // measured in a different terminal at a different font. The art is sized in
+    // cells, so this is the difference between a cover that fills its pane and one
+    // that is a third of it (owner, 2026-10-03).
+    //
+    // Both queries happen here, before any event is read, and both read stdin
+    // directly: a reply that arrived while crossterm's event reader was looking
+    // would be taken for a keypress.
+    if let Some(cell) = crate::tui::render::query_cell_size() {
+        images.set_cell_size(cell);
+    }
     let light = light_background(depth);
     // Ask headless-spotify once, at startup, rather than per frame (TODO 4.7).
     if crate::headless::is_installed() && !worker.is_busy() {
