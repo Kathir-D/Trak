@@ -53,8 +53,7 @@
 
 ## Install
 
-Needs macOS 14.2 or newer and the Spotify desktop app. Trak is a command, not an app, so it
-installs as a Homebrew **formula** (no `--cask`):
+Needs macOS 14.2 or newer and the Spotify desktop app:
 
 ```sh
 brew install kathir-d/tap/trak
