@@ -16,6 +16,10 @@
 #
 # To see a change: edit, ^C, run it again. `scripts/preview --watch` does the
 # rebuild for you and relaunches when the build finishes.
+#
+# It says what it is doing on stderr, because a script that spends its first
+# minute compiling and then draws a full-screen TUI looks identical to one that
+# hung if you only look at the pane.
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -43,14 +47,24 @@ for arg in "$@"; do
     esac
 done
 
+say() {
+    printf '%s\n' "preview: $*" >&2
+}
+
 build() {
-    cargo build --release --quiet
+    say "building (release) -- a minute the first time, seconds after that"
+    if ! cargo build --release; then
+        # The build is the only thing here that can fail before the TUI starts,
+        # and a silent exit here looks exactly like "the script does nothing".
+        say "the build failed; the errors are above"
+        exit 1
+    fi
 }
 
 if [ "$watch" -eq 1 ]; then
     # Rebuild and relaunch on every save. The loop is deliberately dumb: build,
     # run, wait for the file to change, build again.
-    echo "preview: watching src/ -- edit and save, or ^C to stop" >&2
+    say "watching src/ -- edit and save, ^C to stop"
     trap 'exit 0' INT TERM
     while :; do
         build
@@ -71,4 +85,5 @@ if [ "$watch" -eq 1 ]; then
 fi
 
 build
+say "running target/release/trak${passthrough:- }  --  q to quit"
 exec ./target/release/trak $passthrough

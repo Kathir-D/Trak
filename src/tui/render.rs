@@ -2155,13 +2155,12 @@ pub(crate) const HELP_KEY_WIDTH: usize = 16;
 pub(crate) const HELP_ROWS: &[(&str, &str)] = &[
     ("space", "play / pause"),
     ("n / p", "next / previous track"),
-    ("h / l", "seek back / forward"),
     ("+ / -", "volume up / down"),
     ("m", "mute (saves the volume you had)"),
     ("s", "toggle shuffle"),
     ("r", "repeat: off → all → one     R  replay"),
     ("c", "copy the share link"),
-    ("j / k  ↑ ↓", "move in a list"),
+    ("j / k  ↑ ↓", "move in a list, ↓ to focus in"),
     ("enter", "play the selected item"),
     ("a", "album art, or the visualizer"),
     ("v", "next visualizer style"),
@@ -2176,7 +2175,7 @@ pub(crate) const HELP_ROWS: &[(&str, &str)] = &[
     ("P", "add the selection to a playlist"),
     ("X", "remove it from the open playlist"),
     (", / ?", "settings"),
-    ("? / esc", "close this"),
+    ("? / esc", "close, or leave the list first"),
     ("q / ctrl-c", "quit"),
 ];
 

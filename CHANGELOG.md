@@ -44,6 +44,27 @@ its pane, a slider too small to hit, lyrics that would not stay on screen, an
   cause in two costumes. It now says to add the account to the app's user list
   rather than "answered HTTP 410".
 
+- **The seek keys are gone.** `h`/`l` no longer seek, and `[input] seek_step` has gone with them:
+  the owner called a second way to move the playhead "kinda stupid" next to arrows that are
+  navigation and a bar you can click. A `seek_step` left in a config file is ignored rather than
+  refused, so existing files keep working.
+- **Stale cover cells.** A Kitty placement covers exactly the cells it was encoded for, so a new
+  cover at a new size left the old placement on the terminal -- grey placeholder boxes that ratatui
+  cannot write over, because they are the image's own. A re-encoded cover now repaints the screen in
+  the same frame.
+- **A bar that flows instead of ticking.** The ramp slid a whole cell twice a second, so every bead
+  changed colour at the same instant and the row read as a colour counting down. It now reads the
+  ramp at a fractional position and blends, and the travelling white highlight is gone: the playhead
+  is the edge. The beads stay.
+- **The focused tab is the album's gradient** rather than one flat accent, as is the Library tab's
+  section strip -- a focused tab that reads as "a grey tab that happens to be highlighted" is not a
+  focus indicator.
+- **`↑`/`↓` focus into a tab and out of it**, and `esc` leaves the list before the tab. An open
+  album, artist or playlist page's tracks were reachable only by mouse: the arrows were moving the
+  tab's hidden cursor. Fixed.
+- **`scripts/preview`** builds the working tree and runs it, so UI changes can be seen without a
+  release.
+
 ### Changed
 
 - **The Queue tab is never just empty.** What Spotify will play next is not

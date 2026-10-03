@@ -114,8 +114,9 @@ the right, collapsing to a compact strip when it gets small.
 | --- | --- |
 | `space` | play / pause |
 | `n` / `p` | next / previous |
-| `h` / `l` | seek −/+ (5 s, a setting) |
 | `←` / `→` | previous / next tab |
+| `↑` / `↓` | move in a list, and focus into one |
+| `esc` | leave the list, then the tab, then the overlay |
 | `+` `-` | volume ±10 (a setting) |
 | `m` | mute (and back to the volume you had) |
 | `s` / `r` / `R` | shuffle / repeat off → all → one / replay the track |
@@ -177,7 +178,7 @@ keys take defaults, and a corrupt file is renamed to `config.toml.bak`.
 | `[visualizer]` | `style` | `spectrum`, `mirrored`, `waveform`, `circular` |
 | | `source` | `auto` (real audio, falling back to simulated), `simulated` |
 | `[input]` | `mouse` | `true`, `false` |
-| | `volume_step`, `seek_step` | `10`, `5` |
+| | `volume_step` | `10` |
 | `[notifications]` | `song_change` | `false`, `true` |
 | `[lyrics]` | `enabled` | `true`, `false` |
 | `[spotify]` | `client_id` | `""` (Version B) |

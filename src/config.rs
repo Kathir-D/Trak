@@ -285,10 +285,6 @@ pub struct Input {
     /// One press of `+` or `-` moves the volume by this many points, so it is a
     /// step and not a percentage: the range is 0-100 either way.
     pub volume_step: i16,
-    /// One press of `,` or `.` seeks by this many seconds. A fraction is
-    /// allowed and written as one; whole numbers are written without the point,
-    /// which is how a person would have typed them.
-    pub seek_step: f64,
 }
 
 impl Default for Input {
@@ -296,7 +292,6 @@ impl Default for Input {
         Self {
             mouse: true,
             volume_step: 10,
-            seek_step: 5.0,
         }
     }
 }
@@ -494,7 +489,6 @@ impl Config {
     /// field on `Settings` yet; TODO 5.3 is what gives them one, and until then
     /// this leaves them alone rather than guessing.
     pub fn apply(&self, settings: &mut Settings) {
-        settings.seek_step = self.input.seek_step;
         settings.volume_step = self.input.volume_step;
         settings.mouse = self.input.mouse;
         settings.show_clock = self.display.clock;
@@ -523,7 +517,6 @@ impl Config {
     ///
     pub fn with_settings(&self, settings: &Settings) -> Config {
         let mut next = self.clone();
-        next.input.seek_step = settings.seek_step;
         next.input.volume_step = settings.volume_step;
         next.input.mouse = settings.mouse;
         next.display.clock = settings.show_clock;
@@ -616,12 +609,6 @@ impl Config {
         table(&mut out, "input");
         kv(&mut out, "mouse", self.input.mouse, "");
         kv(&mut out, "volume_step", self.input.volume_step, "");
-        kv(
-            &mut out,
-            "seek_step",
-            seek_step_text(self.input.seek_step),
-            "",
-        );
 
         table(&mut out, "volume");
         kv(
@@ -756,16 +743,6 @@ fn accent_name(accent: Accent) -> &'static str {
         Accent::Art => "art",
         Accent::Green => "green",
         Accent::Terminal => "terminal",
-    }
-}
-
-/// A seek step as a person would write it: `5`, not `5.0`. A real fraction keeps
-/// its point, because dropping one would change the value.
-fn seek_step_text(step: f64) -> String {
-    if step.is_finite() && step.fract() == 0.0 {
-        format!("{}", step as i64)
-    } else {
-        format!("{step}")
     }
 }
 
@@ -1003,7 +980,6 @@ impl Config {
         );
         set_bool(&mut config.input.mouse, get("input", "mouse"));
         set_step(&mut config.input.volume_step, get("input", "volume_step"));
-        set_number(&mut config.input.seek_step, get("input", "seek_step"));
         set_enum(
             &mut config.volume.control,
             get("volume", "control"),
@@ -1043,16 +1019,6 @@ fn set_step(slot: &mut i16, value: Option<&Value>) {
         && let Ok(found) = i16::try_from(*found)
     {
         *slot = found;
-    }
-}
-
-/// A number for a field that is a number. `5` and `5.0` are both five, because a
-/// hand-edited file will have both and neither is a mistake worth a default.
-fn set_number(slot: &mut f64, value: Option<&Value>) {
-    match value {
-        Some(Value::Int(found)) => *slot = *found as f64,
-        Some(Value::Float(found)) => *slot = *found,
-        _ => {}
     }
 }
 
@@ -1488,7 +1454,6 @@ source = "auto"            # auto | simulated
 [input]
 mouse = true
 volume_step = 10
-seek_step = 5
 
 [volume]
 control = "spotify"        # spotify | system
@@ -1579,10 +1544,6 @@ client_id = ""             # empty = Version B
             input: Input {
                 mouse: false,
                 volume_step: 25,
-                // A fraction on purpose: it is the one value that is written and
-                // read in two different shapes, and a whole-number-only round trip
-                // would not notice either being wrong.
-                seek_step: 2.5,
             },
             notifications: Notifications { song_change: true },
             lyrics: Lyrics { enabled: false },
@@ -2000,28 +1961,15 @@ client_id = ""             # empty = Version B
         "volume_step = 25"
     );
 
-    reads!(
-        input_seek_step_is_read,
-        "[input]\nseek_step = 15\n",
-        Config {
-            input: Input {
-                seek_step: 15.0,
-                ..Input::default()
-            },
-            ..Config::default()
-        }
-    );
-    writes!(
-        input_seek_step_is_written,
-        Config {
-            input: Input {
-                seek_step: 15.0,
-                ..Input::default()
-            },
-            ..Config::default()
-        },
-        "seek_step = 15"
-    );
+    /// A `seek_step` left in somebody's file by an older trak is **ignored**, like
+    /// any other unknown key, rather than refused: the owner removed the `h`/`l`
+    /// seek (2026-10-03) and a config that still has the key must not stop trak
+    /// starting.
+    #[test]
+    fn a_removed_seek_step_in_a_config_is_ignored_rather_than_fatal() {
+        let config = loaded("[input]\nseek_step = 15\n");
+        assert_eq!(config.input, Input::default());
+    }
 
     // ------------------------------------------------------------------ [volume]
 
@@ -2249,7 +2197,7 @@ client_id = ""             # empty = Version B
     fn a_partly_set_config_keeps_the_rest_of_its_defaults() {
         let config = loaded(concat!(
             "[display]\nmode = \"visualizer\"\n\n",
-            "[input]\nseek_step = 15\n"
+            "[input]\nvolume_step = 25\n"
         ));
         assert_eq!(
             config,
@@ -2259,7 +2207,7 @@ client_id = ""             # empty = Version B
                     ..Display::default()
                 },
                 input: Input {
-                    seek_step: 15.0,
+                    volume_step: 25,
                     ..Input::default()
                 },
                 ..Config::default()
@@ -2422,47 +2370,22 @@ client_id = ""             # empty = Version B
         );
     }
 
-    /// Numbers in the shapes people type them. `5` and `5.0` are the same value
-    /// and both are read, because a person editing a seek step is not making a
-    /// mistake by writing one of them.
+    /// `h`/`l` used to seek, and `input.seek_step` used to be a float written
+    /// and read in two shapes (`5` and `5.0`, `2.5`). The owner removed the seek
+    /// (2026-10-03), and with it the only float setting trak had -- so the float
+    /// parser went with it, and this is here to say so rather than leave a reader
+    /// wondering where `set_number` went.
     #[test]
-    fn numbers_are_read_in_the_shapes_people_write_them() {
-        for (text, seek) in [
-            ("5", 5.0),
-            ("5.0", 5.0),
-            ("2.5", 2.5),
-            ("-3", -3.0),
-            ("1e1", 10.0),
-        ] {
-            assert_eq!(
-                loaded(&format!("[input]\nseek_step = {text}\n"))
-                    .input
-                    .seek_step,
-                seek,
-                "{text}"
-            );
-        }
-        for (text, step) in [("+5", 5), ("5_0", 50), ("-5", -5), ("0", 0)] {
-            assert_eq!(
-                loaded(&format!("[input]\nvolume_step = {text}\n"))
-                    .input
-                    .volume_step,
-                step,
-                "{text}"
-            );
-        }
-        // A whole number is written without a point, because that is how a person
-        // writes it and how SPEC §8 writes it.
-        assert!(Config::default().to_toml().contains("seek_step = 5\n"));
-        // And a fraction keeps its point, because dropping one changes the value.
-        let fractional = Config {
-            input: Input {
-                seek_step: 2.5,
-                ..Input::default()
-            },
-            ..Config::default()
-        };
-        assert!(fractional.to_toml().contains("seek_step = 2.5\n"));
+    fn there_are_no_float_settings_left_to_misparse() {
+        let config = loaded(concat!(
+            "[input]\nmouse = true\n",
+            "volume_step = 25\n",
+            "\n[lyrics]\nenabled = true\n"
+        ));
+        assert_eq!(config.input.volume_step, 25);
+        assert!(config.input.mouse);
+        // A number trak does not read is a number it does not choke on either.
+        assert_eq!(loaded("[input]\nseek_step = 2.5\n").input, Input::default());
     }
 
     /// The escapes TOML has that this reader honours.

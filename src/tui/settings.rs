@@ -269,7 +269,6 @@ const GROUPS: &[(&str, &[Row])] = &[
         &[
             ("mouse", Control::Toggle(Toggle::Mouse)),
             ("volume_step", Control::Number(Stepper::VolumeStep)),
-            ("seek_step", Control::Number(Stepper::SeekStep)),
             ("control", Control::Choice(Choice::VolumeControl)),
         ],
     ),
@@ -443,14 +442,12 @@ impl Choice {
 #[derive(Debug, Clone, Copy)]
 enum Stepper {
     VolumeStep,
-    SeekStep,
 }
 
 impl Stepper {
     fn text(self, app: &App) -> String {
         match self {
             Self::VolumeStep => app.settings.volume_step.to_string(),
-            Self::SeekStep => number_text(app.settings.seek_step),
         }
     }
 
@@ -461,10 +458,6 @@ impl Stepper {
             Self::VolumeStep => {
                 let next = along(&VOLUME_STEPS, app.settings.volume_step, way);
                 app.settings.volume_step = next;
-            }
-            Self::SeekStep => {
-                let next = along(&SEEK_STEPS, app.settings.seek_step, way);
-                app.settings.seek_step = next;
             }
         }
     }
@@ -487,10 +480,6 @@ const VOLUME_CONTROLS: [VolumeControl; 2] = [VolumeControl::Spotify, VolumeContr
 /// which is the whole of the volume scale, so no number of presses can produce a
 /// step the meter cannot show.
 const VOLUME_STEPS: [i16; 8] = [1, 2, 5, 10, 15, 20, 25, 50];
-
-/// `[input] seek_step`, in seconds. Every entry is positive, because a seek step
-/// of zero would make `←`/`→` look broken.
-const SEEK_STEPS: [f64; 7] = [1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0];
 
 /// `mode`'s word in the file. `DisplayMode` carries a `parse` but no `name`, and
 /// `config.rs` keeps its own copy private, so the screen needs its own. The
@@ -976,17 +965,6 @@ fn along<T: Copy + PartialOrd>(ladder: &[T], current: T, way: Way) -> T {
     found.copied().unwrap_or(current)
 }
 
-/// A number as a person would write it: `5`, not `5.0`. The same rule
-/// `config.rs` writes the file by, because a screen that says `5.0` about a
-/// setting the file spells `5` looks like it is showing something else.
-fn number_text(value: f64) -> String {
-    if value.is_finite() && value.fract() == 0.0 {
-        format!("{}", value as i64)
-    } else {
-        format!("{value}")
-    }
-}
-
 // ------------------------------------------------------- the typed line
 
 fn with_typing<T>(f: impl FnOnce(&mut Option<String>) -> T) -> T {
@@ -1208,12 +1186,16 @@ mod tests {
             "│Input                                                             │\n",
             "│mouse            on                                               │\n",
             "│volume_step      10                                               │\n",
-            "│seek_step        5                                                │\n",
             "│control          spotify                                          │\n",
             "│Notifications                                                     │\n",
             "│song_change      off                                              │\n",
             "│Spotify API  ·  s: guided setup                                   │\n",
             "│client_id        not set                                          │\n",
+            // The filler row that keeps the hint line on the bottom edge. It is
+            // here because the table lost a row with the seek step and the screen
+            // still has to fill its height: a hint line floating half way up
+            // looks like a different screen.
+            "│                                                                  │\n",
             "│ space toggle  ←/→ change  enter edit  j/k move  q save & close   │\n",
             "╰──────────────────────────────────────────────────────────────────╯",
         );
@@ -1348,10 +1330,7 @@ mod tests {
         );
         assert_eq!(labels("Theme"), ["border", "accent", "art_protocol"]);
         assert_eq!(labels("Visualizer"), ["style", "source"]);
-        assert_eq!(
-            labels("Input"),
-            ["mouse", "volume_step", "seek_step", "control"]
-        );
+        assert_eq!(labels("Input"), ["mouse", "volume_step", "control"]);
         assert_eq!(labels("Notifications"), ["song_change"]);
         assert_eq!(labels("Spotify API"), ["client_id"]);
     }
@@ -1428,14 +1407,6 @@ mod tests {
         key(&mut app, 'h');
         key(&mut app, 'h');
         assert_eq!(drawn_value(64, 30, &app, "volume_step"), "5");
-
-        let mut app = opened_at(index_of("seek_step"));
-        assert_eq!(drawn_value(64, 30, &app, "seek_step"), "5");
-        key(&mut app, 'l');
-        assert_eq!(drawn_value(64, 30, &app, "seek_step"), "10");
-        key(&mut app, 'h');
-        key(&mut app, 'h');
-        assert_eq!(drawn_value(64, 30, &app, "seek_step"), "2");
     }
 
     /// A number is walked along a ladder, so no number of presses can produce a
@@ -1463,16 +1434,6 @@ mod tests {
                 );
             }
         }
-        for start in [-9.0f64, 0.0, 0.5, 3.0, 60.0, 3600.0] {
-            let mut app = opened_at(index_of("seek_step"));
-            app.settings.seek_step = start;
-            for _ in 0..12 {
-                key(&mut app, 'h');
-                assert!(app.settings.seek_step > 0.0, "left from {start} gave zero");
-                key(&mut app, 'l');
-                assert!(app.settings.seek_step > 0.0, "right from {start} gave zero");
-            }
-        }
     }
 
     /// A ladder is walked, not clamped to a fixed pair of ends: `1` is as much of
@@ -1484,10 +1445,8 @@ mod tests {
         // Off the ladder: the nearest entry on the side that was asked for.
         assert_eq!(along(&VOLUME_STEPS, 7, Way::Right), 10);
         assert_eq!(along(&VOLUME_STEPS, 7, Way::Left), 5);
-        assert_eq!(along(&SEEK_STEPS, 0.25, Way::Right), 1.0);
         // Below the ladder, either way onto it: a file that says 0 gets fixed by
         // the first press rather than staying broken.
-        assert_eq!(along(&SEEK_STEPS, 0.25, Way::Left), 1.0);
         assert_eq!(along(&VOLUME_STEPS, 0, Way::Right), 1);
         assert_eq!(along(&VOLUME_STEPS, 900, Way::Right), 50);
         assert_eq!(along(&VOLUME_STEPS, -300, Way::Left), 1);
@@ -1869,13 +1828,13 @@ mod tests {
     fn a_step_size_reads_back_as_the_screen_showed_it() {
         let dir = TempDir::new("steps");
         let path = dir.join("config.toml");
-        let mut app = opened_at(index_of("seek_step"));
+        let mut app = opened_at(index_of("volume_step"));
         key(&mut app, 'h');
-        let shown = drawn_value(64, 30, &app, "seek_step");
+        let shown = drawn_value(64, 30, &app, "volume_step");
         save_and_close(&mut app, &path);
         let body = std::fs::read_to_string(&path).expect("read");
         assert!(
-            body.contains(&format!("seek_step = {shown}")),
+            body.contains(&format!("volume_step = {shown}")),
             "the screen said {shown}:\n{body}"
         );
     }

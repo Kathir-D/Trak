@@ -112,7 +112,6 @@ Rules:
 | --- | --- | --- |
 | `space` | Play / pause | both |
 | `n` / `p` | Next / previous track | both |
-| `h` `l` | Seek −/+ 5 s (a setting) | both |
 | `←` `→` | Previous / next tab (owner, 2026-10-01: arrows no longer seek) | both |
 | `+` `-` | Spotify volume ±10 (a setting) | both |
 | `m` | Mute / unmute (disabled while Sonar is fading, see COMPAT) | both |
@@ -120,7 +119,8 @@ Rules:
 | `R` | Replay the current track from the start | both |
 | `a` | Toggle art ↔ visualizer | both |
 | `v` | Cycle visualizer style | both |
-| `↑` `↓` / `j` `k` | Move in a list | both |
+| `↑` `↓` / `j` `k` | Move in a list, and focus into one (owner, 2026-10-03) | both |
+| `esc` | Leave a focused list before leaving its tab | both |
 | `enter` | Play the selected item | both |
 | `Tab` / `Shift-Tab` | Next / previous tab | both |
 | `1`–`6` | Jump to tab | both |
@@ -258,7 +258,6 @@ source = "auto"            # auto | simulated
 [input]
 mouse = true
 volume_step = 10
-seek_step = 5
 
 [volume]
 control = "spotify"        # spotify | system (see "Volume keys" in section 2)

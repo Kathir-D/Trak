@@ -1000,7 +1000,6 @@ impl VisualizerStyle {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Settings {
     // [input]
-    pub seek_step: f64,
     pub volume_step: i16,
     /// On by default. When off the loop does not even ask the terminal for mouse
     /// events, so a terminal that reports them cannot steal text selection.
@@ -1042,7 +1041,6 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            seek_step: 5.0,
             volume_step: 10,
             mouse: true,
             show_art: true,
@@ -2385,34 +2383,12 @@ fn handle_key(app: &mut App, c: char, commands: &mut Vec<PlayerCommand>, web: &m
             push(app, commands, PlayerCommand::SetRepeating(on));
         }
         's' => push(app, commands, PlayerCommand::ToggleShuffle),
+        // No `h`/`l` seek. There was one, for years, and the owner called it
+        // stupid (2026-10-03): the arrows are navigation and always were, and a
+        // second way to move the playhead is one more thing to remember and one
+        // more thing to get wrong next to the bar. Seeking is still a click on the
+        // bar, which is a pointer gesture and does not need a key.
         'R' => push(app, commands, PlayerCommand::Replay),
-        // `Seek` is an absolute position (it is `set player position`), so the
-        // step is applied here. Sending the bare step made `l` jump to 0:05 and
-        // `h` ask Spotify for -5 s, which it refuses.
-        'h' | 'l' => {
-            let step = if c == 'h' {
-                -app.settings.seek_step
-            } else {
-                app.settings.seek_step
-            };
-            let dur = app.track().map(|t| t.duration_secs() as f64).unwrap_or(0.0);
-            let mut to = (app.interpolated_position() + step).max(0.0);
-            if dur > 0.0 {
-                to = to.min(dur);
-            }
-            // Move the bar now and keep counting from here. Waiting for the write
-            // to come back meant the bar did not move for the length of two
-            // AppleScript round trips -- the key felt like nothing happened, and
-            // holding `l` walked the bar one step per second (owner,
-            // 2026-10-02). A write that does not land says so, and the next poll
-            // puts the truth back.
-            app.seek_to(to);
-            push(
-                app,
-                commands,
-                PlayerCommand::Seek((to * 1000.0).round() / 1000.0),
-            );
-        }
         'm' => {
             app.muted = !app.muted;
             if app.muted {
@@ -2906,22 +2882,31 @@ mod tests {
         }
     }
 
+    /// **There is no `h`/`l` seek** (owner, 2026-10-03: "remove the seek option,
+    /// it seems kinda stupid -- just make arrow keys always navigation"). The keys
+    /// are unbound, so they must write nothing at all rather than quietly becoming
+    /// something else: the arrows are navigation, `n`/`p` are tracks, and the
+    /// playhead moves by clicking the bar or by the track ending.
     #[test]
-    fn seek_keys_step_from_where_the_track_is() {
-        // `Seek` is absolute, so the keys move from the current position by the
-        // configured step rather than jumping to ±5 s.
+    fn there_are_no_seek_keys() {
+        for key in ['h', 'l'] {
+            let (app, cmds) = press(with_track(), key);
+            assert!(cmds.is_empty(), "{key:?} wrote {cmds:?}");
+            assert!(!app.should_quit, "{key:?} quit");
+        }
+        // And the playhead is untouched by them: same position, same track.
         let app = with_track();
         let at = app.interpolated_position();
-        let near = |cmds: &[PlayerCommand], want: f64| matches!(cmds, [PlayerCommand::Seek(s)] if (s - want).abs() < 0.5);
-        let (_, cmds) = press(with_track(), 'h');
-        assert!(near(&cmds, (at - 5.0).max(0.0)), "{cmds:?} from {at}");
-        let (_, cmds) = press(with_track(), 'l');
-        assert!(near(&cmds, at + 5.0), "{cmds:?} from {at}");
-        // Never before the start.
-        let mut app = with_track();
-        app.settings.seek_step = 100_000.0;
-        let (_, cmds) = press(app, 'h');
-        assert_eq!(cmds, vec![PlayerCommand::Seek(0.0)]);
+        let (app, _) = press(app, 'l');
+        assert!(
+            (app.interpolated_position() - at).abs() < 0.2,
+            "the bar moved on its own: {at} -> {}",
+            app.interpolated_position()
+        );
+        assert_eq!(
+            app.track().map(|t| t.title.clone()),
+            Some("Census Designated".into())
+        );
     }
 
     #[test]
@@ -3388,7 +3373,7 @@ mod tests {
 
     /// `←`/`→` switch tabs and never seek; `h`/`l` seek (owner, 2026-10-01).
     #[test]
-    fn arrows_switch_tabs_and_h_l_seek() {
+    fn the_arrows_switch_tabs() {
         let start = with_track().tab;
         let (app, cmds) = press(with_track(), ARROW_RIGHT);
         assert!(cmds.is_empty(), "an arrow must not seek: {cmds:?}");
@@ -3399,11 +3384,6 @@ mod tests {
         let (app, cmds) = press(app, ARROW_LEFT);
         assert!(cmds.is_empty());
         assert_eq!(app.tab, start.prev(), "and it wraps");
-        let (_, cmds) = press(with_track(), 'l');
-        assert!(
-            matches!(cmds.as_slice(), [PlayerCommand::Seek(_)]),
-            "{cmds:?}"
-        );
         // From a Web tab too, which takes its own keys first.
         let mut app = with_track();
         app.tab = Tab::Search;
@@ -3514,7 +3494,7 @@ mod tests {
     /// it**, and a tab with nothing in it has nothing to focus.
     #[test]
     fn down_focuses_into_a_list_and_up_leaves_it() {
-        let mut app = on_tab(Tab::Playlists);
+        let app = on_tab(Tab::Playlists);
         assert_eq!(web_rows(&app), 0);
 
         // Nothing to move to: focus stays off rather than pretending.
@@ -4061,34 +4041,6 @@ mod tests {
         );
         assert_eq!(out.commands, vec![PlayerCommand::Next]);
         assert_eq!(out.app.busy, Some(PlayerCommand::Next), "and it is running");
-    }
-
-    /// The bar moves on the keypress and keeps interpolating from the new
-    /// position.
-    #[test]
-    fn a_seek_key_moves_the_bar_at_once() {
-        let (after, cmds) = press(with_track(), 'l');
-        let PlayerCommand::Seek(to) = cmds[0] else {
-            panic!("a seek, not {cmds:?}");
-        };
-        // And the bar is already there, rather than waiting for the write to come
-        // back: it is showing the position trak asked Spotify for.
-        assert!(
-            (after.interpolated_position() - to).abs() < 0.2,
-            "bar is at {:?}, asked for {to}",
-            after.interpolated_position()
-        );
-    }
-
-    /// A seek past the end is clamped in the app too, so the bar never shows a
-    /// position the track does not have.
-    #[test]
-    fn a_seek_key_clamps_to_the_track() {
-        let mut app = with_track();
-        app.state.as_mut().unwrap().position_secs = 358.0;
-        let (after, cmds) = press(app, 'l');
-        assert_eq!(cmds, vec![PlayerCommand::Seek(360.0)]);
-        assert!(after.interpolated_position() <= 360.0);
     }
 
     #[test]
@@ -5225,7 +5177,6 @@ mod tests {
     #[test]
     fn the_settings_defaults_match_spec() {
         let s = Settings::default();
-        assert_eq!(s.seek_step, 5.0);
         assert_eq!(s.volume_step, 10);
         assert!(s.rounded(), "rounded borders are the SPEC default");
         assert!(s.show_clock && s.show_volume && s.show_key_hints && s.side_pane);
