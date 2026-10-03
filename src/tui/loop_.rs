@@ -1624,8 +1624,10 @@ mod tests {
     #[test]
     fn a_lazy_tab_is_asked_once_per_visit() {
         use crate::tui::app::{Connection, Tab as T};
-        let mut web = crate::tui::app::WebState::default();
-        web.connection = Connection::Connected;
+        let mut web = crate::tui::app::WebState {
+            connection: Connection::Connected,
+            ..Default::default()
+        };
         for tab in [T::Playlists, T::Liked, T::Queue, T::Library] {
             // Nothing asked yet: one request.
             let first = tab_needs(tab, &web);
