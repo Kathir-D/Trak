@@ -2121,8 +2121,13 @@ fn history_lines<'a>(app: &'a App, theme: &'a Theme) -> Vec<Line<'a>> {
                 } else {
                     format!("{} — {}", e.track.artist, e.track.title)
                 };
+                // The accent colour, not `REVERSED`: reversed video uses the
+                // *terminal's* colours, so the selected row came out whatever the
+                // terminal's selection is -- blue on the owner's machine -- with no
+                // relation to the cover. They liked this indicator and wanted it to
+                // follow the album (2026-10-03).
                 let style = if selected {
-                    Style::default().add_modifier(Modifier::REVERSED)
+                    theme.accent_style().add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
                 };

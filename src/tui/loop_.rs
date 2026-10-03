@@ -355,6 +355,10 @@ fn event_loop<B: ratatui::backend::Backend>(
         app.toast(n);
     }
     app.web.connection = connection_at_start(&app.config.spotify.client_id);
+    // Which tab was on screen last frame, so arriving at one can clear what it was
+    // asked for. Here rather than in the key handling, because a click changes the
+    // tab too and this is the one place that sees every way of doing it.
+    let mut last_tab = app.tab;
     let mut setup = SetupRunner::default();
     let depth = crate::tui::colour::Depth::from_env();
     if first_run {
@@ -515,6 +519,12 @@ fn event_loop<B: ratatui::backend::Backend>(
             && app.web.connection.connected()
             && let Some(job) = tab_needs(app.tab, &app.web)
         {
+            // Marked as asked **before** the result, not after it succeeds: a 410
+            // or a 403 is an answer, and treating it as "not asked" is what turned
+            // one failing tab into ten requests a second and starved the cover
+            // download behind it (owner, 2026-10-03).
+            let tab = app.tab;
+            app.web.mark_asked(tab);
             submit_web(vec![job], &worker);
         }
         // The playing track's heart (7.7), asked once per track. Skipped while
@@ -543,6 +553,14 @@ fn event_loop<B: ratatui::backend::Backend>(
             && let Some(job) = page_needs(&open, &app.web)
         {
             submit_web(vec![job], &worker);
+        }
+
+        // Arriving at a tab is the retry for a list that failed: its "asked" flag
+        // goes, so the request goes out again once -- which is exactly what is
+        // wanted after the owner adds their account to the app's allowlist.
+        if app.tab != last_tab {
+            app.web.entered(app.tab);
+            last_tab = app.tab;
         }
 
         // 2b. Album art (TODO 4.1). One download per track, on the worker, and
@@ -1192,20 +1210,11 @@ fn submit_web(jobs: Vec<WebJob>, worker: &Worker) -> bool {
 fn tab_needs(tab: Tab, web: &crate::tui::app::WebState) -> Option<WebJob> {
     match tab {
         Tab::Search if !web.searching && web.search_shown.is_empty() => None,
-        Tab::Playlists if web.playlists.items.is_empty() && web.playlists.next.is_none() => {
-            Some(WebJob::Playlists)
-        }
-        Tab::Liked if web.liked.items.is_empty() && web.liked.next.is_none() => Some(WebJob::Liked),
-        Tab::Queue if web.queue.upcoming.is_empty() && web.queue.now_playing.is_none() => {
-            Some(WebJob::Queue)
-        }
+        Tab::Playlists if !web.asked_for(Tab::Playlists) => Some(WebJob::Playlists),
+        Tab::Liked if !web.asked_for(Tab::Liked) => Some(WebJob::Liked),
+        Tab::Queue if !web.asked_for(Tab::Queue) => Some(WebJob::Queue),
         Tab::Library => {
-            let i = match web.library.section {
-                crate::tui::app::LibrarySection::Albums => 0,
-                crate::tui::app::LibrarySection::Artists => 1,
-                crate::tui::app::LibrarySection::Recent => 2,
-            };
-            (!web.library.loaded[i]).then_some(WebJob::Library(web.library.section))
+            (!web.asked_for(Tab::Library)).then_some(WebJob::Library(web.library.section))
         }
         // A page that has just been opened is the thing to fetch, and it is the
         // loop's business because only it knows whether the worker is free.
@@ -1604,6 +1613,38 @@ fn clock_string() -> String {
 mod tests {
     use super::*;
     use crossterm::event::KeyEventState;
+
+    /// **A lazy tab is asked once.** `tab_needs` is what runs every frame, so this
+    /// is the whole of the request storm: it used to answer "ask again" while the
+    /// list was still empty, which is forever when the request fails (410, 403, an
+    /// offline laptop). Ten requests a second, against a per-app developer quota,
+    /// with the worker thread permanently busy so the cover download and the lyrics
+    /// lookup behind it were starved (owner, 2026-10-03: "why is the picture not
+    /// showing and color scheme not following picture").
+    #[test]
+    fn a_lazy_tab_is_asked_once_per_visit() {
+        use crate::tui::app::{Connection, Tab as T};
+        let mut web = crate::tui::app::WebState::default();
+        web.connection = Connection::Connected;
+        for tab in [T::Playlists, T::Liked, T::Queue, T::Library] {
+            // Nothing asked yet: one request.
+            let first = tab_needs(tab, &web);
+            assert!(first.is_some(), "{tab:?} should ask when it arrives");
+            web.mark_asked(tab);
+            // Asked: and then silence, whatever the request answered.
+            for _ in 0..100 {
+                assert!(
+                    tab_needs(tab, &web).is_none(),
+                    "{tab:?} asked again on the next frame"
+                );
+            }
+            // Arriving again is the retry, and it is one request.
+            web.entered(tab);
+            assert!(tab_needs(tab, &web).is_some(), "{tab:?} did not retry");
+            web.mark_asked(tab);
+            assert!(tab_needs(tab, &web).is_none());
+        }
+    }
 
     fn key(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
         KeyEvent {

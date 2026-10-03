@@ -500,6 +500,21 @@ pub struct WebState {
     /// A next page is on its way, so the cursor sitting near the end does not
     /// ask for the same page every frame.
     pub loading_more: bool,
+    /// Which lazy lists have already had a request sent for them.
+    ///
+    /// **This is the fix for a request storm.** The lazy tabs used to ask on
+    /// "the list is still empty", which is true *forever* when the request fails --
+    /// and the owner's account is not on the app's five-user allowlist, so
+    /// `GET /me/playlists` answers 410 every time. Ten requests a second, from a
+    /// single-keypress tab, against Spotify's per-app developer quota, and the
+    /// worker thread never free again, so the cover download and the lyrics lookup
+    /// behind it are **starved**: the pane stayed empty and the colour scheme stayed
+    /// on the fallback green because `set_art_colour` never ran (owner, 2026-10-03:
+    /// "why is the picture not showing and color scheme not following picture").
+    ///
+    /// Asked, not loaded: a failure still shows its message and still counts as
+    /// asked. Re-entering the tab clears the flag, which is the retry.
+    pub asked: Asked,
 
     // -- The pages you open something into (7.10)
     /// A navigation stack, so `esc` from an album inside an artist returns to the
@@ -640,6 +655,7 @@ impl Default for WebState {
             liked_here: None,
             liked_checked: None,
             loading_more: false,
+            asked: Asked::default(),
             edit: None,
             pages: Vec::new(),
             open: None,
@@ -660,6 +676,73 @@ impl Default for LibrarySections {
             recent: Page::empty(),
             loaded: [false; 3],
             strip_cursor: LibrarySection::Albums,
+        }
+    }
+}
+
+/// Which lazy lists have been asked for. See [`WebState::asked`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Asked {
+    pub playlists: bool,
+    pub liked: bool,
+    pub queue: bool,
+    pub library: [bool; 3],
+}
+
+impl WebState {
+    /// The user has arrived at `tab`: forget what was asked for on the way in, so
+    /// coming back to a tab that failed is a retry.
+    ///
+    /// Called from the event loop when the tab changes, which is the only place
+    /// that sees every way of changing it -- keys, digits and a click alike.
+    pub fn entered(&mut self, tab: Tab) {
+        match tab {
+            Tab::Playlists => self.asked.playlists = false,
+            Tab::Liked => self.asked.liked = false,
+            Tab::Queue => self.asked.queue = false,
+            Tab::Library => {
+                if let Some(i) = LibrarySection::ALL
+                    .iter()
+                    .position(|s| *s == self.library.section)
+                {
+                    self.asked.library[i] = false;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Has this tab already had its request sent?
+    pub fn asked_for(&self, tab: Tab) -> bool {
+        match tab {
+            Tab::Playlists => self.asked.playlists,
+            Tab::Liked => self.asked.liked,
+            Tab::Queue => self.asked.queue,
+            Tab::Library => self
+                .asked
+                .library
+                .get(self.library.section.index())
+                .copied()
+                // An index that is not in the array means the enum grew without
+                // the array following, and asking again is the safe answer.
+                .unwrap_or(true),
+            _ => true,
+        }
+    }
+
+    /// Record that a request went out for `tab`.
+    pub fn mark_asked(&mut self, tab: Tab) {
+        match tab {
+            Tab::Playlists => self.asked.playlists = true,
+            Tab::Liked => self.asked.liked = true,
+            Tab::Queue => self.asked.queue = true,
+            Tab::Library => {
+                let i = self.library.section.index();
+                if let Some(slot) = self.asked.library.get_mut(i) {
+                    *slot = true;
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -3508,6 +3591,76 @@ mod tests {
         assert_eq!(next.lyrics.status, LyricsStatus::Idle, "looked up again");
         assert_eq!(next.lyrics.lyrics, None, "and not the old words");
         assert_eq!(next.marquee_offset, 0);
+    }
+
+    /// **A failing lazy tab is asked once, not ten times a second.**
+    ///
+    /// The lazy tabs used to ask while their list was still empty, which is true
+    /// *forever* when the request fails -- and the owner's account is not on the
+    /// app's five-user allowlist, so `GET /me/playlists` answers 410 every time.
+    /// That was ten requests a second from a single keypress, against Spotify's
+    /// per-app developer quota, and it kept the one worker thread permanently busy
+    /// so the **cover download and the lyrics lookup behind it were starved**: the
+    /// art pane stayed empty and the colour scheme stayed on the fallback green
+    /// (owner, 2026-10-03: "why is the picture not showing and color scheme not
+    /// following picture").
+    #[test]
+    fn a_failing_tab_is_asked_once_and_arriving_again_is_the_retry() {
+        let mut app = on_tab(Tab::Playlists);
+        assert!(!app.web.asked_for(Tab::Playlists), "not asked yet");
+
+        app.web.mark_asked(Tab::Playlists);
+        assert!(
+            app.web.asked_for(Tab::Playlists),
+            "asked the moment it goes out, not when it succeeds"
+        );
+        // A failure changes nothing: no error, no empty list, still asked.
+        app.web.playlists = crate::web::api::Page::empty();
+        assert!(
+            app.web.asked_for(Tab::Playlists),
+            "still asked after nothing"
+        );
+
+        // Arriving at the tab is the retry -- which is what the owner needs after
+        // adding their account to the allowlist.
+        app.web.entered(Tab::Playlists);
+        assert!(
+            !app.web.asked_for(Tab::Playlists),
+            "coming back to the tab asks again, once"
+        );
+
+        // Each tab has its own flag, and the Library's three sections have their own.
+        for tab in [Tab::Playlists, Tab::Liked, Tab::Queue] {
+            let mut fresh = on_tab(tab);
+            fresh.web.mark_asked(tab);
+            for other in [Tab::Playlists, Tab::Liked, Tab::Queue] {
+                if other != tab {
+                    fresh.web.mark_asked(other);
+                }
+            }
+            fresh.web.entered(tab);
+            assert!(!fresh.web.asked_for(tab), "{tab:?} was not re-asked");
+            for other in [Tab::Playlists, Tab::Liked, Tab::Queue] {
+                if other != tab {
+                    assert!(
+                        fresh.web.asked_for(other),
+                        "{tab:?} arriving must not re-ask {other:?}"
+                    );
+                }
+            }
+        }
+        let mut lib = on_tab(Tab::Library);
+        lib.web.library.section = LibrarySection::Albums;
+        lib.web.mark_asked(Tab::Library);
+        lib.web.library.section = LibrarySection::Artists;
+        assert!(
+            !lib.web.asked_for(Tab::Library),
+            "the other section has not been asked for"
+        );
+        lib.web.library.section = LibrarySection::Albums;
+        assert!(lib.web.asked_for(Tab::Library));
+        lib.web.entered(Tab::Library);
+        assert!(!lib.web.asked_for(Tab::Library), "arriving re-asks it");
     }
 
     /// **The Library tab is fully arrow-navigable**, which it was not at all: the

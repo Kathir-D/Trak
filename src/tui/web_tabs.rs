@@ -80,7 +80,7 @@ pub fn lines_in(app: &App, theme: &Theme, width: usize) -> Vec<Line<'static>> {
     }
     out.extend(match app.tab {
         Tab::Search => search_lines(app, theme),
-        Tab::Playlists => playlist_lines(app),
+        Tab::Playlists => playlist_lines(app, theme),
         Tab::Queue => queue_lines(app, theme, width),
         Tab::Liked => liked_lines(app, theme),
         Tab::Library => library_lines(app, theme),
@@ -112,7 +112,7 @@ fn search_lines(app: &App, theme: &Theme) -> Vec<Line<'static>> {
             i == current,
         ));
         for (row, text) in group_rows(&web.results, i).into_iter().enumerate() {
-            out.push(row_line(&text, row == web.group_row[i]));
+            out.push(row_line(&text, row == web.group_row[i], theme));
         }
     }
     out
@@ -204,7 +204,7 @@ fn group_heading(name: &str, count: usize, theme: &Theme, current: bool) -> Line
 // Playlists (7.7)
 // ---------------------------------------------------------------------------
 
-fn playlist_lines(app: &App) -> Vec<Line<'static>> {
+fn playlist_lines(app: &App, theme: &Theme) -> Vec<Line<'static>> {
     let page = &app.web.playlists;
     if page.items.is_empty() {
         let mut out = vec![hint("  no playlists yet")];
@@ -223,12 +223,13 @@ fn playlist_lines(app: &App) -> Vec<Line<'static>> {
             // and the `items` field will be absent"), so a row that says nothing
             // about it would be promising a tracklist `enter` cannot open.
             match playlist.contents {
-                Some(_) => row_line(&text, i == app.web.playlist_cursor),
+                Some(_) => row_line(&text, i == app.web.playlist_cursor, theme),
                 None => {
                     unreadable = true;
                     row_line(
                         &format!("{text}  (no tracklist)"),
                         i == app.web.playlist_cursor,
+                        theme,
                     )
                 }
             }
@@ -272,7 +273,7 @@ fn edit_lines(app: &App, theme: &Theme, edit: &PlaylistEdit) -> Vec<Line<'static
                 } else {
                     format!("{p}  (not yours — read only)")
                 };
-                out.push(row_line(&text, i == *cursor));
+                out.push(row_line(&text, i == *cursor, theme));
             }
             out
         }
@@ -478,33 +479,29 @@ fn section_strip(
     section: LibrarySection,
     theme: &Theme,
     cursor: LibrarySection,
-    focused: bool,
+    _focused: bool,
 ) -> Line<'static> {
     let mut spans = Vec::new();
     for one in LibrarySection::ALL {
-        let label = format!(" {} ", one.label());
-        if one == section {
-            let mut run = crate::tui::render::gradient_title(&label, theme);
-            if focused && one != cursor {
-                // Not the one the arrows are on: the gradient says "showing", and
-                // this says "the arrows are elsewhere".
-                for span in run.iter_mut() {
-                    *span = Span::styled(
-                        span.content.to_string(),
-                        span.style.add_modifier(Modifier::UNDERLINED),
-                    );
-                }
-            }
-            spans.extend(run);
-        } else if one == cursor {
+        if one == cursor {
+            // **Brackets and the accent colour: no block behind it.** This had the
+            // same gradient block as the focused tab, which put two coloured blocks
+            // on one screen and made the strip shout (owner, 2026-10-03: "remove
+            // all the highlighted text, it just looks bad"). One accent-coloured
+            // marker per control is the pattern the rest of the interface uses.
             spans.push(Span::styled(
-                format!("[{}]", one.label()),
-                Style::default()
-                    .fg(theme.accent_colour())
-                    .add_modifier(Modifier::BOLD),
+                format!("[{}] ", one.label()),
+                theme.accent_style().add_modifier(Modifier::BOLD),
+            ));
+        } else if one == section {
+            // The section being shown, when the arrows are elsewhere: bold, so it
+            // is findable without being another block of colour.
+            spans.push(Span::styled(
+                format!(" {} ", one.label()),
+                Style::default().add_modifier(Modifier::BOLD),
             ));
         } else {
-            spans.push(Span::styled(label, Style::default()));
+            spans.push(Span::styled(format!(" {} ", one.label()), Style::default()));
         }
     }
     Line::from(spans)
@@ -554,7 +551,7 @@ fn page_lines(app: &App, theme: &Theme, open: &Open) -> Vec<Line<'static>> {
     out.extend(
         rows.iter()
             .enumerate()
-            .map(|(i, text)| row_line(text, i == app.web.open_cursor)),
+            .map(|(i, text)| row_line(text, i == app.web.open_cursor, theme)),
     );
     out
 }
@@ -597,9 +594,16 @@ fn now_playing(app: &App) -> Option<String> {
 
 /// One list row, with the `›` the History tab uses, so a selected row looks the
 /// same in every tab.
-fn row_line(text: &str, selected: bool) -> Line<'static> {
+fn row_line(text: &str, selected: bool, theme: &Theme) -> Line<'static> {
+    // **The selected row is the album's colour, not reversed video.** `REVERSED`
+    // swaps the *terminal's* foreground and background, so the selected row came
+    // out whatever colour the terminal's own selection is -- blue on the owner's
+    // machine -- with no relation to the cover. They liked this indicator ("I like
+    // how you show how something is selected with green text") and wanted it to
+    // follow the album, so the row is now the accent colour: no background block,
+    // and every list in the interface marks its selection the same way.
     let (marker, style) = if selected {
-        ("›", Style::default().add_modifier(Modifier::REVERSED))
+        ("›", theme.accent_style().add_modifier(Modifier::BOLD))
     } else {
         (" ", Style::default())
     };
@@ -1172,6 +1176,71 @@ mod tests {
         assert!(newer < older, "newest first: {text}");
     }
 
+    /// **The selected row is marked with the album's colour, not reversed video.**
+    ///
+    /// `REVERSED` swaps the *terminal's* foreground and background, so the selected
+    /// row came out whatever colour the terminal's own selection is -- blue on the
+    /// owner's machine -- with no relation to the cover. They liked the indicator
+    /// and wanted it to follow the album (2026-10-03), so the row is now the accent
+    /// colour, with no background block anywhere.
+    #[test]
+    fn the_selected_row_is_accent_coloured_and_nothing_else_is() {
+        let theme = Theme::default();
+        let selected = row_line("Alpha", true, &theme);
+        let plain = row_line("Beta", false, &theme);
+        let accent = theme.accent_colour();
+
+        let spans = |l: &Line<'static>| -> Vec<Span<'static>> { l.spans.to_vec() };
+        // The row is one span: marker and words together, in the album's colour,
+        // with no background block.
+        let one = spans(&selected);
+        let words: String = one.iter().map(|s| s.content.as_ref()).collect();
+        assert!(words.contains("Alpha"), "{words:?}");
+        assert!(
+            one.iter().all(|s| s.style.fg == Some(accent)),
+            "the selected row is the album's colour: {words:?}"
+        );
+        assert!(
+            one[0].style.add_modifier.contains(Modifier::BOLD),
+            "and bold, so it reads without relying on colour alone"
+        );
+        assert!(
+            !one[0].style.add_modifier.contains(Modifier::REVERSED),
+            "reversed video is the terminal's colour, not the album's"
+        );
+        assert!(
+            one.iter().all(|s| s.style.bg.is_none()),
+            "and no block of colour behind it: {words:?}"
+        );
+
+        // An unselected row is completely plain.
+        let none = spans(&plain);
+        assert!(none[0].content.starts_with(' '), "no marker: {:?}", none[0]);
+        assert!(
+            none.iter()
+                .all(|s| s.style.fg.is_none() && s.style.bg.is_none()),
+            "an unselected row has no colour at all"
+        );
+
+        // And the Library strip carries no block of colour at all now.
+        let mut app = app_on(Tab::Library);
+        app.web.library.strip_cursor = LibrarySection::Artists;
+        let strip = lines(&app, &theme);
+        let strip_text = strip
+            .iter()
+            .flat_map(|l| l.spans.clone())
+            .map(|s| s.content.to_string())
+            .collect::<String>();
+        assert!(strip_text.contains("[Followed artists]"), "{strip_text:?}");
+        assert!(
+            !strip
+                .iter()
+                .flat_map(|l| l.spans.clone())
+                .any(|s| s.style.bg.is_some()),
+            "no block of colour behind the strip: {strip_text:?}"
+        );
+    }
+
     /// **A wrapped hint keeps its indent.** The Queue tab's Premium sentence is
     /// longer than a narrow pane, and ratatui's wrapping puts the continuation in
     /// column zero -- so "so trak cannot show what is / next" had `next` under the
@@ -1264,7 +1333,7 @@ mod tests {
         assert_paints(
             &app,
             concat!(
-                " Saved albums  Followed artists  Recently played \n",
+                "[Saved albums]  Followed artists  Recently played \n",
                 "   Census — Jane Remover (2022)\n",
                 "   Blue Lines — Jane Remover (1991)",
             ),
@@ -1277,7 +1346,7 @@ mod tests {
         assert_paints(
             &app,
             concat!(
-                " Saved albums  Followed artists  Recently played \n",
+                " Saved albums [Followed artists]  Recently played \n",
                 "   Jane Remover",
             ),
         );
@@ -1286,7 +1355,7 @@ mod tests {
         assert_paints(
             &app,
             concat!(
-                " Saved albums  Followed artists  Recently played \n",
+                " Saved albums  Followed artists [Recently played] \n",
                 "   Jane Remover — Census Designated",
             ),
         );
