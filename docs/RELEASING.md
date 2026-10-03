@@ -327,6 +327,26 @@ One row per release, filled in from §4 and §7.
 | --- | --- | --- | --- | --- |
 | 0.1.0 | 2026-10-02 | `3339b815bb5c` | `92359db` | Workflow green. `brew audit --strict --online` failed: `version "0.1.0"` is redundant with the URL. Superseded by 0.1.1; the binary is the same. |
 | 0.1.1 | 2026-10-02 | `5b48141e9d57` | `b19d4b9` | Both install paths below, verbatim. |
+| 0.2.0 | 2026-10-03 | `dbbd2d04133b` | `3643d20` | Release and tap published; `brew audit --strict --online kathir-d/tap/trak` exit 0; `brew fetch kathir-d/tap/trak` resolves 0.2.0 after `brew update`; the tarball's sha256 matches the published `SHA256SUMS.txt` and the extracted binary answers `--version` and `status` against real Spotify. `brew install --formula ./Formula/trak.rb` no longer works on this machine (Homebrew refuses a formula outside a tap), so §1 step 4 was verified with `brew audit` plus extracting the tarball. **[owner]** a real `brew install` on a machine that has never had trak. |
+
+### 0.2.0 verification, 2026-10-03
+
+```text
+$ gh release view v0.2.0            # trak v0.2.0, published 04:41Z, two assets
+$ curl -sL .../v0.2.0/SHA256SUMS.txt
+dbbd2d04133bf61386432e769f3f99fbdc912bef7daf7d74b612610d1e3fc3ce  trak-0.2.0-macos.tar.gz
+$ curl -sL .../v0.2.0/trak-0.2.0-macos.tar.gz -o t.tar.gz && shasum -a 256 t.tar.gz
+dbbd2d04133bf61386432e769f3f99fbdc912bef7daf7d74b612610d1e3fc3ce   # the same number
+$ tar xzf t.tar.gz && ./trak-0.2.0/trak --version && ./trak-0.2.0/trak status --plain
+trak 0.2.0
+⏸  aphex twin flame · yeule -- softscars · 1:04 / 3:38 · volume 100
+$ brew audit --strict --online kathir-d/tap/trak     # exit 0, no output
+$ brew update && brew fetch kathir-d/tap/trak
+✔︎ Formula trak (0.2.0)
+```
+
+The release notes carry the one thing a reader has to act on: **the redirect URI changed to
+`http://127.0.0.1:8888/callback`**, and an app registered before 0.2.0 needs that line added.
 
 ### 0.1.1 fresh install, 2026-10-02 (the owner's Mac, Apple silicon, macOS 27)
 
