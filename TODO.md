@@ -1119,6 +1119,34 @@ built on, which is the whole reason this phase exists.
       > Premium account still gets the real queue from the API, unchanged. `docs/WEB-API.md` §2
       > already records that only the **add** is Premium-gated; this is the read's empty case.
 
+- [x] 13.17 **A failing lazy tab asked for itself ten times a second, and starved the cover**
+      (owner, 2026-10-03: "why is the picture not showing and color scheme not following
+      picture"). **Both symptoms were one bug.**
+      > The lazy tabs asked while their list was still empty -- true *forever* when the request
+      > fails, and the owner's account is not on the app's five-user allowlist, so
+      > `GET /me/playlists` answers 410 every time. Ten requests a second from a single keypress,
+      > against Spotify's per-app developer quota, and the one worker thread never came free again,
+      > so the cover download queued behind it was starved: no picture, and `set_art_colour` never
+      > ran so the interface stayed on the fallback green.
+      > Each lazy tab now records that it has been **asked**, *before* the request rather than after
+      > it succeeds -- a 410 is an answer, not a reason to ask again. Arriving at a tab clears the
+      > flag, which is the retry, and is exactly what is wanted after the owner adds their account
+      > to the allowlist.
+      > Verified by deleting the current track's cover from the cache and running with the Library
+      > tab open (every request there answers 410): the cover **is** refetched. Under the old code
+      > it never was.
+- [x] 13.18 A selected row is the **album's colour**, and there is no block of colour anywhere else
+      (owner, 2026-10-03: "I like how you show how something is selected with green text, make sure
+      it follows the color of art"; "remove all the highlighted text, it just looks bad").
+      > Selection was `Modifier::REVERSED`, which swaps the **terminal's** own foreground and
+      > background -- so the selected row came out whatever the terminal's selection colour is (blue
+      > on this machine) with no relation to the cover. Both the History tab and every Web list now
+      > mark the selected row with `theme.accent_style()`, so it follows the artwork by
+      > construction.
+      > The Library section strip lost its gradient block (it duplicated the focused tab's, putting
+      > two coloured blocks on one screen). The cursor is brackets plus the accent colour, and the
+      > showing section is bold.
+
 - [x] 13.16 A wrapped hint keeps a **hanging indent** (owner, 2026-10-03). The Queue tab's Premium
       > sentence is longer than a narrow pane, and ratatui's wrapping puts the continuation in column
       > zero -- so "so trak cannot show what is / next" had `next` under the pane's left edge, which

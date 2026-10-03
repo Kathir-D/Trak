@@ -62,6 +62,18 @@ its pane, a slider too small to hit, lyrics that would not stay on screen, an
 - **`↑`/`↓` focus into a tab and out of it**, and `esc` leaves the list before the tab. An open
   album, artist or playlist page's tracks were reachable only by mouse: the arrows were moving the
   tab's hidden cursor. Fixed.
+- **A failing tab no longer asks ten times a second.** The lazy Web tabs asked while their list was
+  still empty -- which is forever when the request fails, and Playlists/Liked answer 410 or 403
+  until the account is on the app's developer allowlist. That burned the per-app developer quota and
+  kept the worker thread permanently busy, so the cover download and lyrics lookup queued behind it
+  were starved: the art pane stayed empty and the colour scheme stayed on the fallback green. Each
+  tab now records that it has been asked, and arriving at a tab retries once -- which is what you
+  want after adding your account to the allowlist.
+- **Selection follows the album.** A selected row used to be reversed video, which is the
+  *terminal's* selection colour rather than anything to do with the cover. It is now the album's
+  accent colour, in the History tab and every Web list. The Library section strip's gradient block
+  is gone too, so there is one accent-coloured marker per control and no blocks.
+
 - **Wrapped messages keep their indent.** A hint longer than a narrow pane used to wrap into column
   zero, so the continuation read as a separate fact instead of the rest of the sentence.
 - **Gradients stop banding.** Colour interpolation moved from HSL to Oklab, which is perceptually
