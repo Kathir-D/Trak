@@ -1119,6 +1119,35 @@ built on, which is the whole reason this phase exists.
       > Premium account still gets the real queue from the API, unchanged. `docs/WEB-API.md` §2
       > already records that only the **add** is Premium-gated; this is the read's empty case.
 
+- [x] 13.14 **Gradients interpolate in Oklab, and there is only one of them** (owner, 2026-10-03:
+      "make sure the gradient, don't bug out like this. Either copy the gradient for the vol slider or
+      make it animated and verify it actually works").
+      > `accent::mix` interpolated in HSL, which holds saturation and lightness constant along the
+      > way and therefore does not change at a constant *perceptual* rate -- which is what banding
+      > is. Measured on a three-colour palette: a step of **21/255** between neighbouring cells
+      > (a visible band); in Oklab the same palette stays at **<= 12/255**. Both numbers are in
+      > `a_ramp_has_no_seams_and_no_grey_middle`, which fails on the old code.
+      > The volume meter now **is** the bar's gradient -- same width, same fraction, same colours at
+      > every filled cell, asserted cell for cell -- so there is no second gradient in the program
+      > that can disagree with the first.
+      > `accent::shade(colour, lightness)` sets Oklab lightness directly instead of mixing towards
+      > black, because a linear step in a perceptual space drops the RGB values faster than the
+      > apparent lightness: "55% towards black" turned a pale pink into near-black, which is how the
+      > white box became a black box.
+- [x] 13.15 **The Library tab is arrow-navigable, and its strip is a control** (owner, 2026-10-03:
+      "in library tab i should be able to arrow down and go to followed artists from saved albums with
+      right arrow and press a button to select to go to that menu ... IT MUST BE FULLY NAVIGABLE WITH
+      ARROW KEYS NO MOUSE").
+      > The three sections could only be changed **with the mouse** -- there was no key handler for
+      > the strip at all. Now `←`/`→` walk a cursor along it, `enter` commits it, and `↓` commits and
+      > goes into the list in one press. The strip shows **three** states, because there are three
+      > facts: the showing section (the album's gradient), the section the arrows are on
+      > (bracketed), and when those differ the showing one is underlined.
+      > `←`/`→` mean sections *on this tab only*. `Tab`/`Shift-Tab` and the digits still change tab
+      > everywhere, so nothing became unreachable -- which is the check the test makes.
+      > The strip is also **top-anchored** now: the pane body used to be centred when its content was
+      > short, which left the control floating in the middle of an empty pane.
+
 - [x] 13.11 **One cover, one colour scheme** (owner, 2026-10-03: "make sure when tracks change the
       whole color scheme changes to follow as specified -- only some colors changed to follow picture
       and some are still of prev song").

@@ -206,6 +206,36 @@ pub fn brightness(colour: Color) -> f32 {
     (f32::from(r.max(g).max(b)) + f32::from(r.min(g).min(b))) / (2.0 * 255.0)
 }
 
+/// The same colour at a given **Oklab lightness**, keeping its hue and most of its
+/// chroma.
+///
+/// Mixing towards black looks like the obvious way to make a deep tint and is not,
+/// once the mix is perceptual: a linear step in Oklab lightness drops the *RGB*
+/// values much faster than it drops the apparent lightness, so 55% towards black
+/// turned a pale pink into near-black (owner, 2026-10-03: "remove the ugly white
+/// box" -- the first fix overshot into a black one). Setting the lightness directly
+/// gives the same answer for every hue, which is what "a deep tint of this colour"
+/// has to mean if it is to mean anything.
+///
+/// Chroma is scaled with the lightness so a saturated colour does not fall out of
+/// the sRGB gamut on the way down; a colour that would be out of gamut simply ends
+/// up as close to its own hue as it can be at that lightness.
+pub fn shade(colour: Color, lightness: f32) -> Color {
+    let (r, g, b) = to_rgb(colour);
+    let (_, a, b2) = to_oklab(r, g, b);
+    let l = lightness.clamp(0.0, 1.0);
+    // Cap chroma at what the target lightness can hold, roughly: chroma has to fit
+    // inside the cube around L.
+    let chroma = (a.hypot(b2) * (1.0 - l) * 3.0).min(0.4);
+    let scale = if a.hypot(b2) > 0.0001 {
+        chroma / a.hypot(b2)
+    } else {
+        1.0
+    };
+    let (rr, gg, bb) = from_oklab(l, a * scale, b2 * scale);
+    Color::Rgb(rr, gg, bb)
+}
+
 /// The WCAG contrast ratio between two colours.
 pub fn contrast_ratio(a: Color, b: Color) -> f32 {
     let (x, y) = (luma_of(a), luma_of(b));
@@ -290,6 +320,71 @@ fn a_flat_palette_is_still_flat_after_caching() {
 mod tests {
     use super::*;
     use image::{Rgb, RgbImage};
+
+    /// **A ramp has no seams.** The owner's word for it was a gradient that "bugs
+    /// out" (2026-10-03) -- the volume slider reading as a long blue stretch and then
+    /// a pink one. Asserted as a property rather than a picture: over a range of
+    /// palettes, no two neighbouring colours in a long ramp may differ by more than
+    /// a small fraction of the channel range, and the midpoint may not be a
+    /// desaturated seam.
+    #[test]
+    fn a_ramp_has_no_seams_and_no_grey_middle() {
+        let distance = |a: Color, b: Color| -> i32 {
+            let (r1, g1, b1) = to_rgb(a);
+            let (r2, g2, b2) = to_rgb(b);
+            (r1 as i32 - r2 as i32)
+                .abs()
+                .max((g1 as i32 - g2 as i32).abs())
+                .max((b1 as i32 - b2 as i32).abs())
+        };
+        let chroma = |c: Color| -> i32 {
+            let (r, g, b) = to_rgb(c);
+            r.max(g).max(b) as i32 - r.min(g).min(b) as i32
+        };
+        for (primary, secondary, tertiary) in [
+            (
+                Color::Rgb(40, 90, 200),
+                Color::Rgb(230, 120, 190),
+                Color::Rgb(120, 200, 90),
+            ),
+            (
+                Color::Rgb(200, 40, 40),
+                Color::Rgb(40, 200, 90),
+                Color::Rgb(60, 60, 220),
+            ),
+            (
+                Color::Rgb(250, 120, 200),
+                Color::Rgb(30, 30, 90),
+                Color::Rgb(240, 200, 60),
+            ),
+        ] {
+            let p = Palette {
+                primary,
+                secondary,
+                tertiary,
+            };
+            let ramp = p.ramp(64);
+            let worst = ramp
+                .windows(2)
+                .map(|w| distance(w[0], w[1]))
+                .max()
+                .expect("a ramp");
+            assert!(
+                worst <= 12,
+                "a step of {worst}/255 between neighbours: {primary:?} -> {secondary:?} \
+                 -> {tertiary:?}"
+            );
+            // The middle is not a grey seam: it has to be at least half as colourful
+            // as the ends, or the ramp goes through mud.
+            let ends = (chroma(primary) + chroma(secondary)) / 2;
+            let middle = chroma(ramp[32]);
+            assert!(
+                middle * 2 >= ends,
+                "the middle is a seam: chroma {middle} against ends {ends} for \
+                 {primary:?} -> {secondary:?}"
+            );
+        }
+    }
 
     /// **A cover with no usable hue gives one flat colour** (owner, 2026-10-03).
     /// It used to give green with a synthetic teal and orange either side of it,
@@ -838,22 +933,87 @@ fn to_rgb(colour: Color) -> (u8, u8, u8) {
 pub fn mix(a: Color, b: Color, t: f32) -> Color {
     let (r1, g1, b1) = to_rgb(a);
     let (r2, g2, b2) = to_rgb(b);
+    oklab_mix(r1, g1, b1, r2, g2, b2, t)
+}
+
+/// Interpolate two colours in **Oklab**, and return to sRGB.
+///
+/// This used to interpolate in HSL, taking the short way round the hue circle,
+/// which is right about hue and wrong about everything else: HSL holds saturation
+/// and lightness constant along the way, so a gradient between two saturated
+/// colours passes through the same lightness everywhere and, worse, the *rate* at
+/// which the eye sees the colour change is not constant -- which is what banding
+/// is. The owner saw it as a gradient that "bugs out": the volume slider reading as
+/// a long blue stretch and then a pink one rather than as one ramp (2026-10-03).
+///
+/// Oklab is perceptually uniform, so a step of `t` looks like the same amount of
+/// change everywhere along it, and equal RGB steps come out equal perceptual steps
+/// -- which is the whole of what "smooth gradient" means in a colour space.
+///
+/// The short-way-round hue rule HSL needed is gone with it: Oklab is cartesian, so
+/// there is no circle to take the long way round.
+fn oklab_mix(r1: u8, g1: u8, b1: u8, r2: u8, g2: u8, b2: u8, t: f32) -> Color {
     let t = t.clamp(0.0, 1.0);
-    let (h1, s1, l1) = hsl(r1, g1, b1);
-    let (h2, s2, l2) = hsl(r2, g2, b2);
-    // The short way round, so a ramp never sweeps through red because the two
-    // ends happen to sit either side of 0°.
-    let mut delta = (h2 - h1) % 360.0;
-    if delta > 180.0 {
-        delta -= 360.0;
-    }
-    if delta < -180.0 {
-        delta += 360.0;
-    }
-    let h = (h1 + delta * t).rem_euclid(360.0);
-    let s = s1 + (s2 - s1) * t;
-    let l = l1 + (l2 - l1) * t;
-    from_hsl(h, s.clamp(0.0, 1.0), l.clamp(0.0, 1.0))
+    let (l1, a1, b1_) = to_oklab(r1, g1, b1);
+    let (l2, a2, b2_) = to_oklab(r2, g2, b2);
+    let (l, a, b) = (
+        l1 + (l2 - l1) * t,
+        a1 + (a2 - a1) * t,
+        b1_ + (b2_ - b1_) * t,
+    );
+    let (r, g, b) = from_oklab(l, a, b);
+    Color::Rgb(r, g, b)
+}
+
+/// sRGB to Oklab. The matrices are the published ones; the cube root is the
+/// non-linearity that makes the space perceptual rather than merely linear.
+#[allow(clippy::excessive_precision)]
+fn to_oklab(r: u8, g: u8, b: u8) -> (f32, f32, f32) {
+    let lin = |c: u8| {
+        let c = f32::from(c) / 255.0;
+        if c <= 0.040_45 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let (r, g, b) = (lin(r), lin(g), lin(b));
+    // Eight digits is far more than f32 keeps, but the matrix constants are written
+    // as published so they can be checked against the paper.
+    let l = 0.412_221_470_8 * r + 0.536_332_536_3 * g + 0.051_445_992_9 * b;
+    let m = 0.211_903_498_2 * r + 0.680_699_545_1 * g + 0.107_396_956_6 * b;
+    let s = 0.088_302_461_9 * r + 0.281_718_837_6 * g + 0.629_978_700_5 * b;
+    let cube = |x: f32| x.cbrt();
+    let (l, m, s) = (cube(l), cube(m), cube(s));
+    (
+        0.210_454_255_3 * l + 0.793_617_785 * m - 0.004_072_046_8 * s,
+        1.977_998_495_1 * l - 2.428_592_205 * m + 0.450_593_709_9 * s,
+        0.025_904_037_1 * l + 0.782_771_766_2 * m - 0.808_675_766 * s,
+    )
+}
+
+#[allow(clippy::excessive_precision)]
+fn from_oklab(l: f32, a: f32, b: f32) -> (u8, u8, u8) {
+    let l_ = l + 0.396_337_777_4 * a + 0.215_803_757_3 * b;
+    let m_ = l - 0.105_561_345_8 * a - 0.063_854_172_8 * b;
+    let s_ = l - 0.089_484_177_5 * a - 1.291_485_548 * b;
+    let cube = |x: f32| x * x * x;
+    let (lr, lg, lb) = (cube(l_), cube(m_), cube(s_));
+    let (r, g, b) = (
+        4.076_741_662_1 * lr - 3.307_711_591_3 * lg + 0.230_969_929_2 * lb,
+        -1.268_438_004_6 * lr + 2.609_757_401_1 * lg - 0.341_319_396_5 * lb,
+        -0.004_196_086_3 * lr - 0.703_418_614_7 * lg + 1.707_614_701 * lb,
+    );
+    let encode = |c: f32| {
+        let c = c.clamp(0.0, 1.0);
+        let c = if c <= 0.003_130_8 {
+            c * 12.92
+        } else {
+            1.055 * c.powf(1.0 / 2.4) - 0.055
+        };
+        (c * 255.0).round().clamp(0.0, 255.0) as u8
+    };
+    (encode(r), encode(g), encode(b))
 }
 
 /// Rotate a colour's hue by `degrees`, keeping its saturation and lightness.

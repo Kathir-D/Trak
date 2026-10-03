@@ -677,6 +677,63 @@ mod tests {
         assert_eq!(bar.len(), 20);
     }
 
+    /// **The volume meter is the bar's gradient**, because a second gradient in the
+    /// program is a second gradient that can disagree with the first (owner,
+    /// 2026-10-03: "make sure the gradient, don't bug out like this -- either copy
+    /// the gradient for the vol slider or make it animated and verify it actually
+    /// works").
+    ///
+    /// Asserted against the bar directly: same width, same fraction, the colours at
+    /// every filled cell have to be **identical**, not merely similar. And the ramp
+    /// has to be smooth, because "bugs out" was the complaint and a smooth ramp is
+    /// the answer to it.
+    #[test]
+    fn the_meter_is_the_bar_s_own_gradient_and_it_is_smooth() {
+        let p = crate::accent::Palette::from_accent(Color::Rgb(40, 90, 200));
+        let bar: Vec<Color> = gradient_bar(0.6, 30, &p, false)
+            .iter()
+            .map(|s| s.style.fg.unwrap())
+            .collect();
+        let meter: Vec<Color> = gradient_meter(0.6, 30, &p, false)
+            .iter()
+            .map(|s| s.style.fg.unwrap())
+            .collect();
+        assert_eq!(bar.len(), meter.len(), "the same width");
+        for (i, (b, m)) in bar.iter().zip(meter.iter()).enumerate() {
+            assert_eq!(b, m, "cell {i}: the meter is not the bar's gradient");
+        }
+        // Different glyphs, though: two bars pointing at different things must not
+        // look like two progress bars.
+        let drawn = gradient_meter(0.6, 30, &p, false);
+        let glyphs: Vec<&str> = drawn.iter().map(|s| s.content.as_ref()).collect();
+        assert!(glyphs.iter().all(|g| *g == "▰" || *g == "▱"), "{glyphs:?}");
+
+        // Smooth: no neighbouring pair may differ by more than a small step.
+        let distance = |a: Color, b: Color| -> i32 {
+            let (Color::Rgb(r1, g1, b1), Color::Rgb(r2, g2, b2)) = (a, b) else {
+                return 0;
+            };
+            (i32::from(r1) - i32::from(r2))
+                .abs()
+                .max((i32::from(g1) - i32::from(g2)).abs())
+                .max((i32::from(b1) - i32::from(b2)).abs())
+        };
+        let filled: Vec<Color> = gradient_meter(0.6, 60, &p, false)
+            .iter()
+            .take(30)
+            .map(|s| s.style.fg.unwrap())
+            .collect();
+        let worst = filled
+            .windows(2)
+            .map(|w| distance(w[0], w[1]))
+            .max()
+            .unwrap();
+        assert!(worst <= 12, "a step of {worst}/255: {filled:?}");
+        // And it is a gradient, not one colour repeated.
+        let distinct: std::collections::HashSet<_> = filled.iter().collect();
+        assert!(distinct.len() > 8, "only {} colours", distinct.len());
+    }
+
     /// The only characters allowed in a bar or a meter: one cell wide everywhere.
     #[test]
     fn bars_use_only_single_width_characters() {
@@ -803,15 +860,26 @@ pub fn progress_bar_spans(
     bar(fraction, width, palette, dim, phase)
 }
 
-/// The volume meter: the same ramp as the bar but in its own glyphs, so the two
-/// do not read as two progress bars pointing at different things.
+/// The volume meter: **the same gradient as the bar**, in its own glyphs.
+///
+/// The owner's two complaints about it were that it "bugs out" -- reading as a long
+/// blue stretch and then a pink one rather than one ramp -- and that it should just
+/// be given what the bar has (2026-10-03). Both are answered by the same code path
+/// rather than by a similar one: the meter draws [`progress_bar_spans`], so it gets
+/// the sliding ramp, the fractional drift and the Oklab interpolation the bar has,
+/// and there is no second gradient in the program that can disagree with the first.
+///
+/// Only the glyphs are its own, so the two do not read as two progress bars pointing
+/// at different things.
 pub fn gradient_meter(
     fraction: f64,
     width: usize,
     palette: &crate::accent::Palette,
     dim: bool,
 ) -> Vec<Span<'static>> {
-    let mut spans = gradient_bar(fraction, width, palette, dim);
+    // No drift: the meter's own value is the thing it is showing, and a gradient
+    // sliding underneath a fixed number is a second thing to read.
+    let mut spans = progress_bar_spans(fraction, width, palette, dim, 0.0, false);
     for span in &mut spans {
         let filled = span.content == BAR_FILLED;
         *span = Span::styled(if filled { "▰" } else { "▱" }, span.style);
@@ -1068,21 +1136,40 @@ mod whimsy_tests {
             "a gradient should be many colours, got {}",
             colours.len()
         );
-        // The playhead is brighter than the bar behind it.
+        // **No travelling highlight.** There used to be three cells at the head
+        // mixed toward white, so the playhead read as a bright point travelling
+        // along the bar -- which, with a row of beads changing colour twice a
+        // second, is what made the bar look like a colour ticking down (owner,
+        // 2026-10-03). The playhead is the edge between filled and unfilled, which
+        // is already exactly where it is.
         let filled: Vec<_> = spans.iter().take(20).collect();
         let head = filled[19].style.fg.unwrap();
-        let middle = filled[10].style.fg.unwrap();
-        let Color::Rgb(hr, hg, hb) = head else {
-            panic!("rgb")
-        };
-        let Color::Rgb(mr, mg, mb) = middle else {
-            panic!("rgb")
-        };
+        let before_head = filled[18].style.fg.unwrap();
+        assert_ne!(head, before_head, "the ramp has to keep going to the end");
         assert!(
-            i32::from(hr) + i32::from(hg) + i32::from(hb)
-                > i32::from(mr) + i32::from(mg) + i32::from(mb),
-            "the head should be brighter: {head:?} vs {middle:?}"
+            !matches!(head, Color::White),
+            "there is no white highlight on the playhead any more: {head:?}"
         );
+        // And the ramp is smooth all the way: no step between neighbours big enough
+        // to read as a band.
+        let distance = |a: Color, b: Color| -> i32 {
+            let (Color::Rgb(r1, g1, b1), Color::Rgb(r2, g2, b2)) = (a, b) else {
+                return 0;
+            };
+            (i32::from(r1) - i32::from(r2))
+                .abs()
+                .max((i32::from(g1) - i32::from(g2)).abs())
+                .max((i32::from(b1) - i32::from(b2)).abs())
+        };
+        let worst = spans
+            .iter()
+            .map(|s| s.style.fg.unwrap())
+            .collect::<Vec<_>>()
+            .windows(2)
+            .map(|w| distance(w[0], w[1]))
+            .max()
+            .expect("steps");
+        assert!(worst <= 12, "a step of {worst}/255 in the bar's ramp");
         // The unfilled part is not part of the gradient.
         assert!(spans[25].content == "─");
     }

@@ -659,6 +659,7 @@ impl Default for LibrarySections {
             artists: Page::empty(),
             recent: Page::empty(),
             loaded: [false; 3],
+            strip_cursor: LibrarySection::Albums,
         }
     }
 }
@@ -690,6 +691,18 @@ impl LibrarySection {
         let i = Self::ALL.iter().position(|s| *s == self).unwrap_or(0);
         Self::ALL[(i + 1) % Self::ALL.len()]
     }
+
+    pub fn prev(self) -> Self {
+        let i = Self::ALL.iter().position(|s| *s == self).unwrap_or(0);
+        Self::ALL[(i + Self::ALL.len() - 1) % Self::ALL.len()]
+    }
+
+    /// Which of the three `loaded` flags belongs to this section. `ALL` is the
+    /// index order, so this cannot be wrong; the fallback is `Albums` rather than a
+    /// panic because a value outside the enum would mean the enum changed.
+    pub fn index(self) -> usize {
+        Self::ALL.iter().position(|s| *s == self).unwrap_or(0)
+    }
 }
 
 /// The three lists of the Library tab, loaded lazily (7.9).
@@ -702,6 +715,16 @@ pub struct LibrarySections {
     /// Which of the three have been asked for. Loading all three on entry would
     /// be three requests for a tab most visits leave immediately.
     pub loaded: [bool; 3],
+    /// Which section the strip's cursor is on, which is not always
+    /// [`Self::section`]: the arrows move this, and `enter` commits it.
+    ///
+    /// A strip you change the moment you touch it is a strip you cannot look along,
+    /// and the Library tab's three sections have very different lengths, so the
+    /// highlight and the loaded section are two facts (owner, 2026-10-03: "in
+    /// library tab i should be able to arrow down and go to followed artists from
+    /// saved albums with right arrow and press a button to select to go to that
+    /// menu").
+    pub strip_cursor: LibrarySection,
 }
 
 /// What a list tab has opened, or nothing.
@@ -1843,7 +1866,35 @@ fn web_tab_key(
             app.web.list_focus = false;
             true
         }
+        // **The Library tab's strip is a control, not a label.** The three sections
+        // could only be changed with the mouse, which is the whole of what the owner
+        // meant by "it must be fully navigable with arrow keys, no mouse".
+        //
+        // `←`/`→` walk the strip, `enter` commits the highlighted one and goes into
+        // its list, and `↓` does the same without the ceremony -- which is what
+        // "arrow down and go to followed artists from saved albums" describes. The
+        // arrows stop meaning "next tab" *on this tab only*: `Tab`/`Shift-Tab` and
+        // the digits still change tab everywhere, so nothing is unreachable.
+        ARROW_RIGHT | 'l' if app.tab == Tab::Library && !app.web.list_focus => {
+            app.web.library.strip_cursor = app.web.library.strip_cursor.next();
+            true
+        }
+        ARROW_LEFT | 'h' if app.tab == Tab::Library && !app.web.list_focus => {
+            app.web.library.strip_cursor = app.web.library.strip_cursor.prev();
+            true
+        }
+        '\n' if app.tab == Tab::Library && !app.web.list_focus => {
+            commit_library_section(app);
+            true
+        }
         'j' | 'k' => {
+            // `↓` into the list commits whatever the strip is on, so the two
+            // controls agree about which section is showing.
+            if app.tab == Tab::Library && c == 'j' && !app.web.list_focus {
+                commit_library_section(app);
+                app.web.list_focus = true;
+                return true;
+            }
             let down = c == 'j';
             // `↓` focuses into the list and `↑` off the top row leaves it, so the
             // arrows alone can get a row and back out again. A tab with nothing in
@@ -2140,6 +2191,18 @@ impl WebState {
 }
 
 /// Move the cursor within whichever list the tab is showing.
+/// Show the section the Library strip's cursor is on, and fetch it if it has never
+/// been asked for.
+///
+/// One function because three keys reach it (`enter`, `↓`, and the loop's own
+/// lazy-load check) and three copies is two of them wrong.
+fn commit_library_section(app: &mut App) {
+    let chosen = app.web.library.strip_cursor;
+    app.web.library.section = chosen;
+    app.web.library_cursor = 0;
+    app.web.list_focus = false;
+}
+
 /// How many rows the focused tab is showing. Zero means there is nothing to move
 /// a cursor over, which is a different thing from a tab with rows the cursor is
 /// not in yet.
@@ -3445,6 +3508,90 @@ mod tests {
         assert_eq!(next.lyrics.status, LyricsStatus::Idle, "looked up again");
         assert_eq!(next.lyrics.lyrics, None, "and not the old words");
         assert_eq!(next.marquee_offset, 0);
+    }
+
+    /// **The Library tab is fully arrow-navigable**, which it was not at all: the
+    /// three sections could only be changed with the mouse (owner, 2026-10-03: "in
+    /// library tab i should be able to arrow down and go to followed artists from
+    /// saved albums with right arrow and press a button to select to go to that
+    /// menu").
+    #[test]
+    fn the_library_strip_is_a_control_the_arrows_can_drive() {
+        let mut app = on_tab(Tab::Library);
+        app.web.library.albums = crate::web::api::Page {
+            items: vec![crate::web::api::Album {
+                id: "al1".into(),
+                name: "Census".into(),
+                uri: "spotify:album:al1".into(),
+                artists: Vec::new(),
+                images: Vec::new(),
+                release_date: None,
+                total_tracks: Some(1),
+            }],
+            next: None,
+        };
+        app.web.library.loaded = [true, false, false];
+
+        // Starting point: Saved albums, showing, cursor on it, arrows on the strip.
+        assert_eq!(app.web.library.section, LibrarySection::Albums);
+        assert_eq!(app.web.library.strip_cursor, LibrarySection::Albums);
+        assert!(!app.web.list_focus);
+
+        // `→` walks the strip and does NOT change what is showing: you can look
+        // along the options before committing to one.
+        let (app, _) = press(app.clone(), ARROW_RIGHT);
+        assert_eq!(app.web.library.strip_cursor, LibrarySection::Artists);
+        assert_eq!(
+            app.web.library.section,
+            LibrarySection::Albums,
+            "walking the strip is not choosing"
+        );
+
+        // `enter` chooses it.
+        let (app, _) = press(app, '\n');
+        assert_eq!(app.web.library.section, LibrarySection::Artists);
+        assert!(!app.web.list_focus, "and the arrows are still on the strip");
+
+        // `↓` chooses it and goes into the list, which is the shorter way to the
+        // same place and is what "arrow down and go to followed artists" means.
+        let (app, _) = press(app.clone(), ARROW_RIGHT);
+        assert_eq!(app.web.library.strip_cursor, LibrarySection::Recent);
+        let (app, _) = press(app, 'j');
+        assert_eq!(app.web.library.section, LibrarySection::Recent);
+        assert!(app.web.list_focus, "and into its list");
+
+        // `↑` off the top row hands the arrows back to the strip.
+        let (app, _) = press(app, 'k');
+        assert!(!app.web.list_focus);
+
+        // `←` walks back, wrapping.
+        let (app, _) = press(app, ARROW_LEFT);
+        assert_eq!(app.web.library.strip_cursor, LibrarySection::Artists);
+        let (app, _) = press(app, ARROW_LEFT);
+        assert_eq!(app.web.library.strip_cursor, LibrarySection::Albums);
+        let (app, _) = press(app, ARROW_LEFT);
+        assert_eq!(
+            app.web.library.strip_cursor,
+            LibrarySection::Recent,
+            "wraps"
+        );
+
+        // **Leaving the tab is still possible with the keyboard**: the arrows mean
+        // sections *here*, so the tab keys have to carry it.
+        let was = app.tab;
+        let (app, _) = press(app.clone(), '\t');
+        assert_eq!(app.tab, was.next(), "tab still changes tab");
+        let (app, _) = press(app, '6');
+        assert_eq!(app.tab, Tab::Lyrics, "and so do the digits");
+        // On any other tab the arrows go back to changing tab.
+        let other = on_tab(Tab::Search);
+        let (other, _) = press(other, ARROW_RIGHT);
+        assert_eq!(other.tab, Tab::Playlists);
+        assert_eq!(
+            other.web.library.strip_cursor,
+            LibrarySection::Albums,
+            "the strip is untouched on another tab"
+        );
     }
 
     /// **`j`/`k` reach an open album, artist or playlist page** (owner, 2026-10-03:

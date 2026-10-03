@@ -62,6 +62,15 @@ its pane, a slider too small to hit, lyrics that would not stay on screen, an
 - **`↑`/`↓` focus into a tab and out of it**, and `esc` leaves the list before the tab. An open
   album, artist or playlist page's tracks were reachable only by mouse: the arrows were moving the
   tab's hidden cursor. Fixed.
+- **Gradients stop banding.** Colour interpolation moved from HSL to Oklab, which is perceptually
+  uniform: the same three-colour palette went from a 21/255 step between neighbouring cells (a
+  visible band) to under 12/255, and the middle of a ramp is no longer a desaturated seam. The
+  volume slider is now literally the progress bar's gradient -- same colours at every cell -- so
+  there is no second gradient that can disagree with the first.
+- **The Library tab works with the keyboard.** Its three sections could only be changed with the
+  mouse. `←`/`→` now walk the section strip, `enter` commits the section you are on, and `↓` does
+  both at once; the strip shows which section is showing and which one the arrows are on. `Tab` and
+  the digits still change tab everywhere, so nothing is less reachable than before.
 - **One cover, one colour scheme.** The accent and the gradient ramp came from two different colour
   extractors, so a track change could leave the bar on the new cover's colours and the borders on
   the old one's; and a cover with no usable colour kept the *previous* ramp while the accent fell

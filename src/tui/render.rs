@@ -1726,8 +1726,28 @@ fn draw_tabs(f: &mut Frame, area: Rect, app: &App, theme: &Theme, regions: &mut 
     // already chosen to fit, while a lyric line is whatever the song says and a
     // narrow pane used to cut it off mid-word with no way to see the rest --
     // there is no sideways scroll for a tab (owner, 2026-10-02).
+    // **A pane whose first line is a control is never centred.** The Library tab's
+    // section strip is a control -- the arrows walk it and `enter` commits it -- and
+    // a control that moves about as the pane fills is a control nobody can aim at
+    // (owner, 2026-10-03, who asked for the strip to be reachable by arrows). Every
+    // other tab keeps the centring below, which is right for a message.
+    let anchored = app.tab == Tab::Library;
     let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
-    f.render_widget(paragraph, body_rect(body, lines_len));
+    let rect = if anchored {
+        top_rect(body, lines_len)
+    } else {
+        body_rect(body, lines_len)
+    };
+    f.render_widget(paragraph, rect);
+}
+
+/// The top-anchored form of [`body_rect`]: the first line stays where it is and the
+/// spare room is left below.
+fn top_rect(body: Rect, lines: usize) -> Rect {
+    Rect {
+        height: (lines as u16).min(body.height),
+        ..body
+    }
 }
 
 /// Where a pane's lines are drawn when they do not fill it.
@@ -2027,39 +2047,21 @@ pub fn gradient_title(text: &str, theme: &Theme) -> Vec<Span<'static>> {
         .enumerate()
         .map(|(i, c)| {
             let colour = ramp[(i * ramp.len()) / chars.len().max(1)];
-            // The tint deepens along the run, so the block is lit from the left even
-            // when the palette has no hue to gradient through -- a cover that is all
-            // one colour would otherwise give one flat slab, which is the thing this
-            // was written to stop being.
+            // **A target lightness, not a mix towards black.** A linear step in a
+            // perceptual space drops the RGB values faster than the apparent
+            // lightness, so mixing "55% towards black" turned a pale pink into
+            // near-black. Setting the lightness gives the same deep tint for every
+            // hue, which is the only way "a deep tint of this colour" means
+            // anything.
             let across = i as f32 / chars.len().saturating_sub(1).max(1) as f32;
-            // **Towards black if the colour is bright, towards white if it is dark**,
-            // so the block lands in a band that is visible on any background: a
-            // cover that is nearly black would otherwise give a *black* block, which
-            // is the same invisible selection in the other direction.
-            // `brightness`, not `luma_of`: WCAG relative luminance is gamma
-            // linearised for contrast ratios and answers a different question, so a
-            // bright pink measured "dark" and came out as a pale box. Two earlier
-            // versions of this line got it wrong -- one compared a 0..1 value with
-            // 90, and one used the WCAG luma -- and both put the white box back.
-            // The dark band is the wide one: only a colour this dark (below about a
-            // fifth) needs lifting, and everything else is darkened. A higher cut-off
-            // than that caught Spotify green -- brightness 0.42, which looks like a
-            // mid green -- and lightened it into a pale box instead.
-            let to = if crate::accent::brightness(colour) > 0.22 {
-                Color::Black
-            } else {
-                Color::White
-            };
-            let amount = if matches!(to, Color::Black) {
-                0.55 + 0.25 * across
-            } else {
-                0.34 - 0.22 * across
-            };
+            // Lit from the left: the block gets a little deeper along the run, so a
+            // cover with no hue to gradient through still gets a gradient.
+            let lightness = 0.42 - 0.20 * across;
             Span::styled(
                 c.to_string(),
                 Style::default()
-                    .fg(crate::accent::mix(colour, Color::White, 0.75))
-                    .bg(crate::accent::mix(colour, to, amount))
+                    .fg(crate::accent::shade(colour, 0.92))
+                    .bg(crate::accent::shade(colour, lightness))
                     .add_modifier(Modifier::BOLD),
             )
         })
@@ -4076,6 +4078,38 @@ mod tests {
             "focused is the plain accent"
         );
         let _ = (top, bottom, left, right);
+    }
+
+    /// **The Library tab's section strip is the first row of its pane, always.**
+    /// It is a control -- the arrows walk it and `enter` commits it -- and the pane
+    /// body used to be centred when its content was short, which left the strip
+    /// floating in the middle of an empty pane: a control nobody can aim at (owner,
+    /// 2026-10-03, who asked for the strip to be reachable by arrows alone).
+    #[test]
+    fn the_library_strip_stays_on_the_first_row() {
+        let mut app = app_at(120, 30);
+        app.tab = Tab::Library;
+        // Connected, so the first body line is the strip itself rather than the
+        // "connect Spotify" notice that sits above every Web tab's content.
+        app.web.connection = crate::tui::app::Connection::Connected;
+        // Nothing loaded, which is the case that used to be centred.
+        let (buf, _regions) = render(120, 30, &app);
+        let strip_row = (0..30)
+            .find(|y| row_text(&buf, *y, 0, 120).contains("Saved albums"))
+            .unwrap_or_else(|| {
+                let every: Vec<String> = (0..30).map(|y| row_text(&buf, y, 0, 120)).collect();
+                panic!("the strip is not drawn at all:\n{}", every.join("\n"))
+            });
+        // The title row carries the tab strip, so the body starts at row 1.
+        assert_eq!(
+            strip_row,
+            2,
+            "the strip is on row {strip_row}, not the first row of the body:\n{}",
+            (0..10)
+                .map(|y| format!("{y}: {:?}", row_text(&buf, y, 0, 120)))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
     }
 
     /// **A focused title is never a white box** (owner, 2026-10-03: "remove the

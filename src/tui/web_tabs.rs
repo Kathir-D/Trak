@@ -384,7 +384,12 @@ fn queue_lines(app: &App, theme: &Theme) -> Vec<Line<'static>> {
 /// a thing about them, so the two get different words.
 fn library_lines(app: &App, theme: &Theme) -> Vec<Line<'static>> {
     let library = &app.web.library;
-    let mut out = vec![section_strip(library.section, theme)];
+    let mut out = vec![section_strip(
+        library.section,
+        theme,
+        library.strip_cursor,
+        app.web.list_focus,
+    )];
     if !library.loaded[section_index(library.section)] {
         out.push(hint(
             "  not loaded yet — a list is fetched the first time you open it",
@@ -439,24 +444,47 @@ fn library_lines(app: &App, theme: &Theme) -> Vec<Line<'static>> {
 
 /// The three section names with the one showing picked out, drawn the way the
 /// tab strip picks out the selected tab: the same control, one level down.
-fn section_strip(section: LibrarySection, theme: &Theme) -> Line<'static> {
+/// The Library tab's section strip: a **control**, drawn as one.
+///
+/// Three states, because there are three facts and drawing two of them is how a
+/// control becomes a label:
+///
+/// - the **showing** section is the album's gradient, as the focused tab is;
+/// - the section the **arrows are on** is bracketed, because `←`/`→` move it and
+///   `enter` commits it -- and it is not always the showing one (owner, 2026-10-03:
+///   "arrow down and go to followed artists from saved albums with right arrow and
+///   press a button to select");
+/// - when the strip has the arrows, the showing section is *also* underlined, so
+///   "where I am" and "where I would go" cannot be confused.
+fn section_strip(
+    section: LibrarySection,
+    theme: &Theme,
+    cursor: LibrarySection,
+    focused: bool,
+) -> Line<'static> {
     let mut spans = Vec::new();
     for one in LibrarySection::ALL {
-        // Both forms are padded the same width, so the strip has the same shape
-        // whichever section is showing and the selected one reads as a filled
-        // block rather than a bracketed word in a gap.
-        //
-        // And the selected one is the album's gradient rather than one flat
-        // accent, for the same reason the focused tab is (owner, 2026-10-03):
-        // this strip is the only thing on the screen saying which of three lists
-        // you are looking at, so it should look like the rest of the picture.
-        let label = if one == section {
-            format!(" [{}] ", one.label())
-        } else {
-            format!(" {} ", one.label())
-        };
+        let label = format!(" {} ", one.label());
         if one == section {
-            spans.extend(crate::tui::render::gradient_title(&label, theme));
+            let mut run = crate::tui::render::gradient_title(&label, theme);
+            if focused && one != cursor {
+                // Not the one the arrows are on: the gradient says "showing", and
+                // this says "the arrows are elsewhere".
+                for span in run.iter_mut() {
+                    *span = Span::styled(
+                        span.content.to_string(),
+                        span.style.add_modifier(Modifier::UNDERLINED),
+                    );
+                }
+            }
+            spans.extend(run);
+        } else if one == cursor {
+            spans.push(Span::styled(
+                format!("[{}]", one.label()),
+                Style::default()
+                    .fg(theme.accent_colour())
+                    .add_modifier(Modifier::BOLD),
+            ));
         } else {
             spans.push(Span::styled(label, Style::default()));
         }
@@ -464,14 +492,8 @@ fn section_strip(section: LibrarySection, theme: &Theme) -> Line<'static> {
     Line::from(spans)
 }
 
-/// Which of the three `loaded` flags belongs to a section. `ALL` is the index
-/// order, so this cannot be wrong; the fallback is `Albums` rather than a panic
-/// because a value outside the enum would mean the enum changed under us.
 fn section_index(section: LibrarySection) -> usize {
-    LibrarySection::ALL
-        .iter()
-        .position(|s| *s == section)
-        .unwrap_or(0)
+    section.index()
 }
 
 /// What a loaded section with nothing in it says. Never the same words as "not
@@ -1112,6 +1134,7 @@ mod tests {
     fn the_library_tab_draws_the_section_it_is_showing() {
         let mut app = app_on(Tab::Library);
         app.web.library.section = LibrarySection::Albums;
+        app.web.library.strip_cursor = LibrarySection::Albums;
         app.web.library.loaded = [true, true, true];
         app.web.library.albums = Page {
             items: vec![album("Census", "2022"), album("Blue Lines", "1991")],
@@ -1128,25 +1151,29 @@ mod tests {
         assert_paints(
             &app,
             concat!(
-                " [Saved albums]  Followed artists  Recently played \n",
+                " Saved albums  Followed artists  Recently played \n",
                 "   Census — Jane Remover (2022)\n",
                 "   Blue Lines — Jane Remover (1991)",
             ),
         );
 
         app.web.library.section = LibrarySection::Artists;
+        // The strip's cursor goes with it -- `commit_library_section` keeps the two
+        // in step, and a test that sets one by hand has to set both.
+        app.web.library.strip_cursor = LibrarySection::Artists;
         assert_paints(
             &app,
             concat!(
-                " Saved albums  [Followed artists]  Recently played \n",
+                " Saved albums  Followed artists  Recently played \n",
                 "   Jane Remover",
             ),
         );
         app.web.library.section = LibrarySection::Recent;
+        app.web.library.strip_cursor = LibrarySection::Recent;
         assert_paints(
             &app,
             concat!(
-                " Saved albums  Followed artists  [Recently played] \n",
+                " Saved albums  Followed artists  Recently played \n",
                 "   Jane Remover — Census Designated",
             ),
         );
