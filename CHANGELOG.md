@@ -7,7 +7,7 @@ is in [`docs/RELEASING.md`](docs/RELEASING.md).
 
 ## [Unreleased]
 
-## [0.2.0] - 2026-10-02
+## [0.2.0] - 2026-10-03
 
 Reports from the owner running 0.1.1 on a second machine, at a different terminal
 size: a dashboard with a third of the screen empty, keypresses that felt slow, and
@@ -129,6 +129,7 @@ a real account or a real permission prompt.
   universal (arm64 + x86_64) and **ad-hoc signed, not notarized**; neither
   install path sets a quarantine flag, so there is no Gatekeeper prompt.
 
-[Unreleased]: https://github.com/Kathir-D/Trak/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/Kathir-D/Trak/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/Kathir-D/Trak/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/Kathir-D/Trak/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/Kathir-D/Trak/releases/tag/v0.1.0
