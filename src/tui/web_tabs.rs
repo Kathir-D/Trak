@@ -35,6 +35,9 @@ use crate::web::api::{Page, Queue, SearchResults};
 /// what order they are in, and so `group_row` has one index per heading.
 const GROUPS: [&str; 4] = ["Tracks", "Albums", "Artists", "Playlists"];
 
+/// How many songs the Queue tab shows when the Web API has no queue to show.
+const RECENT_ON_QUEUE: usize = 12;
+
 /// The lines for whichever Web API tab is showing. Called from `render.rs` in
 /// place of the History/Info/Lyrics lines.
 pub fn lines(app: &App, theme: &Theme) -> Vec<Line<'static>> {
@@ -321,10 +324,15 @@ fn liked_state(app: &App) -> Option<(bool, String)> {
 
 /// Now playing, then what is after it.
 ///
-/// The read is not Premium-gated, so nothing here mentions Premium: the add is
-/// a key and a 403, and a standing note on the tab would be warning a Premium
-/// user about a limit they cannot reach. (Developer mode already requires the app
-/// owner to hold Premium, so whoever is reading this most likely cannot hit it.)
+/// When the Web API has nothing queued, the tab says why and then shows what trak
+/// does know: the songs it has seen go by (owner, 2026-10-03 -- the tab was simply
+/// empty for them). What it cannot show is the honest answer, "what Spotify will
+/// play next": only Spotify knows that, and it only tells the Web API on Premium.
+/// So the tab says that in a line and offers the history trak keeps itself, under
+/// a heading that does not pretend to be a queue.
+///
+/// Nothing here warns a Premium user about a limit they cannot reach: it is the
+/// add (`A`) that hits the 403, not this read.
 fn queue_lines(app: &App, theme: &Theme) -> Vec<Line<'static>> {
     let Queue {
         now_playing,
@@ -333,13 +341,30 @@ fn queue_lines(app: &App, theme: &Theme) -> Vec<Line<'static>> {
     let mut out = Vec::new();
     match now_playing {
         Some(track) => out.push(Line::from(Span::styled(
-            format!("▶ {track}"),
+            format!("\u{25b6} {track}"),
             theme.accent_style().add_modifier(Modifier::BOLD),
         ))),
         None => out.push(hint("  nothing is playing")),
     }
     if upcoming.is_empty() {
-        out.push(hint("  nothing queued"));
+        out.push(hint(
+            "  Spotify only tells the Web API what is queued on Premium, so trak cannot show what is next",
+        ));
+        // What trak does know. `history` is oldest-first, so it is walked
+        // backwards for the History tab's newest-first order.
+        let recent: Vec<String> = app
+            .history
+            .iter()
+            .rev()
+            .take(RECENT_ON_QUEUE)
+            .map(|h| format!("   {} — {}", h.track.artist, h.track.title))
+            .collect();
+        if recent.is_empty() {
+            out.push(hint("  and nothing has played yet this session"));
+            return out;
+        }
+        out.push(Line::from(Span::styled("  Recently played", Theme::dim())));
+        out.extend(recent.into_iter().map(|line| fixed_line(&line)));
         return out;
     }
     out.push(Line::from(Span::styled("  Up next", Theme::dim())));
@@ -1022,11 +1047,55 @@ mod tests {
         assert!(!shown(&app).to_lowercase().contains("premium"));
     }
 
+    /// An empty Web API queue is the Free-tier case, so it explains itself and
+    /// shows what trak does know instead of being an empty page (owner,
+    /// 2026-10-03).
     #[test]
-    fn an_empty_queue_says_both_halves() {
+    fn an_empty_queue_explains_itself_and_shows_what_was_played() {
         let text = shown(&app_on(Tab::Queue));
         assert!(text.contains("nothing is playing"), "{text}");
-        assert!(text.contains("nothing queued"), "{text}");
+        assert!(text.contains("Premium"), "{text}");
+        assert!(
+            !text.contains("nothing played yet"),
+            "an empty session says so: {text}"
+        );
+
+        let mut app = app_on(Tab::Queue);
+        app.web.queue.now_playing = Some(track("Nights", "Frank Ocean"));
+        for (title, artist) in [("Solo", "Frank Ocean"), ("Self Control", "Frank Ocean")] {
+            app.history.push(crate::tui::app::HistoryEntry {
+                track: crate::player::TrackInfo {
+                    title: title.into(),
+                    artist: artist.into(),
+                    ..crate::player::fake::sample_track()
+                },
+                at: std::time::Instant::now(),
+            });
+        }
+        let text = shown(&app);
+        assert!(text.contains("Recently played"), "{text}");
+        assert!(text.contains("Frank Ocean — Self Control"), "{text}");
+        // Newest first, like the History tab.
+        let newer = text.find("Self Control").unwrap();
+        let older = text.find("— Solo").unwrap();
+        assert!(newer < older, "newest first: {text}");
+    }
+
+    /// The history is capped, so the fallback cannot grow without bound either.
+    #[test]
+    fn the_queue_fallback_is_capped() {
+        let mut app = app_on(Tab::Queue);
+        for _ in 0..(RECENT_ON_QUEUE + 20) {
+            app.history.push(crate::tui::app::HistoryEntry {
+                track: crate::player::fake::sample_track(),
+                at: std::time::Instant::now(),
+            });
+        }
+        let rows = shown(&app)
+            .lines()
+            .filter(|l| l.contains("Census Designated"))
+            .count();
+        assert_eq!(rows, RECENT_ON_QUEUE, "capped at {RECENT_ON_QUEUE}");
     }
 
     // -- 7.9 library ---------------------------------------------------------

@@ -417,7 +417,13 @@ pub struct MacBrowser;
 
 impl Browser for MacBrowser {
     fn open(&self, url: &str) -> Result<(), AuthError> {
-        let opened = Command::new("open")
+        // **By absolute path.** trak is often started from somewhere with a
+        // spare `PATH` -- a terminal that did not read a shell profile, a launcher,
+        // `sudo` -- and a bare `open` then fails to be found at all, which looks
+        // exactly like trak ignoring the keypress (owner, 2026-10-03: "enter does
+        // not open the dashboard"). `/usr/bin/open` is where macOS puts it and
+        // never moves; the same reasoning as `TRAK_OSASCRIPT`'s default.
+        let opened = Command::new("/usr/bin/open")
             .arg(url)
             .stdout(Stdio::null())
             .stderr(Stdio::null())

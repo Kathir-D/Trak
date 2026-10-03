@@ -151,14 +151,20 @@ impl Setup {
             self.type_key(c);
             return;
         }
-        self.notice = None;
         match c {
             'j' | '\t' => self.step = (self.step + 1).min(STEPS.len() - 1),
             'k' => self.step = self.step.saturating_sub(1),
-            'c' => self
-                .pending
-                .push(Effect::Copy(REGISTERED_REDIRECT_URI.into())),
-            'x' if connected => self.pending.push(Effect::Logout),
+            // Copying and logging out report back through `notice`, so the old
+            // one goes before the new one lands.
+            'c' => {
+                self.notice = None;
+                self.pending
+                    .push(Effect::Copy(REGISTERED_REDIRECT_URI.into()));
+            }
+            'x' if connected => {
+                self.notice = None;
+                self.pending.push(Effect::Logout);
+            }
             '\n' => self.act(client_id),
             'q' | 'Q' | '\x1b' => self.open = false,
             _ => {}
@@ -166,6 +172,11 @@ impl Setup {
     }
 
     fn act(&mut self, client_id: &str) {
+        // "Could not open a browser" used to disappear on the next key, which for
+        // a user who had just pressed enter and pressed something else was before
+        // they could read it (owner, 2026-10-03). A notice now survives moving
+        // around the panel and is replaced only by the next attempt.
+        self.notice = None;
         match self.step {
             0 => self.pending.push(Effect::Open(DASHBOARD_URL.into())),
             1 => self
@@ -481,6 +492,31 @@ mod tests {
 
     fn drain(s: &mut Setup) -> Vec<Effect> {
         std::mem::take(&mut s.pending)
+    }
+
+    /// A notice has to outlast the keystroke that produced it: a user who pressed
+    /// enter, saw nothing happen and pressed something else must still be able to
+    /// read why (owner, 2026-10-03).
+    #[test]
+    fn a_notice_survives_moving_around_the_panel() {
+        let mut s = Setup::default();
+        s.open("", false);
+        s.handle('\n', ID, false);
+        let effect = drain(&mut s).remove(0);
+        let Effect::Open(url) = effect else {
+            panic!("enter on step one opens the dashboard, got {effect:?}")
+        };
+        // What `SetupRunner` does when `open` fails.
+        s.notice = Some(format!("could not open a browser -- go to {url}"));
+        s.handle('j', ID, false);
+        assert!(s.notice.is_some(), "moving down did not wipe it");
+        s.handle('k', ID, false);
+        assert!(s.notice.is_some(), "moving up did not wipe it");
+        // Trying the step again is what clears it, because a new answer is on its
+        // way.
+        s.handle('\n', ID, false);
+        assert_eq!(s.notice, None);
+        assert_eq!(drain(&mut s), [Effect::Open(DASHBOARD_URL.into())]);
     }
 
     #[test]
