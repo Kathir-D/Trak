@@ -5,13 +5,11 @@
 </div>
 
 <p align="center">
-  <a href="https://github.com/Kathir-D/Trak/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Kathir-D/Trak/actions/workflows/ci.yml/badge.svg"></a>
   <a href="https://github.com/Kathir-D/Trak/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/Kathir-D/Trak?include_prereleases&label=release"></a>
   <a href="#install"><img alt="Homebrew: kathir-d/tap/trak" src="https://img.shields.io/badge/homebrew-kathir--d%2Ftap%2Ftrak-FBB040?logo=homebrew&logoColor=white"></a>
   <img alt="macOS 14.2+" src="https://img.shields.io/badge/macOS-14.2%2B-000000?logo=apple&logoColor=white">
   <img alt="Rust" src="https://img.shields.io/badge/Rust-2024-DEA584?logo=rust&logoColor=white">
   <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
-  <img alt="status: pre-alpha" src="https://img.shields.io/badge/status-pre--alpha-orange">
 </p>
 
 <p align="center">
