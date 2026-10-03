@@ -185,7 +185,12 @@ invalidates a decision this section previously made.
     (`GET /playlists/{id}`),
   - queue view (`GET /me/player/queue`) and add-to-queue
     (`POST /me/player/queue`, **Premium-only** — a 403 here is expected and must
-    read as a clear one-liner, never a stack trace),
+    read as a clear one-liner, never a stack trace). An **empty** queue read is
+    the Free case, not an error: the tab then says in one line that only Premium
+    gets told what is queued, and shows the songs trak has seen play this session,
+    newest first, capped, under a heading that does not call itself a queue.
+    "What Spotify will play next" is not knowable by trak and is never claimed
+    (field report, 2026-10-03),
   - liked songs (`GET /me/tracks`), library (saved albums `GET /me/albums`,
     followed artists `GET /me/following`, recently played
     `GET /me/player/recently-played`),

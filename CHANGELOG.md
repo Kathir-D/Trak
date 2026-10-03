@@ -7,6 +7,39 @@ is in [`docs/RELEASING.md`](docs/RELEASING.md).
 
 ## [Unreleased]
 
+Reports from the owner running 0.2.0 on the same second machine: a cover a third of
+its pane, a slider too small to hit, lyrics that would not stay on screen, an
+`enter` that did nothing, and an empty Queue tab.
+
+### Fixed
+
+- **The cover is sized by the cell size the terminal reports** (`CSI 16 t`), not by
+  one measured once in one terminal at one font size. A square cover is about twice
+  as many cells across as it is down, so the assumed cell size made the art a third
+  of the size it should have been on a machine with a different font -- leaving a
+  third of the screen empty under it. Ghostty, cmux, kitty, iTerm2, WezTerm and
+  xterm all answer; the old default stands when nothing does.
+- **The volume slider can be hit.** The clickable band is now the meter's row, the
+  row above, the two rows below (the gradient rule and the pane border) and two
+  cells either end. Where you click is still the volume you get.
+- **Lyrics stay put.** Polling reset the lyrics state on every poll rather than on
+  a track change, and a poll arrives about once a second repeating the same track:
+  the pane blinked between the words and the song's title, threw away the follow
+  position every second, and re-sent the same LRCLIB lookup over and over.
+- **The guided setup opens the dashboard.** It called a bare `open`, which is not
+  on `PATH` when trak starts from a terminal that read no profile, a launcher, or
+  `sudo`; it now calls `/usr/bin/open`. The "could not open a browser" message was
+  also cleared by the next keystroke, so a user who pressed enter and pressed
+  something else never saw it. A notice now survives moving around the panel.
+
+### Changed
+
+- **The Queue tab is never just empty.** What Spotify will play next is not
+  knowable by trak -- only Spotify knows, and it only tells the Web API on Premium
+  -- so an empty queue read now says that in one line and then shows the songs trak
+  has seen play this session, newest first, capped, under a heading that does not
+  pretend to be a queue. Premium accounts still get the real queue.
+
 ## [0.2.0] - 2026-10-03
 
 Reports from the owner running 0.1.1 on a second machine, at a different terminal

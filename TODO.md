@@ -1076,6 +1076,49 @@ the dashboard had been built on.
       > prefers the registered port so the URI sent to Spotify is character for character the
       > registered one, and falls back to an ephemeral one, which the guide allows for loopback
       > literals. `docs/WEB-API.md` §1 corrected rather than left contradicting the dashboard.
+## Phase 13 — Reports from the field (2026-10-03)
+
+The same exercise one release later: the owner ran 0.2.0 on the same second machine
+and found five things. Four were real bugs, one was a Spotify limit being shown
+without explanation. None of them were visible on the machine the dashboard had been
+built on, which is the whole reason this phase exists.
+
+- [x] 13.1 The cover is sized by the cell size the **terminal reports**, not by one measured once in
+      one terminal at one font size (`CSI 16 t`, answered by Ghostty, cmux, kitty, iTerm2, WezTerm
+      and xterm; the default stands when nothing answers).
+      > Owner field report, 2026-10-03: the cover was about a third of its pane with a third of the
+      > screen empty under it. The artwork was square (640x640, measured), so this was never an
+      > aspect-ratio problem: a square cover is about twice as many cells across as it is down, so the
+      > hardcoded 8x17 (TODO 1.4) made the art a third of the size it should have been on a machine
+      > with a different font. Asked once at startup beside the OSC 11 background query, because a
+      > reply arriving while crossterm's event reader was looking would be taken for a keypress.
+- [x] 13.2 The volume meter's clickable target is bigger than the meter: its row, the row above, the
+      two rows below (the gradient rule and the pane border) and two cells either end. The x mapping
+      still follows the drawn meter, so where you click is still the volume you get.
+      > A one-row, one-cell-precise slider is a slider nobody can hit without looking. The transport
+      > buttons are still checked first, so the overlap steals nothing from them.
+- [x] 13.3 Polling does not disturb the lyrics. `apply_state` reset the lyrics state on **every**
+      poll rather than on a track change, and a poll arrives about once a second repeating the same
+      track.
+      > Owner field report, 2026-10-03: the pane blinked between the words and the song's title for as
+      > long as it was open, threw away the follow position every second, and re-sent the same LRCLIB
+      > lookup over and over. Resetting is a statement about a change of track and belongs behind the
+      > check for one.
+- [x] 13.4 The guided setup calls `/usr/bin/open` by absolute path, and a notice survives the next
+      keystroke.
+      > Owner field report, 2026-10-03: "enter does not open the dashboard". The key and the panel
+      > were both fine; the browser was looked up as a bare `open` on `PATH`, which is missing when
+      > trak starts from a terminal that read no profile, a launcher, or `sudo`. The failure had a
+      > message saying so, but it was cleared by the very next keypress, so nobody saw it. Verified in
+      > a pty with a fake `open` on `PATH`: the call is made, and the notice survives `j`/`k`.
+- [x] 13.5 The Queue tab explains an empty Web API queue and shows what trak does know.
+      > Owner field report, 2026-10-03: "I want the queue to show what's next", and it was empty.
+      > What Spotify will play next is not knowable by trak -- only Spotify knows, and it only tells
+      > the Web API on Premium -- so the tab says that in one line and then shows the songs trak has
+      > seen go by, newest first, capped at 12, under a heading that does not pretend to be a queue. A
+      > Premium account still gets the real queue from the API, unchanged. `docs/WEB-API.md` §2
+      > already records that only the **add** is Premium-gated; this is the read's empty case.
+
 - [ ] 12.10 The first real Web API login **[owner]**. The Client ID works and the authorize endpoint
       accepts the redirect URI, but nobody has clicked "Allow" in the browser yet, so search,
       playlists, queue, library and the token refresh are still unverified against a real account.
