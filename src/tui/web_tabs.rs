@@ -41,6 +41,21 @@ const RECENT_ON_QUEUE: usize = 12;
 /// The lines for whichever Web API tab is showing. Called from `render.rs` in
 /// place of the History/Info/Lyrics lines.
 pub fn lines(app: &App, theme: &Theme) -> Vec<Line<'static>> {
+    lines_in(app, theme, WIDE_PANE)
+}
+
+/// The pane width the lines are laid out for when nobody has said.
+///
+/// 88 is the inner width of the side pane on a 180-column terminal, which is the
+/// size the layout is designed around; a narrower pane wraps the same words.
+const WIDE_PANE: usize = 88;
+
+/// [`lines`], laid out for a known pane width.
+///
+/// The width matters because a hint is a sentence: without it, a narrow pane
+/// wraps the sentence at a place the code never chose and the continuation lands
+/// in column zero.
+pub fn lines_in(app: &App, theme: &Theme, width: usize) -> Vec<Line<'static>> {
     // The playlist modal replaces the body, like an opened page does (7.11).
     if let Some(edit) = &app.web.edit {
         return edit_lines(app, theme, edit);
@@ -66,7 +81,7 @@ pub fn lines(app: &App, theme: &Theme) -> Vec<Line<'static>> {
     out.extend(match app.tab {
         Tab::Search => search_lines(app, theme),
         Tab::Playlists => playlist_lines(app),
-        Tab::Queue => queue_lines(app, theme),
+        Tab::Queue => queue_lines(app, theme, width),
         Tab::Liked => liked_lines(app, theme),
         Tab::Library => library_lines(app, theme),
         // History, Info and Lyrics come from AppleScript and LRCLIB, and
@@ -333,7 +348,7 @@ fn liked_state(app: &App) -> Option<(bool, String)> {
 ///
 /// Nothing here warns a Premium user about a limit they cannot reach: it is the
 /// add (`A`) that hits the 403, not this read.
-fn queue_lines(app: &App, theme: &Theme) -> Vec<Line<'static>> {
+fn queue_lines(app: &App, theme: &Theme, width: usize) -> Vec<Line<'static>> {
     let Queue {
         now_playing,
         upcoming,
@@ -347,8 +362,11 @@ fn queue_lines(app: &App, theme: &Theme) -> Vec<Line<'static>> {
         None => out.push(hint("  nothing is playing")),
     }
     if upcoming.is_empty() {
-        out.push(hint(
-            "  Spotify only tells the Web API what is queued on Premium, so trak cannot show what is next",
+        out.extend(hint_wrapped(
+            "Spotify only tells the Web API what is queued on Premium, so trak cannot show what is next",
+            2,
+            width,
+            Theme::dim().add_modifier(Modifier::ITALIC),
         ));
         // What trak does know. `history` is oldest-first, so it is walked
         // backwards for the History tab's newest-first order.
@@ -610,6 +628,51 @@ fn hint(text: impl Into<String>) -> Line<'static> {
         Theme::dim().add_modifier(Modifier::ITALIC),
     ))
 }
+
+/// The same hint, wrapped with a **hanging indent**.
+///
+/// A hint is a sentence, and a sentence that wraps puts its continuation at column
+/// zero, which reads as a second unrelated fact rather than the rest of the first
+/// one -- it is how "so trak cannot show what is / next" ended up with `next` under
+/// the pane's left edge (owner, 2026-10-03). ratatui's wrapping cannot indent a
+/// continuation, so the wrap is done here and each line is given the first line's
+/// indent.
+///
+/// `indent` is the first line's own indent, and the width is the pane's.
+fn hint_wrapped(text: &str, indent: usize, width: usize, style: Style) -> Vec<Line<'static>> {
+    let avail = width.saturating_sub(indent + HINT_INDENT).max(8);
+    let mut out = Vec::new();
+    let mut rest = text.trim();
+    let mut first = true;
+    while !rest.is_empty() {
+        let take = rest
+            .char_indices()
+            .nth(avail)
+            .map(|(i, _)| i)
+            .unwrap_or(rest.len());
+        let (head, tail) = if take == rest.len() {
+            (rest, "")
+        } else {
+            let cut = rest[..take].rfind(' ').unwrap_or(take);
+            (&rest[..cut], &rest[cut..])
+        };
+        let pad = if first {
+            " ".repeat(indent)
+        } else {
+            " ".repeat(indent + HINT_INDENT)
+        };
+        out.push(Line::from(Span::styled(
+            format!("{pad}{}", head.trim_start()),
+            style,
+        )));
+        rest = tail.trim_start();
+        first = false;
+    }
+    out
+}
+
+/// How far a wrapped hint's continuation lines sit in from the first line.
+const HINT_INDENT: usize = 2;
 
 /// The line that says a list continues, and nothing at all when it does not.
 ///
@@ -1107,6 +1170,56 @@ mod tests {
         let newer = text.find("Self Control").unwrap();
         let older = text.find("— Solo").unwrap();
         assert!(newer < older, "newest first: {text}");
+    }
+
+    /// **A wrapped hint keeps its indent.** The Queue tab's Premium sentence is
+    /// longer than a narrow pane, and ratatui's wrapping puts the continuation in
+    /// column zero -- so "so trak cannot show what is / next" had `next` under the
+    /// pane's left edge, which reads as a different fact rather than the rest of
+    /// the same one (owner, 2026-10-03).
+    #[test]
+    fn a_wrapped_hint_keeps_its_continuation_lines_indented() {
+        let app = app_on(Tab::Queue);
+        for width in [40usize, 60, 88, 120] {
+            let lines = lines_in(&app, &Theme::default(), width);
+            let start = lines
+                .iter()
+                .position(|l| l.to_string().contains("Spotify only tells"))
+                .unwrap_or_else(|| panic!("width {width}: the hint is missing:\n{lines:?}"));
+            let first: String = lines[start].to_string();
+            let indent = first.len() - first.trim_start().len();
+            assert!(indent > 0, "width {width}: the hint starts in column zero");
+            // Every following line that is part of the sentence is indented further,
+            // not less, and none of them starts in column zero.
+            for line in lines.iter().skip(start + 1) {
+                let text = line.to_string();
+                if text.trim().is_empty() {
+                    break;
+                }
+                if text.contains("Recently played") || text.contains("played yet") {
+                    break;
+                }
+                let at = text.len() - text.trim_start().len();
+                assert!(
+                    at >= indent + HINT_INDENT,
+                    "width {width}: continuation {text:?} is indented {at}, under the \
+                     first line's {indent}"
+                );
+            }
+            // Joined with single spaces: the indents are the point, not the words.
+            let whole = lines[start..]
+                .iter()
+                .map(|l| l.to_string())
+                .collect::<Vec<_>>()
+                .join(" ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(
+                whole.contains("cannot show what is next"),
+                "width {width}: the sentence is broken up: {whole:?}"
+            );
+        }
     }
 
     /// The history is capped, so the fallback cannot grow without bound either.

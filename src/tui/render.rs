@@ -1718,7 +1718,7 @@ fn draw_tabs(f: &mut Frame, area: Rect, app: &App, theme: &Theme, regions: &mut 
         // there to be unlocked.
         _ => {
             regions.history = Some(body);
-            crate::tui::web_tabs::lines(app, theme)
+            crate::tui::web_tabs::lines_in(app, theme, body.width as usize)
         }
     };
     let lines_len = lines.len();

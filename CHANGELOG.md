@@ -62,6 +62,8 @@ its pane, a slider too small to hit, lyrics that would not stay on screen, an
 - **`↑`/`↓` focus into a tab and out of it**, and `esc` leaves the list before the tab. An open
   album, artist or playlist page's tracks were reachable only by mouse: the arrows were moving the
   tab's hidden cursor. Fixed.
+- **Wrapped messages keep their indent.** A hint longer than a narrow pane used to wrap into column
+  zero, so the continuation read as a separate fact instead of the rest of the sentence.
 - **Gradients stop banding.** Colour interpolation moved from HSL to Oklab, which is perceptually
   uniform: the same three-colour palette went from a 21/255 step between neighbouring cells (a
   visible band) to under 12/255, and the middle of a ramp is no longer a desaturated seam. The

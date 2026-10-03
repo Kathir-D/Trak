@@ -1119,6 +1119,12 @@ built on, which is the whole reason this phase exists.
       > Premium account still gets the real queue from the API, unchanged. `docs/WEB-API.md` §2
       > already records that only the **add** is Premium-gated; this is the read's empty case.
 
+- [x] 13.16 A wrapped hint keeps a **hanging indent** (owner, 2026-10-03). The Queue tab's Premium
+      > sentence is longer than a narrow pane, and ratatui's wrapping puts the continuation in column
+      > zero -- so "so trak cannot show what is / next" had `next` under the pane's left edge, which
+      > reads as a different fact rather than the rest of the same one. `web_tabs::lines_in` now takes
+      > the pane's width and wraps hints itself, because ratatui cannot indent a continuation.
+
 - [x] 13.14 **Gradients interpolate in Oklab, and there is only one of them** (owner, 2026-10-03:
       "make sure the gradient, don't bug out like this. Either copy the gradient for the vol slider or
       make it animated and verify it actually works").
