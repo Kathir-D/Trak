@@ -1325,16 +1325,15 @@ fn run_one(
         PlayerCommand::Notify(title, body) => {
             // `display notification`, and nothing else: no icon, no sound, and no
             // subtitle, because the point is a quiet line when the track changes.
-            let script = format!(
-                "display notification \"{}\" with title \"{}\"",
-                // A quote or a backslash in a track title would close the string
-                // literal, and this is the same allow-list problem `play track`
-                // has. AppleScript escapes them the other way round: the quote is
-                // the only thing that needs doubling.
-                body.replace('"', "\\\""),
-                title.replace('"', "\\\"")
-            );
-            p.command(&script).map(|_| None)
+            //
+            // **Posted by trak, not by Spotify.** This used to go through
+            // `p.command`, which wraps every line in `tell application "Spotify"` --
+            // so the notification was executed inside Spotify and macOS brought
+            // Spotify to the front over cmux on every track change (owner,
+            // 2026-10-03). Every event addressed to a background app is a chance for
+            // the system to raise it (COMPAT rules 2 and 3), so this one is not
+            // addressed to anything.
+            crate::player::applescript::notify(&title, &body).map(|_| None)
         }
         PlayerCommand::Launch => launch_spotify().map(|_| None),
     }

@@ -104,6 +104,17 @@ impl AppleScriptPlayer {
     /// The script is fed on stdin rather than passed as a path or `-e`, because a
     /// multi-line `if` cannot be expressed as a single `-e` argument
     /// (docs/APPLESCRIPT.md §3).
+    /// Run a script that has **nothing to do with Spotify**, so there is no
+    /// "is it running" check to make: the script would not care.
+    ///
+    /// Separate from [`Self::command`] on purpose. That one wraps its line in
+    /// `tell application "Spotify"`, which is right for a command to Spotify and
+    /// wrong for anything else -- a notification posted from inside Spotify's
+    /// context is what raised Spotify over the terminal on every track change.
+    fn run_bare(&self, script: &str) -> Result<String, PlayerError> {
+        self.run(script)
+    }
+
     fn run(&self, script: &str) -> Result<String, PlayerError> {
         let mut child = Command::new(osascript_path())
             .stdin(Stdio::piped())
@@ -324,6 +335,46 @@ impl Player for AppleScriptPlayer {
     }
 }
 
+/// Post a notification **as trak**, not as Spotify.
+///
+/// This was going through [`AppleScriptPlayer::command`], which wraps every script
+/// in `tell application "Spotify"` -- so `display notification` was executed inside
+/// Spotify, and macOS raised Spotify over cmux every time the track changed
+/// (owner, 2026-10-03: "when I change songs it ... flashed above cmux"). A
+/// notification about a track change is trak's to post: it must never be addressed to
+/// the player, because every event addressed to a background app is a chance for the
+/// system to bring it to the front (COMPAT rules 2 and 3).
+///
+/// `display notification` is a StandardAdditions command, so it runs in the script's
+/// own context with nothing told to do anything.
+///
+/// The escaping is the same as the commands' because it is the same problem: a quote
+/// or a backslash in a track title closes the string literal.
+pub fn notify(title: &str, body: &str) -> Result<(), PlayerError> {
+    let script = format!(
+        r#"display notification "{}" with title "{}""#,
+        body.replace('"', "\""),
+        title.replace('"', "\"")
+    );
+    let player = AppleScriptPlayer::new();
+    // The reply is whatever StandardAdditions prints; the only thing that matters is
+    // that the script ran, so the output is not inspected for a value.
+    player.run_bare(&script).map(|_| ())
+}
+
+/// The notification script, as text, so the "not addressed to Spotify" claim can be
+/// asserted without running anything.
+fn notification_script(title: &str, body: &str) -> String {
+    // A quote or a backslash in a track title would close the string literal, and
+    // this is the same allow-list problem `play track` has: AppleScript escapes them
+    // the other way round, and the quote is the only one that needs doubling.
+    format!(
+        r#"display notification "{}" with title "{}""#,
+        body.replace('"', "\\\""),
+        title.replace('"', "\\\"")
+    )
+}
+
 /// AppleScript rejects a very long fractional position, so round to milliseconds.
 fn clamp_secs(secs: f64) -> String {
     let ms = (secs * 1000.0).round().max(0.0);
@@ -344,6 +395,57 @@ impl AppleScriptPlayer {
 
     pub fn set_repeat_mode(&mut self, mode: crate::player::RepeatMode) {
         self.repeat_mode = mode;
+    }
+}
+#[cfg(test)]
+mod notify_tests {
+    use super::*;
+
+    /// **The track-change notification is not addressed to Spotify.**
+    ///
+    /// It used to go through `command`, which wraps its line in
+    /// `tell application "Spotify"` -- so `display notification` ran inside Spotify
+    /// and macOS raised Spotify over the terminal every time the track changed (owner,
+    /// 2026-10-03: "when I change songs it ... flashed above cmux").
+    ///
+    /// The guard is structural rather than behavioural: the script the notification
+    /// sends must not mention Spotify at all, because every event addressed to a
+    /// background app is a chance for the system to bring it to the front (COMPAT
+    /// rules 2 and 3). A test that ran the real thing could only prove it on a
+    /// machine where Spotify happens to be running, which is exactly the machine a
+    /// test must not depend on.
+    #[test]
+    fn the_notification_is_posted_by_trak_and_not_told_to_spotify() {
+        let script = notification_script("Nights", "Frank Ocean");
+        assert!(
+            !script.contains("Spotify"),
+            "the notification must not be addressed to Spotify: {script}"
+        );
+        assert!(
+            script.starts_with("display notification"),
+            "and it is a notification, not something else: {script}"
+        );
+        // No `tell` block at all, and no `run argv` wrapper either.
+        assert!(!script.contains("tell"), "{script}");
+        assert!(!script.contains("on run"), "{script}");
+    }
+
+    /// A track title with a quote in it must not close the string literal, or the
+    /// script is a syntax error and the notification silently never appears.
+    #[test]
+    fn a_quote_in_a_track_name_does_not_break_the_notification() {
+        let script = notification_script("He said \"hi\"", "A \"quoted\" artist");
+        // Every quote inside the arguments is doubled, so the escaped pairs are the
+        // four quotes in the titles times two, and the only *bare* quotes left are
+        // the four that delimit the two arguments. A quote left unescaped is a
+        // syntax error, and the notification silently never appears.
+        let bare: String = script.replace("\\\"", "");
+        assert_eq!(
+            bare.matches('"').count(),
+            4,
+            "only the argument delimiters are unescaped: {script}"
+        );
+        assert!(bare.starts_with("display notification \""), "{script}");
     }
 }
 
