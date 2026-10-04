@@ -1234,8 +1234,18 @@ mod tests {
         let theme = Theme::default();
         let selected = row_line("Alpha", true, &theme, true);
         let plain = row_line("Beta", false, &theme, true);
-        // The same row with the focus somewhere else is completely plain.
+        // The same row with the focus somewhere else is completely plain -- which is
+        // the point of the tier, so it is asserted here rather than left to the
+        // renderer's own test.
         let unfocused = row_line("Alpha", true, &theme, false);
+        assert!(
+            unfocused
+                .spans
+                .iter()
+                .all(|s| s.style.fg.is_none() && s.style.bg.is_none())
+                && !unfocused.to_string().contains('\u{203a}'),
+            "the same selected row, unfocused, is not marked: {unfocused:?}"
+        );
         let accent = theme.accent_colour();
 
         let spans = |l: &Line<'static>| -> Vec<Span<'static>> { l.spans.to_vec() };

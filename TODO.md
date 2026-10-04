@@ -1119,6 +1119,22 @@ built on, which is the whole reason this phase exists.
       > Premium account still gets the real queue from the API, unchanged. `docs/WEB-API.md` §2
       > already records that only the **add** is Premium-gated; this is the read's empty case.
 
+- [x] 13.22 **Nothing inside a pane is marked until the pane has the focus** (owner, 2026-10-04, with
+      a screenshot of the Library strip showing `[Saved albums]` while the top bar held the arrows:
+      "if I didn't press arrow down to go into the tab the text isn't highlighted, only when i'm
+      inside the tab highlighted").
+      > A cursor you can see but cannot move is a lie about where the keys are going, and a screen
+      > with a highlight in it while the focus is somewhere else says nothing about which one has
+      > them. So the marker is drawn only while the pane holds the focus: the Library section strip
+      > (three plain words from the bar), and every list row's `›` and accent colour -- the History
+      > tab, all five Web tabs, an open album/artist/playlist page, and the Search tab's four
+      > groups.
+      > Two deliberate **exceptions**, because the keys are already talking to something else and the
+      > focus is not in question: the playlist picker's cursor (a modal -- it *is* what the keys are
+      > for) and the tab strip's own `[n]` and elision markers (that is the bar).
+      > Verified on screen, not only in tests: `5` shows three plain words, `5` then `↓` shows
+      > `[Saved albums]`.
+
 - [x] 13.19 **The track-change notification is posted by trak, not by Spotify** (owner, 2026-10-03: "I
       just tried the history page, make sure when i change songs it doesn't refocus spotify cause it
       flashed above cmux").

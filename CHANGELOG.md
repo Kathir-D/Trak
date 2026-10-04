@@ -62,6 +62,9 @@ its pane, a slider too small to hit, lyrics that would not stay on screen, an
 - **`↑`/`↓` focus into a tab and out of it**, and `esc` leaves the list before the tab. An open
   album, artist or playlist page's tracks were reachable only by mouse: the arrows were moving the
   tab's hidden cursor. Fixed.
+- **Nothing inside a pane is marked until you go into it.** A cursor you can see but cannot move is
+  a lie about where the keys are going, so the Library section strip and every list row's marker
+  are drawn only while the pane holds the focus. From the top bar they are plain.
 - **Changing songs no longer brings Spotify to the front.** The track-change notification was being
   sent *through* Spotify -- `Player::command` wraps every line in `tell application "Spotify"` --
   so `display notification` ran inside Spotify's context and macOS raised Spotify over your terminal
