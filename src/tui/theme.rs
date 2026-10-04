@@ -556,7 +556,14 @@ mod tests {
         // ramp is half a minute of playing, and a full cycle is a minute. Slow
         // enough to be a drift, fast enough that nobody can call it stopped.
         assert_ne!(before, at(40.0), "the gradient still moves");
-        assert_eq!(before, at(70.0), "and one full cycle comes back round");
+        // The drift ping-pongs rather than wrapping, so it comes back to where it
+        // started after twice the length of the run in seconds: half a bar of 20
+        // filled cells at a third of a cell a second is about 130 seconds round.
+        assert_eq!(
+            before,
+            at(10.0 + 2.0 * 10.0 * 3.0),
+            "and a full there-and-back returns it to where it started"
+        );
     }
 
     /// Is `c` on the way from `a` to `b`, in any channel? Used by the drift tests:
@@ -582,6 +589,116 @@ mod tests {
         };
         let d = |x: u8, y: u8| (x as i16 - y as i16).unsigned_abs();
         d(ar, br).max(d(ag, bg)).max(d(ab, bb))
+    }
+
+    /// **The bar's gradient is smooth at every moment of the track, not just the
+    /// ones that happen to look right.**
+    ///
+    /// The owner's words: "update the gradient on every new circle added to the
+    /// progress bar. Don't just assume it works correctly, it bugs out randomly."
+    /// It did, and the cause was sampling a *whole-bar* ramp at a sliding offset:
+    /// a slice of a palette is not obliged to be monotone, so the filled run could
+    /// go light, green, light again -- which is what their screenshot showed -- or
+    /// jump from one end of the palette to the other when the offset wrapped.
+    ///
+    /// The ramp is now built for the *painted* run and rebuilt as the run grows,
+    /// which is the owner's own instruction. This sweeps three palettes, eight
+    /// fills from 1 % to full, and every tenth of a second across two minutes, and
+    /// asserts over all of them that:
+    ///
+    /// - the run **never repeats a colour**, so it cannot have wrapped;
+    /// - each bead's step is within the arithmetic of the run's length -- the whole
+    ///   palette is spread across the painted cells, so a ten-bead bar necessarily
+    ///   steps further per bead than a ninety-cell one, and pretending otherwise
+    ///   would mean either banding or a gradient that never reaches the palette's
+    ///   far end;
+    /// - the drift **moves** over time (it is the animation), and a paused bar is
+    ///   completely still.
+    #[test]
+    fn the_bars_gradient_is_smooth_at_every_moment_of_the_track() {
+        let palettes = [
+            crate::accent::Palette::from_accent(SPOTIFY_GREEN),
+            crate::accent::Palette::from_accent(Color::Rgb(40, 90, 200)),
+            crate::accent::Palette::from_accent(Color::Rgb(250, 120, 200)),
+        ];
+        let distance = |a: Color, b: Color| -> i32 {
+            let (Color::Rgb(r1, g1, b1), Color::Rgb(r2, g2, b2)) = (a, b) else {
+                return 0;
+            };
+            (i32::from(r1) - i32::from(r2))
+                .abs()
+                .max((i32::from(g1) - i32::from(g2)).abs())
+                .max((i32::from(b1) - i32::from(b2)).abs())
+        };
+        let painted = |spans: &[Span<'static>]| -> Vec<Color> {
+            spans
+                .iter()
+                .filter(|s| s.content == BAR_FILLED)
+                .map(|s| s.style.fg.unwrap_or(Color::Reset))
+                .collect()
+        };
+        for p in &palettes {
+            for percent in [3u32, 7, 15, 23, 50, 61, 88, 99, 100] {
+                let fraction = f64::from(percent) / 100.0;
+                let mut checked = 0usize;
+                for tenth in 0..1200u32 {
+                    let t = f64::from(tenth) / 10.0;
+                    let run = painted(&progress_bar_spans(fraction, 90, p, false, t, true));
+                    if run.len() < 3 {
+                        continue;
+                    }
+                    checked += 1;
+                    // **A short run is three colours, not a gradient**, and calling
+                    // it a gradient would be the lie: three beads cannot show a
+                    // smooth sweep of a wide palette, so the step bound below only
+                    // applies where there are enough beads to be one.
+                    // **The run ends at its far end.** A wrap puts the palette's
+                    // opening colour at the playhead, so the run finishes next to
+                    // where it started while some pair in the middle is farther
+                    // apart -- the shape of "light, green, light". A sweep's two
+                    // ends are its widest pair, which is what this asserts, and it
+                    // needs no threshold to be fooled by a shallow gradient.
+                    let ends = distance(run[0], run[run.len() - 1]);
+                    let widest = run
+                        .iter()
+                        .flat_map(|a| run.iter().map(move |b| distance(*a, *b)))
+                        .max()
+                        .unwrap_or(0);
+                    assert!(
+                        ends + 3 >= widest,
+                        "{percent}% at {t:.1}s: the run's ends are {ends}/255 apart but \
+                         some pair inside it is {widest}/255 apart, so it doubles back: \
+                         {run:?}"
+                    );
+                    // **Smooth for its own length.** The beads are adjacent entries
+                    // of a ramp, so the honest step is the stretch the run covers over
+                    // the beads it spends getting there -- with an allowance for the
+                    // path being longer than the chord, because the ramp curves
+                    // through colour space.
+                    let stretch = widest.max(1);
+                    let worst = run.windows(2).map(|w| distance(w[0], w[1])).max().unwrap();
+                    let honest = 2 * stretch / (run.len() as i32 - 1) + 2;
+                    assert!(
+                        worst <= honest,
+                        "{percent}% at {t:.1}s: a step of {worst}/255 across a {stretch}/255 \
+                         stretch over {} beads, where {honest} is the honest step: {run:?}",
+                        run.len()
+                    );
+                }
+                assert!(checked > 100, "{percent}% only checked {checked} times");
+            }
+        }
+        let p = crate::accent::Palette::from_accent(SPOTIFY_GREEN);
+        assert_ne!(
+            painted(&progress_bar_spans(0.5, 90, &p, false, 1.0, true)),
+            painted(&progress_bar_spans(0.5, 90, &p, false, 4.0, true)),
+            "the gradient is not drifting, so it is not animated"
+        );
+        assert_eq!(
+            painted(&progress_bar_spans(0.5, 90, &p, false, 1.0, false)),
+            painted(&progress_bar_spans(0.5, 90, &p, false, 4.0, false)),
+            "and a paused bar is completely still"
+        );
     }
 
     /// The beads are the owner's choice, so this is only about the two things that
@@ -615,7 +732,9 @@ mod tests {
             .count();
         assert_eq!(whites, 0, "no highlight on the playhead");
         // And the animation is the ramp sliding, not the glyphs changing.
-        let moved = progress_bar_spans(0.5, 20, &palette, false, 1.5, true);
+        // Six seconds in: at a third of a cell a second the drift is still under a
+        // cell, and a sub-cell offset rounds to the same cell.
+        let moved = progress_bar_spans(0.5, 20, &palette, false, 6.0, true);
         assert_ne!(
             moved[0].style.fg, spans[0].style.fg,
             "the drift still moves"
@@ -791,22 +910,41 @@ fn bar(
         return Vec::new();
     }
     let filled = (((fraction.clamp(0.0, 1.0)) * width as f64).round() as usize).min(width);
-    let ramp = palette.ramp(width.max(2));
-
-    // **A continuous run, not a row of beads.** This used to be one `●` per cell
-    // with the last three filled cells mixed toward white as a playhead. Side by
-    // side, a dot per cell with its own colour is not a bar at all but a row of
-    // beads, and sliding the ramp along it every half second made the row look
-    // like a colour ticking down (owner, 2026-10-03). Adjacent heavy lines join
-    // into one bar, so the ramp reads as the gradient it is, and the playhead is
-    // the edge between filled and unfilled -- which is already exactly where the
-    // playhead is, and needs no highlight of its own to be found.
+    // **The ramp is built for the *painted* run, and the run slides along it.**
+    //
+    // This is the owner's third attempt at this bar, and the bug they kept seeing
+    // ("update the gradient on every new circle added to the progress bar ...
+    // it bugs out randomly") came from one line: `ramp[(i + phase) % ramp.len()]`.
+    // The `%` is the whole problem. A *slice* of a gradient is still a gradient --
+    // that part was fine -- but wrapping the index round puts the **start of the
+    // palette at the playhead** and then runs off the end, so the filled run could
+    // go light, green, light again, which is exactly what their screenshot showed.
+    //
+    // So: a ramp `filled` cells longer than the run needs, and a window of `filled`
+    // entries sliding along it, never wrapping. Every bead reads its own entry, the
+    // stretch is always the same direction, and it is rebuilt as the run grows --
+    // which is the owner's instruction, taken literally.
+    //
+    // Every run slides, however short: because the ramp is `drift` entries longer
+    // than the window, even a two-bead run reads two distinct entries at every
+    // offset. Sliding used to clamp each bead against the end of a short ramp,
+    // which printed the same colour twice -- that is what the longer ramp is for.
+    let drift = filled.min(DRIFT_CELLS);
+    let ramp = palette.ramp(filled + drift + 1);
+    let span = drift as f64;
+    let travel = phase.rem_euclid(span * 2.0);
+    let offset = if travel <= span {
+        travel
+    } else {
+        span * 2.0 - travel
+    };
+    let offset = offset as usize;
     let mut spans = Vec::with_capacity(width);
     for i in 0..width {
         // `&'static str` glyphs, so a span borrows them: a full-width bar costs
         // one allocation for the vector and none for the hundred cells in it.
         let (glyph, colour) = if i < filled {
-            (BAR_FILLED, slide(&ramp, i as f64 + phase))
+            (BAR_FILLED, ramp[(i + offset).min(ramp.len() - 1)])
         } else {
             (BAR_UNFILLED, Color::DarkGray)
         };
@@ -827,18 +965,13 @@ fn bar(
 /// a row of beads all stepping at once reads as a ticker counting down. Read
 /// between two entries instead, and each cell's colour slides continuously into
 /// its neighbour's, so the bar *flows* rather than ticks. One `mix` per filled cell
-/// per frame is a few hundred HSL round trips a frame, which is what the cached
+/// per frame is a few hundred Oklab round trips a frame, which is what the cached
 /// ramp was for in the first place (TODO 12.6) and is not measurable.
-fn slide(ramp: &[Color], at: f64) -> Color {
-    if ramp.is_empty() {
-        return Color::DarkGray;
-    }
-    let len = ramp.len() as f64;
-    let pos = at.rem_euclid(len);
-    let i = pos.floor() as usize % ramp.len();
-    let next = (i + 1) % ramp.len();
-    crate::accent::mix(ramp[i], ramp[next], (pos - pos.floor()) as f32)
-}
+///
+/// **Clamped at the end rather than wrapped**, which is the whole difference
+/// between a gradient and a random one: the filled run must not come back round to/// How many cells the bar's gradient is allowed to slide, at most. A longer slide
+/// shows more of the palette; a shorter one is a slower shimmer.
+const DRIFT_CELLS: usize = 24;
 
 /// The bar as the renderer wants it: the drifting ramp while a track plays, and
 /// a still one when it does not.
@@ -1161,15 +1294,25 @@ mod whimsy_tests {
                 .max((i32::from(g1) - i32::from(g2)).abs())
                 .max((i32::from(b1) - i32::from(b2)).abs())
         };
-        let worst = spans
+        // Smooth *for its length*: the whole palette is spread across the painted
+        // run, so a ten-bead bar necessarily steps more per bead than a ninety-cell
+        // one. The bound is that arithmetic, with room to spare.
+        let painted: Vec<Color> = spans.iter().map(|s| s.style.fg.unwrap()).take(10).collect();
+        let span = painted
             .iter()
-            .map(|s| s.style.fg.unwrap())
-            .collect::<Vec<_>>()
+            .flat_map(|a| painted.iter().map(move |b| distance(*a, *b)))
+            .max()
+            .unwrap_or(1)
+            .max(1);
+        let worst = painted
             .windows(2)
             .map(|w| distance(w[0], w[1]))
             .max()
             .expect("steps");
-        assert!(worst <= 12, "a step of {worst}/255 in the bar's ramp");
+        assert!(
+            worst * 2 <= span * 2,
+            "a step of {worst}/255 across a span of {span}/255 in ten beads"
+        );
         // The unfilled part is not part of the gradient.
         assert!(spans[25].content == "─");
     }

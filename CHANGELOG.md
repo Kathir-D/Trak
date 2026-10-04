@@ -62,6 +62,19 @@ its pane, a slider too small to hit, lyrics that would not stay on screen, an
 - **`↑`/`↓` focus into a tab and out of it**, and `esc` leaves the list before the tab. An open
   album, artist or playlist page's tracks were reachable only by mouse: the arrows were moving the
   tab's hidden cursor. Fixed.
+- **Changing songs no longer brings Spotify to the front.** The track-change notification was being
+  sent *through* Spotify -- `Player::command` wraps every line in `tell application "Spotify"` --
+  so `display notification` ran inside Spotify's context and macOS raised Spotify over your terminal
+  on every track change. It is now posted by trak, with no `tell` block at all.
+- **The arrows are a tiered pair, like any other software.** The top bar holds `←`/`→` and keeps
+  them until `↓` descends into the pane, where they then mean whatever the pane does with them (the
+  Library tab's three sections). `↑` comes back out. Only the arrows are tiered: `/`, `f`, `A` and
+  `enter` work at either level.
+- **The bar's gradient no longer doubles back.** The ramp went out to one colour and came back to
+  another, so a long bar read as light, green, light -- the "random" banding. It is now one sweep,
+  built for the part that is actually painted and sliding along a longer ramp without ever
+  wrapping. Verified as properties over three palettes, eight fills and every tenth of a second of a
+  two-minute track; both new tests fail on the old code.
 - **A failing tab no longer asks ten times a second.** The lazy Web tabs asked while their list was
   still empty -- which is forever when the request fails, and Playlists/Liked answer 410 or 403
   until the account is on the app's developer allowlist. That burned the per-app developer quota and

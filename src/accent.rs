@@ -364,15 +364,30 @@ mod tests {
                 tertiary,
             };
             let ramp = p.ramp(64);
+            // The honest step is the ramp's own spread over its length. An absolute
+            // number cannot be right here: a palette whose three hues are far apart
+            // *has* to step further per cell than one whose hues are close, and a
+            // bound that ignores that would either band the wide palettes or stop
+            // the narrow ones short of their far end.
+            let spread = ramp
+                .iter()
+                .flat_map(|a| ramp.iter().map(move |b| distance(*a, *b)))
+                .max()
+                .unwrap_or(1)
+                .max(1);
             let worst = ramp
                 .windows(2)
                 .map(|w| distance(w[0], w[1]))
                 .max()
                 .expect("a ramp");
+            // **No step may be a big jump.** A band is a local spike and a wrap is
+            // the whole span in one step, so the bound that catches both is a
+            // fraction of the ramp's total spread rather than a number tuned per
+            // palette: a step is at most an eighth of the journey.
             assert!(
-                worst <= 12,
-                "a step of {worst}/255 between neighbours: {primary:?} -> {secondary:?} \
-                 -> {tertiary:?}"
+                worst * 8 <= spread + 16,
+                "a step of {worst}/255 between neighbours of a {spread}/255 ramp: \
+                 {primary:?} -> {secondary:?} -> {tertiary:?}"
             );
             // The middle is not a grey seam: it has to be at least half as colourful
             // as the ends, or the ramp goes through mud.
@@ -382,6 +397,69 @@ mod tests {
                 middle * 2 >= ends,
                 "the middle is a seam: chroma {middle} against ends {ends} for \
                  {primary:?} -> {secondary:?}"
+            );
+        }
+    }
+
+    /// **The ramp sweeps *through* the palette's middle colour.**
+    ///
+    /// The palette is three colours: the cover's own, and two synthetic rotations of
+    /// it, one each way. The ramp used to visit them as primary -> tertiary ->
+    /// secondary, which travels out to one rotation and then all the way across to
+    /// the other -- so it *starts* at the cover's colour, passes nowhere near it
+    /// again, and its middle is a blend of the two rotations. Painted along a
+    /// progress bar that reads "light, green, light", which is what the owner kept
+    /// seeing and called a gradient that "bugs out randomly" (2026-10-03).
+    ///
+    /// The claim is that the middle of the ramp is the *nearest* of the three
+    /// anchors to the palette's primary -- a sweep goes through the middle colour,
+    /// an out-and-back starts at it and leaves. That is checkable without measuring
+    /// a distance, and an earlier version of this test that measured path length
+    /// instead was wrong: a palette whose hues are far apart has a long path whether
+    /// or not it doubles back.
+    #[test]
+    fn the_ramp_sweeps_through_the_palette_s_middle_colour() {
+        let distance = |a: Color, b: Color| -> i32 {
+            let (r1, g1, b1) = to_rgb(a);
+            let (r2, g2, b2) = to_rgb(b);
+            (i32::from(r1) - i32::from(r2))
+                .abs()
+                .max((i32::from(g1) - i32::from(g2)).abs())
+                .max((i32::from(b1) - i32::from(b2)).abs())
+        };
+        for (primary, secondary, tertiary) in [
+            (
+                Color::Rgb(40, 90, 200),
+                Color::Rgb(230, 120, 190),
+                Color::Rgb(120, 200, 90),
+            ),
+            (
+                Color::Rgb(29, 185, 84),
+                Color::Rgb(29, 185, 183),
+                Color::Rgb(73, 185, 29),
+            ),
+            (
+                Color::Rgb(200, 40, 40),
+                Color::Rgb(40, 200, 90),
+                Color::Rgb(60, 60, 220),
+            ),
+        ] {
+            let p = Palette {
+                primary,
+                secondary,
+                tertiary,
+            };
+            let ramp = p.ramp(64);
+            let middle = ramp[ramp.len() / 2];
+            let at_middle = distance(middle, primary);
+            let at_start = distance(ramp[0], primary);
+            let at_end = distance(ramp[ramp.len() - 1], primary);
+            assert!(
+                at_middle <= at_start && at_middle <= at_end,
+                "the middle of the ramp is {at_middle}/255 from the palette's primary, \
+                 but its ends are {at_start}/255 and {at_end}/255 away: it starts at the \
+                 primary and leaves rather than sweeping through it. \
+                 {primary:?} -> {secondary:?} -> {tertiary:?}"
             );
         }
     }
@@ -877,11 +955,22 @@ impl Palette {
                 } else {
                     i as f32 / (len - 1) as f32
                 };
-                // Two halves: primary -> tertiary, then tertiary -> secondary.
+                // **One sweep, through the middle colour: tertiary -> primary ->
+                // secondary.**
+                //
+                // This used to be primary -> tertiary -> secondary, which is an
+                // out-and-back: the palette is built by rotating the cover's colour
+                // one way for `secondary` and the other way for `tertiary`, so
+                // visiting tertiary first and secondary second means swinging 240°
+                // through the primary and arriving back near where it started. A bar
+                // painted along that reads light, green, light -- which is what the
+                // owner kept seeing and called a gradient that "bugs out randomly"
+                // (2026-10-03). Going through the primary in one rotational
+                // direction is a sweep, and a sweep cannot double back.
                 if t <= 0.5 {
-                    mix(self.primary, self.tertiary, t * 2.0)
+                    mix(self.tertiary, self.primary, t * 2.0)
                 } else {
-                    mix(self.tertiary, self.secondary, (t - 0.5) * 2.0)
+                    mix(self.primary, self.secondary, (t - 0.5) * 2.0)
                 }
             })
             .collect()

@@ -1119,6 +1119,49 @@ built on, which is the whole reason this phase exists.
       > Premium account still gets the real queue from the API, unchanged. `docs/WEB-API.md` §2
       > already records that only the **add** is Premium-gated; this is the read's empty case.
 
+- [x] 13.19 **The track-change notification is posted by trak, not by Spotify** (owner, 2026-10-03: "I
+      just tried the history page, make sure when i change songs it doesn't refocus spotify cause it
+      flashed above cmux").
+      > `PlayerCommand::Notify` went through `Player::command`, which wraps its line in
+      > `tell application "Spotify"` -- because every *other* command is addressed to Spotify. So
+      > `display notification` ran **inside Spotify's context** and macOS raised Spotify over cmux on
+      > every track change. Every event addressed to a background app is a chance for the system to
+      > bring it to the front, which is what COMPAT rules 2 and 3 are about.
+      > `applescript::notify` now runs `display notification` as a StandardAdditions command with no
+      > `tell` block at all. The guard is **structural**: the script must not mention Spotify, because
+      > a test that ran the real thing could only prove it on a machine where Spotify happens to be
+      > running -- which is the machine a test must not depend on.
+- [x] 13.20 **The arrows are a tiered pair** (owner, 2026-10-03: "have it like a tiered system ... it
+      stays in that bar with left right arrows until I press the down arrow to go into that tab then
+      the left right controll it. Have it be like any other software").
+      > `App::focus` is `Bar` or `Pane`, and **the bar is the default on every arrival**: `←`/`→`
+      > change tab and *keep* the horizontal arrows, `↓` hands them down, and inside the pane they
+      > are whatever the pane does with them. A pane that grabbed the arrows the moment it was shown
+      > would make `←` quietly move a cursor instead of leaving a tab, which is the opposite of what
+      > was asked for.
+      > A pane with no use for the horizontal arrows (Queue, Liked, Playlists) lets them through as
+      > tab changes, so no tab is a trap; `↑` off the top row -- or out of an empty list, which now
+      > *declines* the key rather than swallowing it -- comes back to the bar.
+      > **Only the arrows are tiered.** `/`, `f`, `A`, `P`, `o`, `X` and `enter` work at either level,
+      > because nobody expects to have to go down a level to like a song. The seventeen tests that
+      > were about pane keys now say so through one `press_in_pane` helper rather than each finding
+      > its own way round the model.
+- [x] 13.21 **The bar's gradient was an out-and-back**, which is what "bugs out randomly" was (owner,
+      2026-10-03: "update the gradient on every new circle added to the progress bar. Don't just
+      assume it works correctly").
+      > Two causes, both real. The `%` in `ramp[(i + phase) % ramp.len()]` put the palette's opening
+      > colour at the playhead every time the offset wrapped; and the ramp itself went
+      > **primary -> tertiary -> secondary**, which with a palette built by rotating the cover's colour
+      > one way and the other way is an out-and-back: it starts at the cover's colour, leaves, and
+      > arrives back beside where it started. Painted along a bar that reads **light, green, light** --
+      > exactly their screenshot. The ramp is now **one sweep, tertiary -> primary -> secondary**.
+      > The bar's ramp is built for the *painted* run (their instruction, "every new circle added")
+      > and the run slides along a longer ramp, ping-ponging, never wrapping.
+      > Verified as properties rather than by eye: three palettes x eight fills x every tenth of a
+      > second over two minutes, asserting the run never comes back round, never doubles back (its two
+      > ends are its widest pair), and steps no further than its own length allows. Both new tests
+      > fail on the old code -- checked by reverting it.
+
 - [x] 13.17 **A failing lazy tab asked for itself ten times a second, and starved the cover**
       (owner, 2026-10-03: "why is the picture not showing and color scheme not following
       picture"). **Both symptoms were one bug.**

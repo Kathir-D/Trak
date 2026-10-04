@@ -112,14 +112,15 @@ Rules:
 | --- | --- | --- |
 | `space` | Play / pause | both |
 | `n` / `p` | Next / previous track | both |
-| `←` `→` | Previous / next tab (owner, 2026-10-01: arrows no longer seek) | both |
+| `←` `→` | Previous / next tab, **while the top bar has the focus** | both |
+| `↓` / `↑` | Descend into the pane below / come back out to the bar (owner, 2026-10-03: "like any other software") | both |
 | `+` `-` | Spotify volume ±10 (a setting) | both |
 | `m` | Mute / unmute (disabled while Sonar is fading, see COMPAT) | both |
 | `s` / `r` | Toggle shuffle / cycle repeat | both |
 | `R` | Replay the current track from the start | both |
 | `a` | Toggle art ↔ visualizer | both |
 | `v` | Cycle visualizer style | both |
-| `↑` `↓` / `j` `k` | Move in a list, and focus into one (owner, 2026-10-03) | both |
+| `j` `k` | Move in a list. `↓` and `↑` are the same key: they descend into the pane and come back out (owner, 2026-10-03) | both |
 | `esc` | Leave a focused list before leaving its tab | both |
 | `enter` | Play the selected item | both |
 | `Tab` / `Shift-Tab` | Next / previous tab | both |
@@ -137,6 +138,21 @@ Rules:
 | `X` (shift-x) | Remove the selected track from the open playlist (asks `y`/`n`) | A |
 | `[` `]` | Previous / next result group (Tracks, Albums, Artists, Playlists) on the Search tab | A |
 | `esc` | Back / close overlay | both |
+
+**The arrows are a tiered pair** (owner, 2026-10-03: "have it like a tiered system ... it stays
+in that bar with left right arrows until I press the down arrow to go into that tab then the left
+right controll it. Have it be like any other software"). There are two levels:
+
+- **the bar** — `←`/`→` change tab and *keep* the horizontal arrows; `↓` hands them down. This is
+  the default on every arrival at a tab, because a pane that grabbed the arrows the moment it was
+  shown would make `←` quietly move a cursor instead of leaving a tab.
+- **the pane** — `←`/`→` are the pane's (the Library tab's three sections, for one, which had no
+  key handling at all before). A pane with no use for them lets them through as tab changes, so no
+  tab is ever a trap. `↑` off the top row, or out of an empty list, comes back to the bar.
+
+Only the arrows are tiered. Everything else a tab does with a key — `/` to search, `f` to like,
+`A` to enqueue, `enter` to play — works at either level, because nobody expects to have to go down
+a level to like a song.
 
 The A keys act on tabs 1–5. Pressed anywhere else they show a toast saying why (the missing
 Client ID or login, or "works on the Spotify tabs, 1 to 5") rather than silently doing nothing.

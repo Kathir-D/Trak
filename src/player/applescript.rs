@@ -351,11 +351,7 @@ impl Player for AppleScriptPlayer {
 /// The escaping is the same as the commands' because it is the same problem: a quote
 /// or a backslash in a track title closes the string literal.
 pub fn notify(title: &str, body: &str) -> Result<(), PlayerError> {
-    let script = format!(
-        r#"display notification "{}" with title "{}""#,
-        body.replace('"', "\""),
-        title.replace('"', "\"")
-    );
+    let script = notification_script(title, body);
     let player = AppleScriptPlayer::new();
     // The reply is whatever StandardAdditions prints; the only thing that matters is
     // that the script ran, so the output is not inspected for a value.

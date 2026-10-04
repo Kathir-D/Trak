@@ -747,6 +747,19 @@ impl WebState {
     }
 }
 
+/// Which level of the interface the arrow keys are on.
+///
+/// See [`App::focus`]. Two levels, because that is all this interface has: the tab
+/// strip along the top, and the pane below it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Focus {
+    /// The tab strip. `←`/`→` change tab, `↓` goes into the pane.
+    #[default]
+    Bar,
+    /// The pane under the strip. `←`/`→` are the pane's, `↑` comes back out.
+    Pane,
+}
+
 /// Which list the Library tab is showing (7.9).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LibrarySection {
@@ -1197,6 +1210,18 @@ pub struct App {
     /// track change would drag the cursor down with the new row, and a session
     /// left alone would end up selecting the *oldest* track.
     pub cursor_moved: bool,
+    /// Which level of the interface has the arrow keys.
+    ///
+    /// The owner asked for this to work "like any other software" (2026-10-03): the
+    /// top bar takes `←`/`→` and **keeps** them until `↓` descends into the pane
+    /// below, where the same keys then mean whatever the pane does -- the Library
+    /// tab's three sections, for one, which had no key handling at all.
+    ///
+    /// [`Focus::Bar`] is the default on purpose. A pane that grabbed the arrows the
+    /// moment it was shown would mean someone reaching for `←` to leave a tab
+    /// silently moving a list cursor instead, which is the opposite of "like any
+    /// other software".
+    pub focus: Focus,
     /// What Spotify last reported, kept only so the meter has something to show
     /// before the user has chosen a volume of their own.
     pub read_volume: u8,
@@ -1292,6 +1317,7 @@ impl App {
             history_scroll: 0,
             viewport: 10,
             cursor_moved: false,
+            focus: Focus::default(),
             read_volume: 0,
             user_volume: None,
             queued: None,
@@ -1335,6 +1361,13 @@ impl App {
             .is_some_and(|s| s.playback == PlaybackState::Playing)
     }
 
+    /// Which level of the interface has the arrow keys.
+    ///
+    /// The owner asked for this to work "like any other software" (2026-10-03):
+    /// the top bar takes `←`/`→` and keeps them until `↓` descends into the pane
+    /// below, where the same keys then mean whatever the pane does -- the Library
+    /// tab's three sections, for one, which had no key handling at all.
+    ///
     pub fn track(&self) -> Option<&TrackInfo> {
         self.state.as_ref().map(|s| &s.track)
     }
@@ -1941,7 +1974,16 @@ fn web_tab_key(
     web: &mut Vec<WebJob>,
 ) -> bool {
     let queue_uri = |app: &App| -> Option<String> { app.web.row_uri(app.tab) };
+    // **The navigation keys are the pane's only while the pane has the focus.** On
+    // the top bar `←`/`→`/`↑`/`↓`/`h`/`l`/`j`/`k` belong to the tab strip and to the
+    // descent, and the caller falls through to handle them there. See [`App::focus`].
+    let nav = app.focus == Focus::Pane;
     match c {
+        // On the top bar these belong to the tab strip and the descent, so the pane
+        // declines them and the caller handles them one level up. `↑`/`↓` arrive as
+        // `k`/`j` (the loop folds them), which is why they are in this list rather
+        // than the arrows' own sentinels.
+        'h' | 'l' | 'j' | 'k' | ARROW_LEFT | ARROW_RIGHT if !nav => false,
         '/' => {
             app.web.search_focus = true;
             // Typing is not navigating, and the arrows have to mean one thing at
@@ -1958,6 +2000,10 @@ fn web_tab_key(
         // "arrow down and go to followed artists from saved albums" describes. The
         // arrows stop meaning "next tab" *on this tab only*: `Tab`/`Shift-Tab` and
         // the digits still change tab everywhere, so nothing is unreachable.
+        // The Library's section strip is the pane's own horizontal control, so the
+        // arrows walk it whenever the pane has the focus and the strip still has the
+        // cursor. Once the cursor is in the list they go back to being the tab strip's
+        // -- which is what the tiered model says they should be.
         ARROW_RIGHT | 'l' if app.tab == Tab::Library && !app.web.list_focus => {
             app.web.library.strip_cursor = app.web.library.strip_cursor.next();
             true
@@ -1966,6 +2012,7 @@ fn web_tab_key(
             app.web.library.strip_cursor = app.web.library.strip_cursor.prev();
             true
         }
+        // `enter` on the strip commits the section the arrows are on.
         '\n' if app.tab == Tab::Library && !app.web.list_focus => {
             commit_library_section(app);
             true
@@ -1984,8 +2031,11 @@ fn web_tab_key(
             // it has nothing to focus, and says so rather than pretending.
             let rows = web_rows(app);
             if rows == 0 {
+                // Nothing to move a cursor over, so the key is **declined** rather
+                // than swallowed: the level above still wants it, which is how `↑`
+                // comes back out of a pane whose list is empty.
                 app.web.list_focus = false;
-                return true;
+                return false;
             }
             if !app.web.list_focus {
                 if down {
@@ -2419,6 +2469,13 @@ fn handle_key(app: &mut App, c: char, commands: &mut Vec<PlayerCommand>, web: &m
     // tabs the transport keys mean something else -- `f` is a like, not a
     // shuffle, and a `space` on a search result plays it rather than the
     // transport.
+    // The Web tabs get their own keys first, because on those tabs the transport
+    // keys mean something else -- `f` is a like, not a shuffle. **Only the arrows
+    // are tiered**: `web_tab_key` decides for itself whether the navigation keys are
+    // the pane's, which is the only place that knows what a pane does with them.
+    // Everything else works at either level, because "like this song" or "search"
+    // is not a question about where the focus is (owner, 2026-10-03: "like any other
+    // software" -- and nobody expects to have to go down a level to press `f`).
     if app.tab.needs_web() && web_tab_key(app, c, commands, web) {
         return;
     }
@@ -2466,15 +2523,45 @@ fn handle_key(app: &mut App, c: char, commands: &mut Vec<PlayerCommand>, web: &m
             app.settings_open = true;
             crate::tui::settings::open(app);
         }
-        // Changing tab hands the arrows back to the dashboard: the list focus
+        // Changing tab hands the arrows back to the top bar: the pane's focus
         // belongs to the tab it was given in, and a cursor left "focused" on a tab
         // nobody is looking at is how a `j` ends up somewhere nobody expected.
+        // **`↓` descends into the pane**, `↑` comes back out, and `←`/`→` belong to
+        // whichever level has the focus. The owner asked for this to work "like any
+        // other software" (2026-10-03): the top bar holds the horizontal arrows until
+        // you go down, and then they belong to whatever is down there.
+        //
+        // So a horizontal arrow in the pane goes to the pane first, and only changes
+        // tab if the pane had no use for it -- which is what keeps a tab with nothing
+        // to move through from being a trap.
+        'j' if app.focus == Focus::Bar => {
+            app.focus = Focus::Pane;
+        }
+        'k' if app.focus == Focus::Pane => {
+            // `↑` out of a list is the list's own business (off the top row hands the
+            // arrows back), so only reach for the bar when the pane is not in a
+            // list at all.
+            if !app.web.list_focus {
+                app.focus = Focus::Bar;
+            }
+        }
         '\t' | ARROW_RIGHT => {
+            // Hand it down; if the pane takes it, it is not a tab change.
+            if app.focus == Focus::Pane && app.tab.needs_web() && web_tab_key(app, c, commands, web)
+            {
+                return;
+            }
+            app.focus = Focus::Bar;
             app.web.list_focus = false;
             app.tab = app.tab.next();
         }
         // Shift-Tab arrives as an unbound sentinel from the event loop.
         'Z' | ARROW_LEFT => {
+            if app.focus == Focus::Pane && app.tab.needs_web() && web_tab_key(app, c, commands, web)
+            {
+                return;
+            }
+            app.focus = Focus::Bar;
             app.web.list_focus = false;
             app.tab = app.tab.prev();
         }
@@ -2907,8 +2994,28 @@ mod tests {
         (u.app, u.commands)
     }
 
+    /// A keypress **with the pane focused**, which is what a Web tab's own keys
+    /// need since the tiered model arrived: the top bar holds the horizontal arrows
+    /// until `↓` hands them down (owner, 2026-10-03, "like any other software").
+    ///
+    /// The focus is set rather than reached with a `↓` press, because these tests
+    /// are about the *pane's* keys and a descent keypress would land in a text field
+    /// on some of them. How `↓` gets here is [`Self::the_arrows_are_a_tiered_pair`].
+    fn press_in_pane(mut app: App, c: char) -> (App, Vec<PlayerCommand>) {
+        app.focus = Focus::Pane;
+        press(app, c)
+    }
+
     /// An app sitting on a Web API tab, connected, so the tab keys are the ones
     /// under test rather than the "not connected" toasts.
+    /// Like [`Self::on_tab`], but with a track loaded, for the keys that need one.
+    fn on_track(tab: Tab) -> App {
+        let mut app = on_tab(tab);
+        let state = playing();
+        app.state = Some(state);
+        app
+    }
+
     fn on_tab(tab: Tab) -> App {
         let mut app = with_track();
         app.tab = tab;
@@ -3281,9 +3388,9 @@ mod tests {
     #[test]
     fn enter_plays_wherever_the_cursor_is() {
         let app = app_with_history(3);
-        let (app, _) = press(app, 'j');
+        let (app, _) = press_in_pane(app, 'j');
         assert_eq!(app.selected_history().unwrap().track.title, "Old 0");
-        let (_, cmds) = press(app, '\n');
+        let (_, cmds) = press_in_pane(app, '\n');
         assert_eq!(
             cmds,
             vec![PlayerCommand::PlayUri("spotify:track:t0".into())]
@@ -3319,7 +3426,7 @@ mod tests {
     #[test]
     fn a_track_change_keeps_the_same_row_selected() {
         let app = app_with_history(3);
-        let (app, _) = press(app, 'j');
+        let (app, _) = press_in_pane(app, 'j');
         let chosen = app.selected_history().unwrap().track.title.clone();
         let mut s = playing();
         s.track.uri = Some("spotify:track:brand-new".into());
@@ -3663,6 +3770,85 @@ mod tests {
         assert!(!lib.web.asked_for(Tab::Library), "arriving re-asks it");
     }
 
+    /// **The arrows are a tiered pair: the bar holds them until `↓` goes down.**
+    ///
+    /// The owner's model, which is also how every other program does it (2026-10-03:
+    /// "have it like a tiered system ... when scrolling in top area (liked, library,
+    /// lyrics, etc...) it stays in that bar with left right arrows until I press the
+    /// down arrow to go into that tab then the left right control it").
+    ///
+    /// So: `←`/`→` are the tab strip's; `↓` descends; inside the pane they are
+    /// whatever the pane does with them; and `↑` comes back out. The bar is the
+    /// default on purpose -- a pane that grabbed the arrows the moment it was shown
+    /// would make `←` quietly move a cursor instead of leaving a tab.
+    #[test]
+    fn the_arrows_are_a_tiered_pair() {
+        // The bar has them to begin with.
+        let app = with_track();
+        assert_eq!(app.focus, Focus::Bar, "the bar starts with the arrows");
+
+        // `←`/`→` change tab, and stay on the bar.
+        let start = app.tab;
+        let (app, _) = press(app.clone(), ARROW_RIGHT);
+        assert_eq!(app.tab, start.next(), "right moves along the bar");
+        assert_eq!(app.focus, Focus::Bar, "and the bar keeps them");
+        let (app, _) = press(app.clone(), ARROW_LEFT);
+        assert_eq!(app.tab, start);
+        assert_eq!(app.focus, Focus::Bar);
+
+        // `↓` descends. `j` is what the loop turns `↓` into.
+        let (app, _) = press(app.clone(), 'j');
+        assert_eq!(app.focus, Focus::Pane, "down goes in");
+
+        // In the pane the horizontal arrows are the pane's, so on a pane with
+        // nothing to do with them they change tab again -- and hand the arrows back
+        // on the way, so the tab strip is never a trap.
+        let (app, _) = press(app, ARROW_RIGHT);
+        assert_eq!(
+            app.tab,
+            start.next(),
+            "a pane with no use for them still lets you leave"
+        );
+        assert_eq!(app.focus, Focus::Bar);
+
+        // On a pane that *does* use them, they stay.
+        let library = on_tab(Tab::Library);
+        assert_eq!(library.focus, Focus::Bar);
+        let (library, _) = press(library, 'j');
+        assert_eq!(library.focus, Focus::Pane);
+        let (library, _) = press(library.clone(), ARROW_RIGHT);
+        assert_eq!(library.tab, Tab::Library, "the tab did not change");
+        assert_eq!(
+            library.web.library.strip_cursor,
+            LibrarySection::Artists,
+            "the pane had the arrow"
+        );
+        // `↑` comes back out, and the arrows go home with it.
+        let (library, _) = press(library, 'k');
+        assert_eq!(library.focus, Focus::Bar);
+        let (library, _) = press(library, ARROW_RIGHT);
+        assert_eq!(
+            library.tab,
+            Tab::Library.next(),
+            "and now the bar has them again"
+        );
+
+        // **Only the arrows are tiered.** Everything a tab does with a key that is
+        // not navigation works at either level, because nobody expects to have to go
+        // down a level to like a song.
+        let search = on_tab(Tab::Search);
+        let (search, _, _) = key(search, '/');
+        assert!(search.web.search_focus, "/ opens the box from the bar");
+        let liked = on_track(Tab::Liked);
+        let (liked, _, _) = key(liked, 'f');
+        assert_eq!(
+            liked.web.liked_here,
+            Some(true),
+            "f likes from the bar (focus {:?})",
+            liked.focus
+        );
+    }
+
     /// **The Library tab is fully arrow-navigable**, which it was not at all: the
     /// three sections could only be changed with the mouse (owner, 2026-10-03: "in
     /// library tab i should be able to arrow down and go to followed artists from
@@ -3692,7 +3878,7 @@ mod tests {
 
         // `→` walks the strip and does NOT change what is showing: you can look
         // along the options before committing to one.
-        let (app, _) = press(app.clone(), ARROW_RIGHT);
+        let (app, _) = press_in_pane(app.clone(), ARROW_RIGHT);
         assert_eq!(app.web.library.strip_cursor, LibrarySection::Artists);
         assert_eq!(
             app.web.library.section,
@@ -3701,28 +3887,28 @@ mod tests {
         );
 
         // `enter` chooses it.
-        let (app, _) = press(app, '\n');
+        let (app, _) = press_in_pane(app, '\n');
         assert_eq!(app.web.library.section, LibrarySection::Artists);
         assert!(!app.web.list_focus, "and the arrows are still on the strip");
 
         // `↓` chooses it and goes into the list, which is the shorter way to the
         // same place and is what "arrow down and go to followed artists" means.
-        let (app, _) = press(app.clone(), ARROW_RIGHT);
+        let (app, _) = press_in_pane(app.clone(), ARROW_RIGHT);
         assert_eq!(app.web.library.strip_cursor, LibrarySection::Recent);
-        let (app, _) = press(app, 'j');
+        let (app, _) = press_in_pane(app, 'j');
         assert_eq!(app.web.library.section, LibrarySection::Recent);
         assert!(app.web.list_focus, "and into its list");
 
         // `↑` off the top row hands the arrows back to the strip.
-        let (app, _) = press(app, 'k');
+        let (app, _) = press_in_pane(app, 'k');
         assert!(!app.web.list_focus);
 
         // `←` walks back, wrapping.
-        let (app, _) = press(app, ARROW_LEFT);
+        let (app, _) = press_in_pane(app, ARROW_LEFT);
         assert_eq!(app.web.library.strip_cursor, LibrarySection::Artists);
-        let (app, _) = press(app, ARROW_LEFT);
+        let (app, _) = press_in_pane(app, ARROW_LEFT);
         assert_eq!(app.web.library.strip_cursor, LibrarySection::Albums);
-        let (app, _) = press(app, ARROW_LEFT);
+        let (app, _) = press_in_pane(app, ARROW_LEFT);
         assert_eq!(
             app.web.library.strip_cursor,
             LibrarySection::Recent,
@@ -3732,13 +3918,13 @@ mod tests {
         // **Leaving the tab is still possible with the keyboard**: the arrows mean
         // sections *here*, so the tab keys have to carry it.
         let was = app.tab;
-        let (app, _) = press(app.clone(), '\t');
+        let (app, _) = press_in_pane(app.clone(), '\t');
         assert_eq!(app.tab, was.next(), "tab still changes tab");
-        let (app, _) = press(app, '6');
+        let (app, _) = press_in_pane(app, '6');
         assert_eq!(app.tab, Tab::Lyrics, "and so do the digits");
         // On any other tab the arrows go back to changing tab.
         let other = on_tab(Tab::Search);
-        let (other, _) = press(other, ARROW_RIGHT);
+        let (other, _) = press_in_pane(other, ARROW_RIGHT);
         assert_eq!(other.tab, Tab::Playlists);
         assert_eq!(
             other.web.library.strip_cursor,
@@ -3776,13 +3962,13 @@ mod tests {
         assert_eq!(web_cursor(&app), 0);
 
         // Down focuses the list, then moves it.
-        let (app, _) = press(app.clone(), 'j');
+        let (app, _) = press_in_pane(app.clone(), 'j');
         assert!(app.web.list_focus);
         assert_eq!(web_cursor(&app), 0, "focusing does not skip a row");
-        let (app, _) = press(app, 'j');
+        let (app, _) = press_in_pane(app, 'j');
         assert_eq!(web_cursor(&app), 1, "and then the arrows move it");
         // Enter plays the row the keyboard is on -- the whole point.
-        let (_, cmds) = press(app, '\n');
+        let (_, cmds) = press_in_pane(app, '\n');
         assert_eq!(
             cmds,
             vec![PlayerCommand::PlayUri("spotify:track:Two".into())],
