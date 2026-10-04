@@ -1767,10 +1767,12 @@ pub fn update(mut app: App, event: Event) -> Updated {
                     if w.landed {
                         // The write landed, so the meter is worth showing again.
                         app.volume_hidden = false;
-                        if w.what == "volume" {
-                            // Show what the player actually aimed for, which is
-                            // the clamped value, rather than recomputing the
-                            // clamp here and hoping the two agree.
+                        // Show what the player actually aimed for, which is the
+                        // clamped value, rather than recomputing the clamp here
+                        // and hoping the two agree -- unless another volume key
+                        // is held behind this write: the meter already shows
+                        // that one, and it is what the user asked for last.
+                        if w.what == "volume" && !is_volume(&app.queued) {
                             app.user_volume = Some(w.wanted.clamp(0, 100) as u8);
                         }
                     } else {
@@ -1803,8 +1805,9 @@ pub fn update(mut app: App, event: Event) -> Updated {
                 {
                     app.queued = None;
                 } else {
+                    // Not `muted` too: the key that queued this already set it,
+                    // and a held mute is a `SetVolume(0)` that has to stay one.
                     if let PlayerCommand::SetVolume(v) = next {
-                        app.muted = false;
                         app.user_volume = Some(v);
                     }
                     app.queued = None;
@@ -3249,6 +3252,68 @@ mod tests {
         assert_eq!(cmds, vec![PlayerCommand::SetVolume(100)]);
         assert!(!app.muted);
         assert_eq!(app.meter_volume(), 100, "unmute restores what the user had");
+    }
+
+    /// `-` then `m` faster than one AppleScript round trip: the mute is held
+    /// behind the step. When the step lands it must neither put the meter back
+    /// to the step's value nor forget that trak is muted -- it did both, and the
+    /// next `m` then "muted" again, saved 0 as the volume to come back to, and
+    /// left Spotify silent (found recording the demo, 2026-10-04).
+    #[test]
+    fn a_mute_held_behind_a_volume_step_still_unmutes() {
+        let (app, cmds) = press(with_track(), '-');
+        assert_eq!(cmds, vec![PlayerCommand::VolumeStep(-10)]);
+        let (app, cmds) = press(app, 'm');
+        assert!(cmds.is_empty(), "held behind the step");
+        assert!(app.muted);
+        assert_eq!(app.pre_mute_volume, 90);
+
+        let out = update(
+            app,
+            Event::CommandDone(CommandOutcome::read_back(
+                PlayerCommand::VolumeStep(-10),
+                landed("volume", 90),
+            )),
+        );
+        assert_eq!(out.commands, vec![PlayerCommand::SetVolume(0)]);
+        assert!(out.app.muted, "the held mute is still a mute");
+        assert_eq!(
+            out.app.meter_volume(),
+            0,
+            "the meter shows the mute, not the step"
+        );
+
+        let app = update(
+            out.app,
+            Event::CommandDone(CommandOutcome::read_back(
+                PlayerCommand::SetVolume(0),
+                landed("volume", 0),
+            )),
+        )
+        .app;
+        let (app, cmds) = press(app, 'm');
+        assert_eq!(cmds, vec![PlayerCommand::SetVolume(90)]);
+        assert!(!app.muted);
+        assert_eq!(app.meter_volume(), 90);
+    }
+
+    /// Two `+` faster than one round trip: the meter shows both at once, and
+    /// the first one landing must not drop it back to one step.
+    #[test]
+    fn a_step_landing_does_not_undo_a_step_held_behind_it() {
+        let (app, _) = press(with_track(), '-');
+        let (app, cmds) = press(app, '-');
+        assert!(cmds.is_empty());
+        assert_eq!(app.meter_volume(), 80);
+        let out = update(
+            app,
+            Event::CommandDone(CommandOutcome::read_back(
+                PlayerCommand::VolumeStep(-10),
+                landed("volume", 90),
+            )),
+        );
+        assert_eq!(out.commands, vec![PlayerCommand::VolumeStep(-10)]);
+        assert_eq!(out.app.meter_volume(), 80);
     }
 
     /// Tab goes forward and Shift-Tab back, which the event loop maps to 'Z'
