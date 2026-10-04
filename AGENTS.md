@@ -108,7 +108,8 @@ Then read the code for the task you picked. Do not start coding from this file a
 - Conventional commits (`feat:`, `fix:`, `docs:`, `chore:`, `test:`, `ci:`, `refactor:`), small,
   one task per commit. Run `git status` before committing; never commit `target/`, `dist/`,
   secrets, tokens, or `.env` files.
-- End commit messages with the `Co-Authored-By` trailer your harness gives you.
+- Only add a `Co-Authored-By` trailer if your harness explicitly gives you the exact text. If it
+  gives none (OpenCode, Codex, ...), add no trailer, and never write one from your own model name.
 
 **Product**
 - macOS 14.2+ only. MIT license. Keep the shpotify copyright line in `LICENSE`.
