@@ -2114,7 +2114,7 @@ fn history_lines<'a>(app: &'a App, theme: &'a Theme) -> Vec<Line<'a>> {
             .take(HISTORY_VIEW)
             .enumerate()
             .map(|(i, e)| {
-                let selected = i == app.history_cursor;
+                let selected = i == app.history_cursor && app.focus == crate::tui::app::Focus::Pane;
                 let marker = if selected { "›" } else { " " };
                 let text = if e.track.artist.is_empty() {
                     e.track.title.clone()
@@ -2126,7 +2126,10 @@ fn history_lines<'a>(app: &'a App, theme: &'a Theme) -> Vec<Line<'a>> {
                 // terminal's selection is -- blue on the owner's machine -- with no
                 // relation to the cover. They liked this indicator and wanted it to
                 // follow the album (2026-10-03).
-                let style = if selected {
+                // Marked only while the **pane** has the focus, like everything else
+                // in it (owner, 2026-10-04). A row the arrows cannot reach should not
+                // look as though they can.
+                let style = if selected && app.focus == crate::tui::app::Focus::Pane {
                     theme.accent_style().add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
@@ -4083,6 +4086,64 @@ mod tests {
             "focused is the plain accent"
         );
         let _ = (top, bottom, left, right);
+    }
+
+    /// **Nothing inside a pane is marked until the pane has the focus** (owner,
+    /// 2026-10-04: "if I didn't press arrow down to go into the tab the text isn't
+    /// highlighted, only when I'm inside the tab highlighted").
+    ///
+    /// The History tab is the one that shows it best: a selected row the arrows
+    /// cannot reach should not look as though they can, and a screen with a
+    /// highlight in it and a focus somewhere else is a screen that lies about where
+    /// the keys are going.
+    #[test]
+    fn a_selected_row_is_only_marked_from_inside_the_pane() {
+        let mut app = app_at(120, 30);
+        // A history row that is **not** the playing track: the playing one is drawn
+        // as its own unselectable `▶` row, so it could never show a cursor at all.
+        let mut other = crate::player::fake::sample_track();
+        other.title = "Blue Lines".into();
+        other.uri = Some("spotify:track:other".into());
+        app.history.push(crate::tui::app::HistoryEntry {
+            track: other,
+            at: std::time::Instant::now(),
+        });
+        app.history_cursor = 0;
+        app.tab = crate::tui::app::Tab::History;
+
+        // The row itself, not the whole screen: the tab strip carries its own
+        // elision marker (`‹`) which has nothing to do with this.
+        let row_of = |app: &App| -> String {
+            let (buf, _) = render(120, 30, app);
+            (0..30)
+                .map(|y| row_text(&buf, y, 0, 120))
+                // The history row, not the header: the header shows the title on its
+                // own, and a history row is "artist — title".
+                .find(|line| line.contains("Jane Remover — Blue Lines"))
+                .unwrap_or_default()
+        };
+
+        // From the top bar: no marker on the row.
+        let from_the_bar = row_of(&app);
+        assert!(
+            !from_the_bar.contains('\u{203a}'),
+            "nothing is marked from the bar: {from_the_bar:?}"
+        );
+
+        // Inside the pane: the marker is there.
+        app.focus = crate::tui::app::Focus::Pane;
+        let from_pane = row_of(&app);
+        assert!(
+            from_pane.contains('\u{203a}'),
+            "and it is once you go in: {from_pane:?}"
+        );
+
+        // And the tab strip's own elision marker is not what this is about.
+        let (buf, _) = render(120, 30, &app);
+        assert!(
+            (0..30).any(|y| row_text(&buf, y, 0, 120).contains('\u{203a}')),
+            "the strip keeps its own marker, so the assertion above is about the row"
+        );
     }
 
     /// **The Library tab's section strip is the first row of its pane, always.**

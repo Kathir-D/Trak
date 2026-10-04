@@ -112,7 +112,12 @@ fn search_lines(app: &App, theme: &Theme) -> Vec<Line<'static>> {
             i == current,
         ));
         for (row, text) in group_rows(&web.results, i).into_iter().enumerate() {
-            out.push(row_line(&text, row == web.group_row[i], theme));
+            out.push(row_line(
+                &text,
+                row == web.group_row[i],
+                theme,
+                app.focus == crate::tui::app::Focus::Pane,
+            ));
         }
     }
     out
@@ -223,13 +228,19 @@ fn playlist_lines(app: &App, theme: &Theme) -> Vec<Line<'static>> {
             // and the `items` field will be absent"), so a row that says nothing
             // about it would be promising a tracklist `enter` cannot open.
             match playlist.contents {
-                Some(_) => row_line(&text, i == app.web.playlist_cursor, theme),
+                Some(_) => row_line(
+                    &text,
+                    i == app.web.playlist_cursor,
+                    theme,
+                    app.focus == crate::tui::app::Focus::Pane,
+                ),
                 None => {
                     unreadable = true;
                     row_line(
                         &format!("{text}  (no tracklist)"),
                         i == app.web.playlist_cursor,
                         theme,
+                        app.focus == crate::tui::app::Focus::Pane,
                     )
                 }
             }
@@ -273,7 +284,14 @@ fn edit_lines(app: &App, theme: &Theme, edit: &PlaylistEdit) -> Vec<Line<'static
                 } else {
                     format!("{p}  (not yours — read only)")
                 };
-                out.push(row_line(&text, i == *cursor, theme));
+                out.push(row_line(
+                    &text,
+                    i == *cursor,
+                    theme,
+                    // The picker is a modal: it *is* what the keys are talking to, so
+                    // its cursor is shown whether or not the pane is focused.
+                    true,
+                ));
             }
             out
         }
@@ -407,7 +425,9 @@ fn library_lines(app: &App, theme: &Theme) -> Vec<Line<'static>> {
         library.section,
         theme,
         library.strip_cursor,
-        app.web.list_focus,
+        // The pane having the focus, not the list being focused: from the top bar
+        // nothing inside the pane is marked (owner, 2026-10-04).
+        app.focus == crate::tui::app::Focus::Pane,
     )];
     if !library.loaded[section_index(library.section)] {
         out.push(hint(
@@ -479,23 +499,30 @@ fn section_strip(
     section: LibrarySection,
     theme: &Theme,
     cursor: LibrarySection,
-    _focused: bool,
+    focused: bool,
 ) -> Line<'static> {
     let mut spans = Vec::new();
     for one in LibrarySection::ALL {
-        if one == cursor {
-            // **Brackets and the accent colour: no block behind it.** This had the
-            // same gradient block as the focused tab, which put two coloured blocks
-            // on one screen and made the strip shout (owner, 2026-10-03: "remove
-            // all the highlighted text, it just looks bad"). One accent-coloured
-            // marker per control is the pattern the rest of the interface uses.
+        // **Nothing in the pane is marked until the pane has the focus** (owner,
+        // 2026-10-04: "if I didn't press arrow down to go into the tab the text
+        // isn't highlighted, only when I'm inside the tab highlighted"). From the bar
+        // the strip is three plain words, which is also all it can usefully say: the
+        // arrows are up there, and a bracket down here would be pointing at nothing.
+        if !focused {
+            spans.push(Span::styled(format!(" {} ", one.label()), Style::default()));
+        } else if one == cursor {
+            // Brackets and the accent colour: no block behind it. This had the same
+            // gradient block as the focused tab, which put two coloured blocks on one
+            // screen (owner, 2026-10-03: "remove all the highlighted text, it just
+            // looks bad"). One accent-coloured marker per control is the pattern the
+            // rest of the interface uses.
             spans.push(Span::styled(
                 format!("[{}] ", one.label()),
                 theme.accent_style().add_modifier(Modifier::BOLD),
             ));
         } else if one == section {
-            // The section being shown, when the arrows are elsewhere: bold, so it
-            // is findable without being another block of colour.
+            // The section being shown, when the arrows are elsewhere: bold, so it is
+            // findable without being another block of colour.
             spans.push(Span::styled(
                 format!(" {} ", one.label()),
                 Style::default().add_modifier(Modifier::BOLD),
@@ -548,11 +575,14 @@ fn page_lines(app: &App, theme: &Theme, open: &Open) -> Vec<Line<'static>> {
         out.push(hint(format!("  {}", empty_page(open))));
         return out;
     }
-    out.extend(
-        rows.iter()
-            .enumerate()
-            .map(|(i, text)| row_line(text, i == app.web.open_cursor, theme)),
-    );
+    out.extend(rows.iter().enumerate().map(|(i, text)| {
+        row_line(
+            text,
+            i == app.web.open_cursor,
+            theme,
+            app.focus == crate::tui::app::Focus::Pane,
+        )
+    }));
     out
 }
 
@@ -594,7 +624,7 @@ fn now_playing(app: &App) -> Option<String> {
 
 /// One list row, with the `›` the History tab uses, so a selected row looks the
 /// same in every tab.
-fn row_line(text: &str, selected: bool, theme: &Theme) -> Line<'static> {
+fn row_line(text: &str, selected: bool, theme: &Theme, focused: bool) -> Line<'static> {
     // **The selected row is the album's colour, not reversed video.** `REVERSED`
     // swaps the *terminal's* foreground and background, so the selected row came
     // out whatever colour the terminal's own selection is -- blue on the owner's
@@ -602,7 +632,14 @@ fn row_line(text: &str, selected: bool, theme: &Theme) -> Line<'static> {
     // how you show how something is selected with green text") and wanted it to
     // follow the album, so the row is now the accent colour: no background block,
     // and every list in the interface marks its selection the same way.
-    let (marker, style) = if selected {
+    // **Only while the pane has the focus.** The owner asked for this everywhere, not
+    // just on the section strip (2026-10-04): "if I didn't press arrow down to go
+    // into the tab the text isn't highlighted, only when I'm inside the tab
+    // highlighted". A cursor you can see but cannot move is a lie about where the
+    // keys are going, and a screen with two highlights on it says nothing about
+    // which one has them.
+    let marked = selected && focused;
+    let (marker, style) = if marked {
         ("›", theme.accent_style().add_modifier(Modifier::BOLD))
     } else {
         (" ", Style::default())
@@ -777,10 +814,19 @@ mod tests {
         .app
     }
 
+    /// An app on `tab` with the **top bar** holding the arrows, which is the state
+    /// every tab is in when you arrive at it.
     fn app_on(tab: Tab) -> App {
         let mut app = app_playing();
         app.tab = tab;
         app.web.connection = Connection::Connected;
+        app
+    }
+
+    /// The same, with the **pane** holding them -- which is the only state in which
+    /// anything inside the pane is marked at all (owner, 2026-10-04).
+    fn in_pane(mut app: App) -> App {
+        app.focus = crate::tui::app::Focus::Pane;
         app
     }
 
@@ -865,7 +911,7 @@ mod tests {
     /// 7.6: the box, then the four groups as headings with their counts.
     #[test]
     fn the_search_tab_draws_the_box_and_the_four_groups() {
-        let mut app = app_on(Tab::Search);
+        let mut app = in_pane(app_on(Tab::Search));
         app.web.query = "massive attack".into();
         app.web.search_shown = "massive attack".into();
         app.web.results = SearchResults {
@@ -953,7 +999,7 @@ mod tests {
     /// the one that is marked.
     #[test]
     fn the_search_cursor_marks_the_row_within_its_group() {
-        let mut app = app_on(Tab::Search);
+        let mut app = in_pane(app_on(Tab::Search));
         app.web.query = "x".into();
         app.web.results = SearchResults {
             albums: vec![album("Mezzanine", "1998"), album("Blue Lines", "1991")],
@@ -1001,7 +1047,7 @@ mod tests {
 
     #[test]
     fn the_playlists_tab_lists_them_with_the_cursor_on_one() {
-        let mut app = app_on(Tab::Playlists);
+        let mut app = in_pane(app_on(Tab::Playlists));
         app.web.playlists = Page {
             items: vec![
                 readable_playlist("Roadwork", 12),
@@ -1186,8 +1232,10 @@ mod tests {
     #[test]
     fn the_selected_row_is_accent_coloured_and_nothing_else_is() {
         let theme = Theme::default();
-        let selected = row_line("Alpha", true, &theme);
-        let plain = row_line("Beta", false, &theme);
+        let selected = row_line("Alpha", true, &theme, true);
+        let plain = row_line("Beta", false, &theme, true);
+        // The same row with the focus somewhere else is completely plain.
+        let unfocused = row_line("Alpha", true, &theme, false);
         let accent = theme.accent_colour();
 
         let spans = |l: &Line<'static>| -> Vec<Span<'static>> { l.spans.to_vec() };
@@ -1223,7 +1271,7 @@ mod tests {
         );
 
         // And the Library strip carries no block of colour at all now.
-        let mut app = app_on(Tab::Library);
+        let mut app = in_pane(app_on(Tab::Library));
         app.web.library.strip_cursor = LibrarySection::Artists;
         let strip = lines(&app, &theme);
         let strip_text = strip
@@ -1314,7 +1362,7 @@ mod tests {
     /// the list itself.
     #[test]
     fn the_library_tab_draws_the_section_it_is_showing() {
-        let mut app = app_on(Tab::Library);
+        let mut app = in_pane(app_on(Tab::Library));
         app.web.library.section = LibrarySection::Albums;
         app.web.library.strip_cursor = LibrarySection::Albums;
         app.web.library.loaded = [true, true, true];
@@ -1402,7 +1450,7 @@ mod tests {
     /// the bottom of a long tracklist.
     #[test]
     fn each_page_says_which_page_it_is_and_how_to_leave_it() {
-        let mut app = app_on(Tab::Playlists);
+        let mut app = in_pane(app_on(Tab::Playlists));
         app.web.open_playlist("playlist-1".into());
         app.web.playlist_items(
             "playlist-1".into(),
