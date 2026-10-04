@@ -14,16 +14,7 @@
 
 <p align="center">
   <img src="docs/images/trak-demo.gif" width="760" alt="Trak in a terminal: album art and the session history, then the visualizer through three styles, the volume, synced lyrics on the Lyrics tab, full-screen lyrics over the darkened cover, and the settings screen.">
-  <br><sub>Recorded by <code>scripts/record-demo.py</code> against a scripted player, so the frames
-  are repeatable; the cover is the real artwork from Spotify's CDN, the accent is taken from it and
-  the lyrics are the real synced ones from LRCLIB. This is the half-block path, which every terminal
-  can draw — in <a href="https://cmux.dev">cmux</a> the same cover is drawn with the Kitty graphics
-  protocol instead.</sub>
 </p>
-
-> **Status: pre-alpha.** Everything below describes what is built and tested. One part has not
-> met a real account yet and is marked **unverified**: the Spotify Web API tabs (they need a
-> Client ID and a first live login).
 
 **Contents:** [Why Trak](#why-trak) · [Features](#features) · [Install](#install) ·
 [Screenshots](#screenshots) · [The TUI](#the-tui) · [Version A and B](#version-a-and-b) · [Settings](#settings) ·
