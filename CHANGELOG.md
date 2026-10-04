@@ -7,9 +7,28 @@ is in [`docs/RELEASING.md`](docs/RELEASING.md).
 
 ## [Unreleased]
 
-Reports from the owner running 0.2.0 on the same second machine: a cover a third of
-its pane, a slider too small to hit, lyrics that would not stay on screen, an
-`enter` that did nothing, and an empty Queue tab.
+## [0.2.1] - 2026-10-04
+
+Every item here is a report from the owner running 0.2.0 on a second machine and
+then 0.2.0's successor on the first one: a cover a third of its pane, a slider too
+small to hit, lyrics that would not stay on screen, an `enter` that did nothing, an
+empty Queue tab, a selection that was the terminal's blue rather than the album's,
+a bar that banded and then doubled back, arrows that did not behave like any other
+program's, and Spotify jumping in front of the terminal on every track change.
+
+The two bugs that were hiding behind other symptoms are worth naming, because both
+were invisible from the inside:
+
+- **`accent::mix` did nothing with a named colour.** It destructured `Color::Rgb` and
+  returned its first argument for anything else, so every "mix towards white" and
+  "mix towards black" in the program had been a silent no-op -- including the tint on
+  a selected tab that was supposed to stop it being a white box.
+- **A failing Web tab asked for itself ten times a second.** The lazy tabs asked
+  while their list was still empty, which is forever when the request fails. That
+  burned the per-app developer quota and kept the worker thread permanently busy, so
+  the cover download queued behind it was starved: no picture, and the colour
+  scheme stuck on the fallback green. Both halves of "why is the picture not showing
+  and the colour scheme not following it".
 
 ### Fixed
 
@@ -258,7 +277,8 @@ a real account or a real permission prompt.
   universal (arm64 + x86_64) and **ad-hoc signed, not notarized**; neither
   install path sets a quarantine flag, so there is no Gatekeeper prompt.
 
-[Unreleased]: https://github.com/Kathir-D/Trak/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/Kathir-D/Trak/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/Kathir-D/Trak/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/Kathir-D/Trak/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/Kathir-D/Trak/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/Kathir-D/Trak/releases/tag/v0.1.0
