@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/images/trak-demo.gif" width="760" alt="Trak in a terminal: album art and the session history, then the visualizer through three styles, the volume, synced lyrics on the Lyrics tab, full-screen lyrics over the darkened cover, and the settings screen.">
+  <img src="docs/images/trak-demo.gif" width="760" alt="Trak in a terminal playing Jane Remover: the cover of Dancing with your eyes closed in orange, a skip to Beauty Sleep that turns the cover and the whole interface lavender, pause, shuffle, repeat, volume and mute, the visualizer through all four styles, synced lyrics, full-screen lyrics, the track info, a skip back that turns it orange again, and the settings screen.">
 </p>
 
 **Contents:** [Why Trak](#why-trak) · [Features](#features) · [Install](#install) ·
@@ -87,8 +87,8 @@ cargo build --release
 
 | | |
 | --- | --- |
-| <img src="docs/images/dashboard.png" width="380" alt="The dashboard: album art with the artist, title and album under it, a progress bar, transport controls and volume meter on the left; the session history on the right."> | <img src="docs/images/visualizer-waveform.png" width="380" alt="The visualizer in waveform style in place of the cover, beside synced lyrics with the current line highlighted."> |
-| Dashboard with the cover and the session history | `waveform` visualizer beside synced lyrics |
+| <img src="docs/images/dashboard.png" width="380" alt="The dashboard: album art with the artist, title and album under it, a progress bar, transport controls and volume meter on the left; the session history on the right."> | <img src="docs/images/visualizer-waveform.png" width="380" alt="The visualizer in waveform style in place of the cover, beside the session history."> |
+| Dashboard with the cover and the session history | `waveform` visualizer |
 | <img src="docs/images/visualizer-circular.png" width="380" alt="The visualizer in circular style: a ring of dots that swells with the music."> | <img src="docs/images/visualizer-spectrum.png" width="380" alt="The visualizer in spectrum style: vertical bars in the album's colours."> |
 | `circular` | `spectrum` |
 | <img src="docs/images/lyrics-fullscreen.png" width="380" alt="Full-screen lyrics: the whole song centred, the current line bright and the rest dimmed."> | <img src="docs/images/settings.png" width="380" alt="The settings screen over the dashboard: display, theme, visualizer, input, notifications and Spotify API settings, with the key list below."> |

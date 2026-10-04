@@ -42,8 +42,9 @@ What changed, and what to know before touching it again:
   second while a track plays (still when paused). The premade ratatui gradient crates are thin
   wrappers around `colorgrad` and none of them draw a bar with a moving head.
 - **The demo GIF is recorded from a pty**, not from a window: `scripts/record-demo.py` plus
-  `scripts/screen.py`'s emulator plus PIL. No window id, no focus, reproducible. It runs against
-  `scripts/fake-spotify`.
+  `scripts/screen.py`'s emulator (which decodes the Kitty graphics trak sends, so the cover is the
+  real image) plus PIL and ffmpeg. No window id, no focus, reproducible. It runs against
+  `scripts/fake-spotify`; the scene list is at the top of the script.
 
 Still unverified, and it needs the owner: **the whole Web API half.** The Client ID works and the
 authorize endpoint accepts the redirect URI, but nobody clicked "Allow" in the browser yet, so
@@ -62,7 +63,8 @@ and installing on a Mac that never had Homebrew or an Automation grant (9.6).
   panics or fails to leave the alternate screen; `drive.py` times a burst of keys and when a write
   reaches the stub; `stub-osascript` answers in the measured times; `vt.py`/`shot.py` print the
   screen as text. **Put a fake `open` first on `PATH`** (`target/scratch/lat/bin/open`) before
-  anything sends ``: the guided setup's first step opens a real browser, and a fuzz run did
+  anything sends `
+`: the guided setup's first step opens a real browser, and a fuzz run did
   exactly that (2026-10-02, several Safari tabs).
 - **`?`/`q` in the settings screen do not quit trak** — `q` saves and closes, `esc` closes, and a
   text field swallows `q` entirely. A fuzzer that ends with "still running after three q's" is
@@ -82,9 +84,12 @@ and installing on a Mac that never had Homebrew or an Automation grant (9.6).
   at `<XDG_CONFIG_HOME>/trak/config.toml`, not directly in it. For real Spotify use
   `TRAK_OSASCRIPT="$HOME/.local/bin/osascript"`. The owner may be listening: read the state first,
   restore volume, shuffle, repeat and the track afterwards, and never launch Spotify.
-- `scripts/fake-spotify` is now committed: the scripted player, with the volume in a file and every
-  call logged with a timestamp. It reports a `spotify:track:` URI, or trak treats the track as an
-  advert and never looks its lyrics up.
+- `scripts/fake-spotify` is the scripted player: a two-song queue whose writes (play/pause,
+  next/previous, shuffle, repeat, volume, seek) change what the next read returns, state in a JSON
+  file, every call logged with a timestamp. Its track ids and artwork ids are the real ones -- an
+  earlier copy pointed at another song's artwork (*Cage Girl / Camgirl*) and the demo showed it; check each with
+  `curl "https://open.spotify.com/oembed?url=https://open.spotify.com/track/<id>"`. It reports a
+  `spotify:track:` URI, or trak treats the track as an advert and never looks its lyrics up.
 - **Profiling:** `CARGO_PROFILE_RELEASE_DEBUG=true CARGO_PROFILE_RELEASE_STRIP=false cargo build
   --release --target-dir target/prof`, then `sample <pid> 5`. dtrace is blocked by SIP.
 - **Gate before every commit:** `cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D

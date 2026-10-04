@@ -26,6 +26,11 @@ its pane, a slider too small to hit, lyrics that would not stay on screen, an
   a track change, and a poll arrives about once a second repeating the same track:
   the pane blinked between the words and the song's title, threw away the follow
   position every second, and re-sent the same LRCLIB lookup over and over.
+- **A quick mute still unmutes.** `m` pressed while a volume step was still being written
+  was held behind it and then sent as a plain volume of 0, which forgot the mute: the next
+  `m` muted again, saved 0 as the volume to come back to, and Spotify stayed silent. A
+  volume write landing also put the meter back to its own value while a newer volume key
+  was waiting, so a second quick `+` looked lost.
 - **The guided setup opens the dashboard.** It called a bare `open`, which is not
   on `PATH` when trak starts from a terminal that read no profile, a launcher, or
   `sudo`; it now calls `/usr/bin/open`. The "could not open a browser" message was
