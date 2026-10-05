@@ -1001,7 +1001,15 @@ fn pane_block<'a>(title: impl Into<Line<'a>>, theme: &Theme, focused: bool) -> B
             Theme::dim()
         });
     if focused {
-        b = b.title_style(theme.accent_style().add_modifier(Modifier::BOLD));
+        // **The accent, but not the bold.** This used to bold the whole title,
+        // which made every tab in a focused pane as heavy as the selected one --
+        // so the weight that is supposed to say "this is the tab you are on"
+        // said "the keys are down here" instead, and only while the pane was
+        // *not* focused did the selected tab stand out by weight at all (owner,
+        // 2026-10-05: "the active tab is only coloured, not bold"). The border is
+        // already how a focused pane says so, and it says it with a colour
+        // change rather than a heavier one.
+        b = b.title_style(theme.accent_style());
     }
     b
 }
@@ -4383,89 +4391,96 @@ mod tests {
     }
 
     /// **The selected tab in the strip is bold *and* gradient-coloured
-    /// in the buffer** (owner, 2026-10-05: "the active tab is only
-    /// coloured, not bold").
+    /// in the buffer, focused or not** (owner, 2026-10-05: "the active
+    /// tab is only coloured, not bold").
     ///
     /// Read from the buffer rather than from the spans, because the
     /// strip is drawn twice -- by the pane's block and, unfocused,
     /// again over the border `paint_edges` put there -- so what is on
-    /// screen is the thing to claim about. Unfocused is the harder
-    /// case: an unselected label's spans are `Style::default()`, so
-    /// its cells show the border paint straight through, which is the
-    /// point -- the strip colours the selected tab and nothing else.
+    /// screen is the thing to claim about. Both states are checked
+    /// because they used to disagree: a focused pane bolded its whole
+    /// title, so the weight that says "this is your tab" said "the keys
+    /// are down here" instead, and only the unfocused pane had a
+    /// selected tab that stood out by weight.
     #[test]
     fn the_selected_tab_in_the_strip_is_bold_and_gradient_coloured() {
-        use ratatui::style::Color;
-
-        let mut app = app_at(160, 40);
-        app.tab = Tab::Queue;
-        let (buf, _regions) = render(160, 40, &app);
-        // The side pane, found by its own left border: the first pair of adjacent
-        // rules on a middle row is Now Playing's right edge meeting the side pane's
-        // left edge.
-        let pane_x = (1..158)
-            .find(|x| row_text(&buf, 20, *x, 1) == "│" && row_text(&buf, 20, *x + 1, 1) == "│")
-            .expect("two panes side by side")
-            + 1;
-        // A numbered tab's selected form is "[n]Label" and its plain form is
-        // " n Label ", so the selected label is findable and is not the string an
-        // unselected neighbour is drawn as. Queue is tab 3 and Playlists is the tab
-        // beside it, so at this width both are always in the window.
-        //
-        // The strip rides the side pane's *top border*, which is found rather than
-        // assumed: the page keeps a menu bar of its own above the two panes, so row
-        // 0 is the menu bar and not the strip.
-        let (strip_y, sel_x, plain_x) = (0..6u16)
-            .find_map(|y| {
-                // Columns, not byte offsets: the row opens with a `│`, which is
-                // three bytes and one column, and `find` would hand back a byte
-                // offset and land the read two cells off.
-                let row: Vec<char> = row_text(&buf, y, pane_x, 160 - pane_x).chars().collect();
-                let at = |needle: &str| {
-                    let n: Vec<char> = needle.chars().collect();
-                    row.windows(n.len()).position(|w| w == n).map(|i| i as u16)
-                };
-                Some((y, pane_x + at("[3]Queue")?, pane_x + at("Playlists")?))
-            })
-            .expect("the tab strip is drawn on the pane's top border");
-        // Selected: every character is its own span, so every cell of the label is
-        // bold and carries a gradient colour of its own.
-        let mut fgs = Vec::new();
-        for x in sel_x..sel_x + "[3]Queue".chars().count() as u16 {
-            let cell = &buf[(x, strip_y)];
+        for focused in [false, true] {
+            let mut app = app_at(160, 40);
+            app.tab = Tab::Queue;
+            app.web.list_focus = focused;
+            let (buf, _regions) = render(160, 40, &app);
+            // The side pane, found by its own left border: the first pair of adjacent
+            // rules on a middle row is Now Playing's right edge meeting the side pane's
+            // left edge.
+            let pane_x = (1..158)
+                .find(|x| row_text(&buf, 20, *x, 1) == "│" && row_text(&buf, 20, *x + 1, 1) == "│")
+                .expect("two panes side by side")
+                + 1;
+            // A numbered tab's selected form is "[n]Label" and its plain form is
+            // " n Label ", so the selected label is findable and is not the string an
+            // unselected neighbour is drawn as. Queue is tab 3 and Playlists is the tab
+            // beside it, so at this width both are always in the window.
+            //
+            // The strip rides the side pane's *top border*, which is found rather than
+            // assumed: the page keeps a menu bar of its own above the two panes, so row
+            // 0 is the menu bar and not the strip.
+            let (strip_y, sel_x, plain_x) = (0..6u16)
+                .find_map(|y| {
+                    // Columns, not byte offsets: the row opens with a `│`, which is
+                    // three bytes and one column, and `find` would hand back a byte
+                    // offset and land the read two cells off.
+                    let row: Vec<char> = row_text(&buf, y, pane_x, 160 - pane_x).chars().collect();
+                    let at = |needle: &str| {
+                        let n: Vec<char> = needle.chars().collect();
+                        row.windows(n.len()).position(|w| w == n).map(|i| i as u16)
+                    };
+                    Some((y, pane_x + at("[3]Queue")?, pane_x + at("Playlists")?))
+                })
+                .expect("the tab strip is drawn on the pane's top border");
+            // Selected: every character is its own span, so every cell of the label is
+            // bold and carries a gradient colour of its own.
+            let mut fgs = Vec::new();
+            for x in sel_x..sel_x + "[3]Queue".chars().count() as u16 {
+                let cell = &buf[(x, strip_y)];
+                assert!(
+                    cell.modifier.contains(Modifier::BOLD),
+                    "focused {focused}: the selected tab's cell ({x},{strip_y}) \
+                     is not bold: {cell:?}"
+                );
+                assert_ne!(
+                    cell.fg,
+                    Color::Reset,
+                    "focused {focused}: the selected tab's cell ({x},{strip_y}) \
+                     has no colour: {cell:?}"
+                );
+                fgs.push(cell.fg);
+            }
+            // A gradient, not one flat colour repeated.
             assert!(
-                cell.modifier.contains(Modifier::BOLD),
-                "the selected tab's cell ({x},{strip_y}) is not bold: {cell:?}"
+                fgs.iter().any(|c| *c != fgs[0]),
+                "focused {focused}: the selected tab is one flat colour, not a \
+                 gradient: {fgs:?}"
             );
-            assert_ne!(
-                cell.fg,
-                Color::Reset,
-                "the selected tab's cell ({x},{strip_y}) has no colour: {cell:?}"
-            );
-            fgs.push(cell.fg);
-        }
-        // A gradient, not one flat colour repeated.
-        assert!(
-            fgs.iter().any(|c| *c != fgs[0]),
-            "the selected tab is one flat colour, not a gradient: {fgs:?}"
-        );
-        // Unselected: neither bold nor coloured by the strip. The comparison is
-        // against a border cell the strip does not cover -- the pane's top-right
-        // corner, which `paint_edges` painted and nothing else did -- because an
-        // unselected label's spans are `Style::default()` and so leave the border
-        // paint in place rather than resetting it.
-        let corner = &buf[(160 - 1, strip_y)];
-        for x in plain_x..plain_x + "Playlists".chars().count() as u16 {
-            let cell = &buf[(x, strip_y)];
-            assert!(
-                !cell.modifier.contains(Modifier::BOLD),
-                "an unselected tab's cell ({x},{strip_y}) is bold: {cell:?}"
-            );
-            assert_eq!(
-                cell.fg, corner.fg,
-                "an unselected tab's cell ({x},{strip_y}) is coloured by the \
-                 strip, not by the border: {cell:?} vs {corner:?}"
-            );
+            // Unselected: never bold, and coloured by the border rather than by the
+            // strip. The comparison is against a border cell the strip does not cover
+            // -- the pane's top-right corner, which `paint_edges` painted and nothing
+            // else did when unfocused, and which is the same paint either way -- because
+            // an unselected label's spans are `Style::default()` and so leave the
+            // border paint in place rather than resetting it.
+            let corner = &buf[(160 - 1, strip_y)];
+            for x in plain_x..plain_x + "Playlists".chars().count() as u16 {
+                let cell = &buf[(x, strip_y)];
+                assert!(
+                    !cell.modifier.contains(Modifier::BOLD),
+                    "focused {focused}: an unselected tab's cell ({x},{strip_y}) \
+                     is bold: {cell:?}"
+                );
+                assert_eq!(
+                    cell.fg, corner.fg,
+                    "focused {focused}: an unselected tab's cell ({x},{strip_y}) is \
+                     coloured by the strip, not by the border: {cell:?} vs {corner:?}"
+                );
+            }
         }
     }
 

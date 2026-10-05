@@ -2590,7 +2590,22 @@ fn handle_key(app: &mut App, c: char, commands: &mut Vec<PlayerCommand>, web: &m
     // On the Lyrics tab the list is the song itself: `j`/`k` scroll the words
     // and pause the auto-follow (TODO 6.3) rather than moving a history
     // selection the tab cannot even show.
-    if app.tab == Tab::Lyrics && matches!(c, 'j' | 'k') {
+    //
+    // **Only once the keys are in the pane.** SPEC §4 is unconditional -- `↓`
+    // descends into the pane below and `↑` comes back out to the bar, on every
+    // tab -- and this arm used to run first of all, so on the Lyrics tab alone
+    // the top bar kept the arrows for good. That is not only unlike every other
+    // tab: it is why the pane's border could never say it had the keys, since
+    // nothing could ever put the focus in it.
+    if app.tab == Tab::Lyrics && app.focus == Focus::Pane && matches!(c, 'j' | 'k') {
+        // `↑` off the top of the words comes back out to the bar, the rule a
+        // list already follows: there is nowhere further up to scroll, and a
+        // pane the arrows cannot leave is a trap.
+        let at_top = app.lyrics.anchor(app.interpolated_position()) == Some(0);
+        if c == 'k' && at_top {
+            app.focus = Focus::Bar;
+            return;
+        }
         app.lyrics
             .scroll_by(if c == 'j' { 1 } else { -1 }, app.interpolated_position());
         return;
@@ -6196,7 +6211,8 @@ mod lyrics_tests {
 
     /// The lyrics for the scroll tests: three lines, the first at 0:00, so the
     /// sung line is the first one whatever the interpolator adds.
-    fn scrolled_app() -> App {
+    /// The Lyrics tab with three lines loaded, the keys still on the top bar.
+    fn lyrics_tab() -> App {
         let mut app = with_track();
         app.tab = Tab::Lyrics;
         let uri = app.track().unwrap().uri.clone();
@@ -6208,6 +6224,55 @@ mod lyrics_tests {
             },
         )
         .app
+    }
+
+    /// The same tab **with the keys in the pane**, which is where a user is once
+    /// they have pressed `↓`: SPEC §4 descends before it scrolls, so a test that
+    /// is about the scrolling says so by being there.
+    fn scrolled_app() -> App {
+        update(lyrics_tab(), Event::Key('j')).app
+    }
+
+    /// **`↓` descends into the Lyrics pane before it scrolls it, and `↑` off the
+    /// top of the words comes back out** (SPEC §4: descend into the pane below /
+    /// come back out to the bar, on every tab).
+    ///
+    /// The scrolling arm used to run ahead of the descent, so on this tab alone
+    /// the top bar kept the arrows for good -- which is also why the pane's
+    /// border could never light: nothing could put the focus in here.
+    #[test]
+    fn down_descends_into_the_lyrics_before_it_scrolls_them() {
+        let app = lyrics_tab();
+        assert_eq!(app.focus, Focus::Bar);
+
+        let u = update(app, Event::Key('j'));
+        assert_eq!(u.app.focus, Focus::Pane, "the keys go down first");
+        assert!(
+            u.app.lyrics.following(),
+            "and descending is not scrolling: the song still holds the view"
+        );
+
+        let u = update(u.app, Event::Key('j'));
+        assert_eq!(u.app.lyrics.scrolled_to, Some(1), "now it scrolls");
+
+        // `↑` at the top is nowhere further to go, so it leaves -- the rule a
+        // list already follows, and what keeps the pane from being a trap.
+        let u = update(u.app, Event::Key('k'));
+        assert_eq!(u.app.lyrics.scrolled_to, Some(0), "back to the first line");
+        assert_eq!(u.app.focus, Focus::Pane, "still in the pane");
+        let u = update(u.app, Event::Key('k'));
+        assert_eq!(u.app.focus, Focus::Bar, "off the top leaves the pane");
+        assert_eq!(
+            u.app.lyrics.scrolled_to,
+            Some(0),
+            "and did not scroll past the first line to get there"
+        );
+
+        // Back down, and the pane scrolls again from wherever it was left.
+        let u = update(u.app, Event::Key('j'));
+        assert_eq!(u.app.focus, Focus::Pane);
+        let u = update(u.app, Event::Key('j'));
+        assert_eq!(u.app.lyrics.scrolled_to, Some(1));
     }
 
     /// TODO 6.3: `j`/`k` on the Lyrics tab take the scroll from the song, and
