@@ -17,8 +17,8 @@
 class Trak < Formula
   desc "Terminal UI and CLI for the Spotify desktop app on macOS"
   homepage "https://github.com/Kathir-D/Trak"
-  url "https://github.com/Kathir-D/Trak/releases/download/v0.2.1/trak-0.2.1-macos.tar.gz"
-  sha256 "182d073a2350eacc6593cdc42e113d5d6656c66e7de2d03a643a13f404704d78"
+  url "https://github.com/Kathir-D/Trak/releases/download/v0.2.2/trak-0.2.2-macos.tar.gz"
+  sha256 "953445944fe11de2d57f5a984837690ba9f860e17375cdc4381d1c899835c88f"
   license "MIT"
 
   head "https://github.com/Kathir-D/Trak.git", branch: "main"
