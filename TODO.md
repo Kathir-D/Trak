@@ -928,7 +928,7 @@ Requires Sonar installed and running (`brew install --cask kathir-d/tap/sonar`) 
       > typed by a tiny Swift CGEvent keycode typer; clicks via `cliclick` work. Not covered: the
       > idle card (needs Spotify quit, which would interrupt the owner).
 
-- [ ] 11.1 **Refactor the README** using https://github.com/abhisheknaiidu/awesome-github-profile-readme
+- [x] 11.1 **Refactor the README** using https://github.com/abhisheknaiidu/awesome-github-profile-readme
       as the style reference. Note: that repo is a *curated list of GitHub profile READMEs*, not a
       template, and profile READMEs are not project READMEs, so **borrow the presentation ideas, not
       the structure blindly**:
@@ -965,6 +965,19 @@ Requires Sonar installed and running (`brew install --cask kathir-d/tap/sonar`) 
       > ratatui and six profile READMEs), and the GitHub render checked in both colour schemes
       > with headless Chrome (`--blink-settings=preferredColorScheme=0/1`): the dark-terminal GIF
       > reads well on both. Left: release and Homebrew badges, added with the v0.1.0 release.
+      > **2026-10-05: ticked.** The CI badge went in with it (the one the item asked for that was
+      > missing), and an audit of every claim against the code found eight the shipped binary does
+      > not back, all now fixed: `esc` never leaves the tab (SPEC §4 says it should — recorded in
+      > Backlog), the settings table was missing `[volume] control`, `trak pause` prints nothing
+      > while `stop` and `quit` do, the status card bolds the *title* and dims the artist line, and
+      > the audio-tap prompt names **Trak** rather than your terminal because the tap is in-process.
+      > Two overclaims softened (the Free-tier Web API row, the Sonar coexistence row) and the
+      > credits now name ratatui, LRCLIB and spotify-tui. Re-rendered both ways: 11 anchors, 8
+      > relative paths and 12 external URLs all resolve, the CI badge answers 200, largest image
+      > 763 KB. **Method worth reusing:** render through `api.github.com/markdown` and screenshot
+      > that with headless Chrome — pointing Chrome at `README.md` itself gives you the raw text,
+      > not the page, and `--blink-settings=preferredColorScheme` does *not* darken a local file
+      > (it needs the page's own `color-scheme`), so the dark check has to set the background.
 - [ ] 11.2 Record the demo GIF/screenshots: Version B, Version A, visualizer styles, settings screen,
       full-screen lyrics. Done when: images committed and referenced.
       > Version B, three visualizer styles, full-screen lyrics and settings are recorded and in
@@ -1359,6 +1372,12 @@ built on, which is the whole reason this phase exists.
 
 - Rebindable keys.
 - History: a Spotify quit and relaunch on the same track records that track a second time (10.4).
+- `esc` should leave the tab as well as the list. SPEC §4 and the keys table both say
+  "leave a focused list before leaving its tab", and `handle_key` has no `\x1b` arm at all:
+  it leaves a Web list and closes an open page, and on History / Info / Lyrics it does
+  nothing. The README was corrected to the shipped behaviour on 2026-10-05 rather than the
+  other way round; the question the spec left open is what `esc` should then do — go back to
+  the top bar, or to the tab the page was opened from (`web.pages` already holds the stack).
 - **Web API tabs: the marker and the border read two different focus signals.** On a Web tab
   a single `j` from the top bar puts the focus in the pane (`app.focus == Pane`), which marks
   row 0, but the border follows `web.list_focus` -- which is the *second* `j` -- so it stays

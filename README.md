@@ -5,7 +5,8 @@
 </div>
 
 <p align="center">
-  <a href="https://github.com/Kathir-D/Trak/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/Kathir-D/Trak?include_prereleases&label=release"></a>
+  <a href="https://github.com/Kathir-D/Trak/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Kathir-D/Trak/actions/workflows/ci.yml/badge.svg?branch=main"></a>
+  <a href="https://github.com/Kathir-D/Trak/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/Kathir-D/Trak?include_prereleases&amp;label=release"></a>
   <a href="#install"><img alt="Homebrew: kathir-d/tap/trak" src="https://img.shields.io/badge/homebrew-kathir--d%2Ftap%2Ftrak-FBB040?logo=homebrew&logoColor=white"></a>
   <img alt="macOS 14.2+" src="https://img.shields.io/badge/macOS-14.2%2B-000000?logo=apple&logoColor=white">
   <img alt="Rust" src="https://img.shields.io/badge/Rust-2024-DEA584?logo=rust&logoColor=white">
@@ -43,12 +44,13 @@
 | 🕘 **History and Info** | tracks played this session; everything AppleScript exposes about the current track |
 | ⚙️ **Settings** | `,` or `?` (or `trak config`): a checklist where changes apply live, with every key beside it |
 | 🔎 **Search, playlists, queue, library** | optional, with a Spotify Client ID (**unverified** against a live account) |
-| 🔌 **Plays well with others** | shows Sonar's ducking, detects headless-spotify, never fights either |
+| 🔌 **Plays well with others** | shows Sonar's ducking, detects headless-spotify, never fights either — see the caveats below |
 | ⌨️ **shpotify's commands** | `trak play`, `vol`, `status --json` and the rest, for scripts |
 
 ## Install
 
-Needs macOS 14.2 or newer and the Spotify desktop app:
+Needs macOS 14.2 or newer and the Spotify desktop app (`brew install --cask spotify` if you do
+not have it — Trak never launches Spotify for you):
 
 ```sh
 brew install kathir-d/tap/trak
@@ -105,14 +107,14 @@ the right, collapsing to a compact strip when it gets small.
 | --- | --- |
 | `space` | play / pause |
 | `n` / `p` | next / previous |
-| `←` / `→` | previous / next tab |
+| `←` / `→` | previous / next tab — or the focused pane's own horizontal control |
 | `↑` / `↓` | move in a list, and focus into one |
-| `esc` | leave the list, then the tab, then the overlay |
+| `esc` | leave a focused list, or close an open album / artist / playlist page |
 | `+` `-` | volume ±10 (a setting) |
 | `m` | mute (and back to the volume you had) |
 | `s` / `r` / `R` | shuffle / repeat off → all → one / replay the track |
 | `a` / `v` | art ↔ visualizer / next visualizer style |
-| `j` `k` `enter` | move in a list / play the selection |
+| `j` `k` `enter` | move in a list / play the selection (History and the Web tabs) |
 | `tab` `shift-tab`, `1`–`6` | change tab |
 | `L` | full-screen lyrics |
 | `c` | copy the track's share link |
@@ -127,7 +129,7 @@ open an artist or album, `P` add to a playlist, `X` remove from the open playlis
 | | **B** — no setup | **A** — with a Client ID |
 | --- | --- | --- |
 | Needs | the Spotify desktop app | the desktop app **and** a free Spotify developer app |
-| Works on Free | yes | search, library and playlists yes; add-to-queue needs Premium (Spotify's rule) |
+| Works on Free | yes | search, library and playlists yes; add-to-queue needs Premium (Spotify's rule) *(unverified live)* |
 | Now Playing, art, lyrics, visualizer, history, CLI | ✅ | ✅ |
 | Search, playlists, queue, liked songs, library | tabs explain what to add | ✅ *(unverified live)* |
 
@@ -170,6 +172,7 @@ keys take defaults, and a corrupt file is renamed to `config.toml.bak`.
 | | `source` | `auto` (real audio, falling back to simulated), `simulated` |
 | `[input]` | `mouse` | `true`, `false` |
 | | `volume_step` | `10` |
+| `[volume]` | `control` | `spotify`, `system` |
 | `[notifications]` | `song_change` | `false`, `true` |
 | `[lyrics]` | `enabled` | `true`, `false` |
 | `[spotify]` | `client_id` | `""` (Version B) |
@@ -193,7 +196,7 @@ Jane Remover · Census Designated
 volume 100
 ```
 
-On a terminal that also gets a progress bar and a volume meter, and the artist's name in bold.
+On a terminal that also gets a progress bar and a volume meter, the title in bold and the artist line dimmed.
 Piped or redirected, the same command prints clean text with no escape codes — so
 `trak status | cat` is safe to put in a script.
 
@@ -213,8 +216,8 @@ Piped or redirected, the same command prints clean text with no escape codes —
 | `trak play artist <name>` | search artists, play the best match | `Playing Massive Attack` |
 | `trak play list <name>` | search playlists, play the best match | `Playing Massive Attack on Repeat · 3 tracks` |
 | `trak play uri <uri>` | play a URI, spelt the way shpotify did | *(silent)* |
-| `trak pause` | toggles play/pause, as shpotify's did | `Pausing Spotify.` / silent when already paused |
-| `trak stop` | pause if playing; Spotify has no `stop` command | `Pausing Spotify.` / silent |
+| `trak pause` | toggles play/pause, as shpotify's did | *(silent)* — it is a toggle, so there is nothing to report |
+| `trak stop` | pause if playing; Spotify has no `stop` command | `Pausing Spotify.` / `Spotify is already stopped.` |
 | `trak next` | skip | *(silent)* |
 | `trak prev` | back | *(silent)* |
 | `trak replay` | restart the track | *(silent)* |
@@ -226,13 +229,14 @@ Piped or redirected, the same command prints clean text with no escape codes —
 | `trak toggle repeat` | cycle repeat off → all → one | *(silent)* |
 | `trak share url` | print and copy the open.spotify.com link | `https://open.spotify.com/track/…` |
 | `trak share uri` | print and copy the spotify: URI | `spotify:track:…` |
-| `trak quit` | quit the Spotify app | *(silent)* |
+| `trak quit` | quit the Spotify app | `Quitting Spotify.` |
 
 `trak --help` lists them all. Exit codes are `0` on success, `1` on a runtime
 failure, `2` on a usage or setup problem. Commands that write to Spotify print
-nothing on success — the *next* `trak status` is the confirmation. The one
-exception is a play by name, which prints the match it chose: you named a song
-rather than a URI, and "the best match" is a decision worth seeing. It never
+nothing on success — the *next* `trak status` is the confirmation. The exceptions
+report something you asked about: `stop` and `quit` say what they did, and a play by
+name prints the match it chose: you named a song rather than a URI, and "the best
+match" is a decision worth seeing. It never
 prints a miss as a success — nothing found is `No results when searching for
 "…"`, exit 1.
 
@@ -267,8 +271,10 @@ The visualizer taps Spotify's audio only while it is on screen. On the Macs test
 so far macOS asks for nothing; if it ever refuses, the bars fall back to a simulated
 spectrum and Trak says once where to allow it:
 
-> System Settings › Privacy & Security › Screen & System Audio Recording › your
-> terminal.
+> System Settings › Privacy & Security › Screen & System Audio Recording › Trak.
+
+The tap is in Trak's own process, so unlike the Automation prompt above this one names
+Trak rather than your terminal.
 
 ## Made for a headless setup
 
@@ -277,6 +283,11 @@ and auto-pause) and [headless-spotify](https://github.com/Kathir-D/headless-spot
 (Spotify with no Dock icon). The contract Trak keeps with both is written down in
 [`docs/COMPAT.md`](docs/COMPAT.md) and the details that are easy to get wrong are
 measured in [`docs/APPLESCRIPT.md`](docs/APPLESCRIPT.md).
+
+Two honest caveats. Trak's half is measured; **the rows of COMPAT.md's matrix that need
+Sonar actually running are not** — ducking, the auto-pause handshake and the concurrent
+audio tap are reasoned about and unit-tested, not observed. And both siblings need
+macOS 15+, so on a 14.2 machine the combination is Trak alone.
 
 ## For contributors and agents
 
@@ -287,10 +298,13 @@ Start with [`AGENTS.md`](AGENTS.md), then [`docs/SPEC.md`](docs/SPEC.md) and
 ## Credits
 
 Trak descends from [shpotify](https://github.com/hnarayanan/shpotify) by Harish
-Narayanan (MIT). The visualizer is inspired by
+Narayanan (MIT), and the tab layout began as a study of
+[spotify-tui](https://github.com/bmar-pro/spotify-tui). The interface is
+[ratatui](https://github.com/ratatui/ratatui); the lyrics come from
+[LRCLIB](https://lrclib.net). The visualizer is inspired by
 [cava](https://github.com/karlstav/cava); its tap uses
 [cidre](https://github.com/yury/cidre). See
-[`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md).
+[`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) for the full list and licences.
 
 ## License
 
