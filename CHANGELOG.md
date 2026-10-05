@@ -7,6 +7,49 @@ is in [`docs/RELEASING.md`](docs/RELEASING.md).
 
 ## [Unreleased]
 
+Reports from the owner on 0.2.1, and every one of them the same shape: the state said
+where the keys were and the pane drew something else. A History tab you could scroll and
+could not see was in focus in; a focused pane whose border stayed grey; a Queue tab whose
+arrows did nothing; a Lyrics tab the arrows never got into; and a strip where every tab
+looked like the selected one.
+
+### Fixed
+
+- **The focused row is marked, scrolled or not.** History's `›` compared the drawn row
+  against the bare cursor, but the rows drawn start `history_scroll` in -- so on a scrolled
+  list it marked a row that had scrolled off the top, and the tab showed no focus at all
+  however far in the pane the keys were. The marker and the selected style now come from
+  one `selected`, so they cannot disagree.
+- **A focused pane says so.** The side pane's border only ever took the accent for the Web
+  tabs, because only they report their focus through `web.list_focus`. History and Lyrics
+  answer `j`/`k` and the arrows through the app's own focus, which nothing read, so those
+  two panes stayed dim however deep in them the keys were.
+- **The Queue tab's rows are a list.** The Free-tier fallback -- the recently played songs
+  that stand in for a queue the Web API will not give a Free account -- was drawn but not
+  a list: no cursor, no marker, and `enter` did nothing. The arrows move a marker over it
+  now and `enter`/`A`/`P` act on the selected row, on both it and the real "up next". A
+  write empties the queue, so the tab is suddenly the shorter list: the cursor is clamped
+  where the rows change, and an open album, artist or playlist page still wins over the
+  fallback behind it.
+- **`↑` at the top of an unfocused Web list hands the arrows back to the bar.** It was
+  swallowed rather than declined, so it took three presses to get the arrows home where it
+  took one everywhere else.
+- **The Queue tab refetches after a write.** The "already asked" flag is what stops the
+  re-read, and it was left set, so the queue that had just been added to was not read again
+  until the tab was re-entered. One extra request per write is the price; a queue that never
+  catches up with what was just added is not.
+- **The Lyrics pane takes the arrows like every other pane.** On this tab alone the arm that
+  scrolls the words ran ahead of the descent, so the top bar kept `j` and `k` for good --
+  against the keys table, which is unconditional: `↓` descends into the pane below and `↑`
+  comes back out to the bar. `j` descends first and scrolls second, `k` off the top of the
+  words comes back out, and the pane's border can light at last because anything can now put
+  the focus in it.
+- **Bold in the tab strip means "this is the tab you are on".** A focused pane used to bold
+  its whole title, which made every tab in it as heavy as the selected one, so the weight
+  said "the keys are down here" rather than which tab you are on -- and only while the pane
+  was *not* focused did the selected tab stand out by weight at all. The border is already
+  how a focused pane says so, and it says it with a colour change rather than a heavier one.
+
 ## [0.2.1] - 2026-10-04
 
 Every item here is a report from the owner running 0.2.0 on a second machine and

@@ -1359,5 +1359,20 @@ built on, which is the whole reason this phase exists.
 
 - Rebindable keys.
 - History: a Spotify quit and relaunch on the same track records that track a second time (10.4).
+- **Web API tabs: the marker and the border read two different focus signals.** On a Web tab
+  a single `j` from the top bar puts the focus in the pane (`app.focus == Pane`), which marks
+  row 0, but the border follows `web.list_focus` -- which is the *second* `j` -- so it stays
+  dim. Marker and border disagree for one keystroke on all five Web tabs. Pick which signal
+  the border should follow for Web tabs and make the two agree; the non-Web tabs already agree,
+  because History and Lyrics take the plain accent off `app.focus`.
+      > Left alone on purpose by 4e8c8ed: it is a one-keystroke disagreement on a tab the
+      > Web API half has still never met a real account on, and the fix is a decision (which
+      > signal is the truth for a Web tab) rather than an obvious correction. Three traps a
+      > later agent will hit in the same three lines: the History marker compares the cursor
+      > against a **window** offset, not the absolute cursor; the Queue fallback's row count
+      > lives in **state** (`queue_rows`, beside `RECENT_ON_QUEUE` in `app.rs`) and not in the
+      > view, because `web_rows` counts it and `clamp_queue_cursor` clamps to it; and
+      > `Tab::Lyrics` needed the descent added because its scroll arm runs first, so anything
+      > added above it runs after it again.
 - Idle card: when Spotify is running but every Apple Event times out (e.g. stuck on an admin
   dialog), say "Spotify is not answering" rather than "isn't running" (COMPAT "Status").
