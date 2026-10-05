@@ -885,6 +885,10 @@ Requires Sonar installed and running (`brew install --cask kathir-d/tap/sonar`) 
       > to read what Sonar shows. Trak's half is measured (3.9: a skip from any source reaches Trak
       > in ~173 ms through the notification). **[owner]**: skip in Trak, watch Sonar's title; skip in
       > Sonar, watch Trak.
+      > Re-checked 2026-10-05 for 0.2.2, still blocked the same way. Sonar 0.1.3 is installed and
+      > running, and its status item is now *reachable* — System Events reports `menu bar item 8 of
+      > menu bar 1` with `description "status menu"` — but `name` and `AXTitle` are both empty, so
+      > there is still nothing to read and nothing to assert.
 - [ ] 10.2 Ducking: Trak shows the Sonar badge (needs Sonar prompt 1) and stays consistent; the volume
       meter is not corrupted; `m` is disabled during a duck.
       > 2026-10-01: blocked here. Sonar's Auto-Pause has never been switched on on this Mac (no saved
@@ -904,6 +908,8 @@ Requires Sonar installed and running (`brew install --cask kathir-d/tap/sonar`) 
 - [ ] 10.6 Headless Spotify: badge + full control, **when Spotify honours LSUIElement again (R7)**;
       until then leave unchecked and say so.
       > 2026-10-01: still R7 — `headless-spotify status --json` reports `"headless":false`.
+      > Re-checked 2026-10-05 for 0.2.2: still `"headless":false, "dock":"visible"`, so this stays
+      > unchecked exactly as the item says. Nothing else about it moved.
 - [ ] 10.7 Visualizer taps concurrently with Sonar's tap without either failing.
       > Blocked like 10.2 (Sonar's tap only runs with Auto-Pause on). Both are private process taps
       > on disjoint process sets (Sonar excludes Spotify; Trak includes only Spotify), so no conflict
