@@ -37,6 +37,14 @@ pub const HISTORY_CAP: usize = 500;
 /// selection is clamped to, or the cursor can point at a row that is not there.
 pub const HISTORY_VIEW: usize = 200;
 
+/// How many songs the Queue tab shows when the Web API has no queue to show.
+///
+/// Here rather than in `web_tabs.rs` beside the `HISTORY_VIEW` it belongs with,
+/// because the cap is state: `web_rows` counts it and `App::queue_fallback` draws
+/// it, and a count in the view and a count in the state that are two constants
+/// with the same name is a way to have one of them mean something else.
+pub const RECENT_ON_QUEUE: usize = 12;
+
 /// How long a toast stays up (TODO 4.8).
 const TOAST_SECS: f64 = 2.5;
 
@@ -1465,6 +1473,19 @@ impl App {
         self.history.iter().rev().nth(self.history_cursor)
     }
 
+    /// The rows the Queue tab falls back to when the Web API has no queue
+    /// to show: the session's history, newest first, capped. `queue_lines`
+    /// draws them, and from here they are a list like any other -- the
+    /// cursor the arrows move, and `enter` plays.
+    pub fn queue_fallback(&self) -> impl Iterator<Item = &HistoryEntry> {
+        self.history.iter().rev().take(RECENT_ON_QUEUE)
+    }
+
+    /// The fallback row the Queue tab's cursor is on, if there is one.
+    pub fn queue_fallback_row(&self) -> Option<&HistoryEntry> {
+        self.queue_fallback().nth(self.web.queue_cursor)
+    }
+
     /// The highest cursor value: the last row of the list.
     ///
     /// Every row is reachable now that the view scrolls. This used to stop at
@@ -1600,7 +1621,12 @@ pub fn update(mut app: App, event: Event) -> Updated {
         }
 
         Event::Queue(result) => match result {
-            Ok(q) => app.web.queue = q,
+            Ok(q) => {
+                app.web.queue = q;
+                // A queue that lands shorter than the cursor was leaves it on a row
+                // that is not there, which is a marked row nobody can see.
+                clamp_queue_cursor(&mut app);
+            }
             Err(e) => app.toast(e.notice()),
         },
 
@@ -1628,6 +1654,16 @@ pub fn update(mut app: App, event: Event) -> Updated {
                 // emptied queue is fetched again the next time it is shown, so
                 // the track just added is there rather than hiding until restart.
                 app.web.queue = Queue::default();
+                // The flag above is what stops that fetch, so it has to go
+                // with the queue: leaving it set meant "asked" stayed true and
+                // the emptied queue was not re-read until the tab was
+                // re-entered, which is not "the next time it is shown". One
+                // extra request per write is the price; a queue that never
+                // catches up with what was just added is not a price worth
+                // paying.
+                app.web.asked.queue = false;
+                // Which rows the tab is showing just changed under the cursor.
+                clamp_queue_cursor(&mut app);
             }
         }
 
@@ -1976,7 +2012,20 @@ fn web_tab_key(
     commands: &mut Vec<PlayerCommand>,
     web: &mut Vec<WebJob>,
 ) -> bool {
-    let queue_uri = |app: &App| -> Option<String> { app.web.row_uri(app.tab) };
+    let queue_uri = |app: &App| -> Option<String> {
+        // With no "up next" to show, the Queue tab's rows are the
+        // recently played fallback, so its `enter` and `A` are that
+        // row's track rather than nothing at all.
+        //
+        // An open page still wins: a page is its own list, and `enter`
+        // on a page must act on the page's row rather than on a row
+        // that scrolled off behind it.
+        if app.tab == Tab::Queue && app.web.open.is_none() && app.web.queue.upcoming.is_empty() {
+            app.queue_fallback_row().and_then(|e| e.track.uri.clone())
+        } else {
+            app.web.row_uri(app.tab)
+        }
+    };
     // **The navigation keys are the pane's only while the pane has the focus.** On
     // the top bar `←`/`→`/`↑`/`↓`/`h`/`l`/`j`/`k` belong to the tab strip and to the
     // descent, and the caller falls through to handle them there. See [`App::focus`].
@@ -2043,8 +2092,13 @@ fn web_tab_key(
             if !app.web.list_focus {
                 if down {
                     app.web.list_focus = true;
+                    return true;
                 }
-                return true;
+                // `↑` with the list not focused is the pane's to decline: the level
+                // above hands the arrows back to the top bar, which is the second
+                // half of "up off the top row leaves it" (owner, 2026-10-03: the
+                // arrows work "like any other software").
+                return false;
             }
             if !down && web_cursor(app) == 0 {
                 app.web.list_focus = false;
@@ -2244,6 +2298,13 @@ impl WebState {
         Some(WebJob::More(what, after))
     }
 
+    /// The URI of the row `tab`'s own cursor is on, from the list the Web API
+    /// supplied for it.
+    ///
+    /// Not from whichever rows the tab is *drawing*: the Queue tab falls back to
+    /// the session's history when there is no queue to show, and that list is
+    /// [`App`] state rather than [`WebState`], so the fallback is the caller's to
+    /// add -- see `queue_rows` for the count both sides agree on.
     pub fn row_uri(&self, tab: Tab) -> Option<String> {
         if self.open.is_some() {
             return self.open_row_uri();
@@ -2349,6 +2410,10 @@ fn commit_library_section(app: &mut App) {
 /// moving a cursor nobody could see, and the tracks on that page were reachable
 /// only with the mouse (owner, 2026-10-03: "make sure everything can be
 /// controlled with only a keyboard"). The page wins while it is open.
+///
+/// The Queue tab's rows are whichever list it is showing: the Web API's "up
+/// next" on Premium, or the session's recent history when there is no queue
+/// to show (Free tier) -- see [`App::queue_fallback`].
 pub fn web_rows(app: &App) -> usize {
     let web = &app.web;
     if web.open.is_some() {
@@ -2358,7 +2423,7 @@ pub fn web_rows(app: &App) -> usize {
         Tab::Search => web.group_rows(web.group).len(),
         Tab::Playlists => web.playlists.items.len(),
         Tab::Liked => web.liked.items.len(),
-        Tab::Queue => web.queue.upcoming.len(),
+        Tab::Queue => queue_rows(app),
         Tab::Library => match web.library.section {
             LibrarySection::Albums => web.library.albums.items.len(),
             LibrarySection::Artists => web.library.artists.items.len(),
@@ -2366,6 +2431,32 @@ pub fn web_rows(app: &App) -> usize {
         },
         _ => 0,
     }
+}
+
+/// How many rows the Queue tab is showing, which is not always the queue.
+///
+/// The Web API's "up next" on Premium; the session's recent history when there is
+/// no queue to show, which is every Free account (`docs/WEB-API.md`) -- see
+/// [`App::queue_fallback`]. The one count the arrows, the marker and `enter` all
+/// agree on, which is why it is a function rather than three places asking the
+/// same question slightly differently.
+pub fn queue_rows(app: &App) -> usize {
+    if app.web.queue.upcoming.is_empty() {
+        app.queue_fallback().count()
+    } else {
+        app.web.queue.upcoming.len()
+    }
+}
+
+/// Keep the Queue tab's cursor on a row that exists.
+///
+/// The rows under the cursor change without the arrows moving: a write empties
+/// the queue, so the tab is suddenly the shorter fallback list, and a queue that
+/// lands can be shorter than the cursor already was. A cursor past the end marks
+/// no row, so the pane looks unfocused with its border lit and `enter` does
+/// nothing, and `k` walks it back a row at a time without drawing anything.
+fn clamp_queue_cursor(app: &mut App) {
+    app.web.queue_cursor = app.web.queue_cursor.min(queue_rows(app).saturating_sub(1));
 }
 
 /// Which row of the focused tab the cursor is on.
@@ -4041,6 +4132,165 @@ mod tests {
         );
     }
 
+    /// The Queue tab's "up next" is a list like any other: the first `j`
+    /// from the pane focuses it without skipping a row, and the next
+    /// moves it.
+    #[test]
+    fn the_queue_up_next_is_a_list_the_arrows_can_drive() {
+        let mut app = on_tab(Tab::Queue);
+        app.web.queue = Queue {
+            now_playing: None,
+            upcoming: vec![a_track("1", "Teardrop"), a_track("2", "Angel")],
+        };
+        // From the bar, `j` descends into the pane...
+        let (app, _) = press(app.clone(), 'j');
+        assert_eq!(app.focus, Focus::Pane, "the first `j` goes down");
+        // ...the next `j` focuses the list on its top row...
+        let (app, _) = press(app.clone(), 'j');
+        assert!(app.web.list_focus);
+        assert_eq!(app.web.queue_cursor, 0, "focusing does not skip a row");
+        // ...and the one after that moves it.
+        let (app, _) = press(app, 'j');
+        assert_eq!(app.web.queue_cursor, 1);
+    }
+
+    /// With no "up next" -- the Free tier, where Spotify does not tell
+    /// the Web API what is queued -- the Queue tab's rows are the
+    /// session's recent history, and they are a list like any other:
+    /// the arrows move the cursor over them and `enter` plays the row
+    /// it is on.
+    #[test]
+    fn the_queue_fallback_is_a_list_the_arrows_and_enter_can_drive() {
+        let mut app = on_tab(Tab::Queue);
+        // The session's history, oldest first; the tab shows it newest
+        // first, like the History tab.
+        for n in 0..3 {
+            app.history.push(HistoryEntry {
+                track: crate::player::TrackInfo {
+                    title: format!("Track {n}"),
+                    artist: "Jane Remover".into(),
+                    uri: Some(format!("spotify:track:t{n}")),
+                    ..crate::player::fake::sample_track()
+                },
+                at: std::time::Instant::now(),
+            });
+        }
+        assert_eq!(web_rows(&app), 3, "the fallback rows, not zero");
+
+        let (app, _) = press_in_pane(app.clone(), 'j');
+        assert!(app.web.list_focus);
+        assert_eq!(app.web.queue_cursor, 0, "the newest row");
+        let (app, _) = press_in_pane(app.clone(), 'j');
+        assert_eq!(app.web.queue_cursor, 1, "and the arrows move it");
+        let (app, _) = press_in_pane(app, 'k');
+        assert_eq!(app.web.queue_cursor, 0);
+        // `enter` plays the row the cursor is on, which is the newest
+        // track of the session.
+        let (_, cmds) = press_in_pane(app, '\n');
+        assert_eq!(
+            cmds,
+            vec![PlayerCommand::PlayUri("spotify:track:t2".into())]
+        );
+    }
+
+    /// An empty fallback is an empty list: `j` says there is nothing to
+    /// focus rather than pretending.
+    #[test]
+    fn an_empty_queue_fallback_has_nothing_to_focus() {
+        let app = on_tab(Tab::Queue);
+        assert_eq!(web_rows(&app), 0, "no queue and no history");
+        let (app, _) = press_in_pane(app, 'j');
+        assert!(!app.web.list_focus);
+    }
+
+    /// **The rows under the cursor can change without the arrows moving, and
+    /// the cursor follows them down.**
+    ///
+    /// A write empties the queue -- that is how the track just added gets
+    /// fetched again -- and the Queue tab is then showing the much shorter
+    /// fallback list. A cursor left where the old "up next" had it marks no
+    /// row at all: the pane looks empty of focus with its border lit, `enter`
+    /// does nothing, and `k` walks it back a row at a time without drawing
+    /// anything on the way.
+    #[test]
+    fn a_write_that_empties_the_queue_leaves_the_cursor_on_a_row() {
+        let mut app = on_tab(Tab::Queue);
+        app.web.queue = Queue {
+            now_playing: None,
+            upcoming: (0..20)
+                .map(|n| a_track(&n.to_string(), &format!("Up {n}")))
+                .collect(),
+        };
+        app.web.queue_cursor = 15;
+        for n in 0..3 {
+            app.history.push(HistoryEntry {
+                track: crate::player::TrackInfo {
+                    title: format!("Track {n}"),
+                    artist: "Jane Remover".into(),
+                    uri: Some(format!("spotify:track:t{n}")),
+                    ..crate::player::fake::sample_track()
+                },
+                at: std::time::Instant::now(),
+            });
+        }
+        let app = update(app, Event::WebWrote(Ok(()))).app;
+        assert_eq!(queue_rows(&app), 3, "the fallback is what is showing now");
+        assert!(
+            app.web.queue_cursor < queue_rows(&app),
+            "the cursor is past the end of the list it is on: {} of {}",
+            app.web.queue_cursor,
+            queue_rows(&app)
+        );
+        assert_eq!(app.web.queue_cursor, 2, "on the last row, which is a row");
+        // And that row is playable, which is the point of clamping it.
+        let (app, _) = press_in_pane(app.clone(), 'j');
+        let (app, _) = press_in_pane(app, 'j');
+        let (_, cmds) = press_in_pane(app, '\n');
+        assert_eq!(
+            cmds,
+            vec![PlayerCommand::PlayUri("spotify:track:t0".into())]
+        );
+    }
+
+    /// **An open page still wins over the Queue tab's fallback.** A page is its
+    /// own list, and `enter` on a page acts on the page's row -- otherwise the
+    /// keys play something from behind the page nobody is looking at.
+    #[test]
+    fn an_open_page_wins_over_the_queue_fallback() {
+        let mut app = on_tab(Tab::Queue);
+        app.history.push(HistoryEntry {
+            track: crate::player::TrackInfo {
+                title: "Old".into(),
+                artist: "Jane Remover".into(),
+                uri: Some("spotify:track:history".into()),
+                ..crate::player::fake::sample_track()
+            },
+            at: std::time::Instant::now(),
+        });
+        app.web.open = Some(Open::Album("alb1".into()));
+        app.web.open_track_page = vec![crate::web::api::Track {
+            id: "one".into(),
+            name: "One".into(),
+            uri: "spotify:track:page".into(),
+            duration_ms: 200_000,
+            track_number: None,
+            disc_number: None,
+            artists: vec![crate::web::api::Artist {
+                id: "ar1".into(),
+                name: "A".into(),
+                uri: "spotify:artist:ar1".into(),
+                images: Vec::new(),
+            }],
+            album: None,
+        }];
+        let (_, cmds) = press_in_pane(app, '\n');
+        assert_eq!(
+            cmds,
+            vec![PlayerCommand::PlayUri("spotify:track:page".into())],
+            "enter acted on the page's row, not on the fallback behind it"
+        );
+    }
+
     /// **The down arrow focuses into a tab, the up arrow off its top row leaves
     /// it**, and a tab with nothing in it has nothing to focus.
     #[test]
@@ -4090,6 +4340,61 @@ mod tests {
         assert!(app.web.list_focus);
         let (app, _) = press(app, crate::tui::app::ARROW_RIGHT);
         assert!(!app.web.list_focus, "the focus belonged to that tab");
+    }
+
+    /// **`↑` with the list not focused hands the arrows back to the bar**
+    /// -- the second half of "up off the top row leaves it".
+    ///
+    /// The pane used to answer `k` with `true` even when the list was
+    /// already unfocused, so once `↑` off the top row had left the list,
+    /// no `↑` ever reached the level above and the arrows could not get
+    /// back to the top bar on any tab *with* rows -- only out of a list
+    /// that was empty, which is why `the_arrows_are_a_tiered_pair` (a
+    /// Library with no albums loaded) never caught it (owner, 2026-10-05:
+    /// "in the queue tab when i arrow down ... the arrow doesn't let me
+    /// scroll anything" was arrows stuck for the same reason).
+    #[test]
+    fn up_off_the_list_returns_the_arrows_to_the_bar() {
+        let mut app = on_tab(Tab::Playlists);
+        let playlist = |id: &str, name: &str| crate::web::api::Playlist {
+            id: id.into(),
+            name: name.into(),
+            uri: format!("spotify:playlist:{id}"),
+            description: None,
+            images: Vec::new(),
+            // `Some` means the track list came with it, which is what
+            // decides whether trak may add to it.
+            contents: Some(crate::web::api::PlaylistContents {
+                total: Some(2),
+                items: Vec::new(),
+            }),
+        };
+        app.web.playlists = crate::web::api::Page {
+            items: vec![playlist("p1", "One"), playlist("p2", "Two")],
+            next: None,
+        };
+        let (app, _) = press(app, 'j');
+        assert_eq!(app.focus, Focus::Pane, "`j` from the bar goes down");
+        let (app, _) = press(app, 'j');
+        assert!(app.web.list_focus, "and the next `j` goes in");
+        let (app, _) = press(app, 'j');
+        assert_eq!(web_cursor(&app), 1, "and moves");
+        let (app, _) = press(app, 'k');
+        assert_eq!(web_cursor(&app), 0, "back to the top row");
+        assert!(app.web.list_focus);
+        let (app, _) = press(app, 'k');
+        assert!(!app.web.list_focus, "up off the top row leaves the list");
+        assert_eq!(app.focus, Focus::Pane, "but not the pane");
+        // One more `↑` is the pane's to decline, so the level above
+        // hands the arrows home -- and they work there again.
+        let (app, _) = press(app, 'k');
+        assert_eq!(app.focus, Focus::Bar, "the arrows are back on the bar");
+        let (app, _) = press(app, crate::tui::app::ARROW_RIGHT);
+        assert_eq!(
+            app.tab,
+            Tab::Playlists.next(),
+            "and the bar changes tab with them"
+        );
     }
 
     /// The volume meter is a slider: where you click is the volume you get.
@@ -5369,8 +5674,13 @@ mod tests {
     fn a_landed_write_makes_the_queue_tab_fetch_again() {
         let mut app = on(Tab::Queue);
         app.web.queue.upcoming = vec![a_track("1", "Teardrop")];
+        app.web.mark_asked(Tab::Queue);
         let app = update(app, Event::WebWrote(Ok(()))).app;
         assert!(app.web.queue.upcoming.is_empty());
+        // The flag is what stops the re-fetch, so the emptied queue is
+        // asked for again the next time the tab is shown -- not only
+        // when the tab is re-entered.
+        assert!(!app.web.asked_for(Tab::Queue));
     }
 
     #[test]

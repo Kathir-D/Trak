@@ -35,9 +35,6 @@ use crate::web::api::{Page, Queue, SearchResults};
 /// what order they are in, and so `group_row` has one index per heading.
 const GROUPS: [&str; 4] = ["Tracks", "Albums", "Artists", "Playlists"];
 
-/// How many songs the Queue tab shows when the Web API has no queue to show.
-const RECENT_ON_QUEUE: usize = 12;
-
 /// The lines for whichever Web API tab is showing. Called from `render.rs` in
 /// place of the History/Info/Lyrics lines.
 pub fn lines(app: &App, theme: &Theme) -> Vec<Line<'static>> {
@@ -388,24 +385,45 @@ fn queue_lines(app: &App, theme: &Theme, width: usize) -> Vec<Line<'static>> {
             Theme::dim().add_modifier(Modifier::ITALIC),
         ));
         // What trak does know. `history` is oldest-first, so it is walked
-        // backwards for the History tab's newest-first order.
+        // backwards for the History tab's newest-first order. The rows are
+        // a list like any other -- the cursor the arrows move marks them --
+        // because a fallback the pane cannot move through is a pane whose
+        // arrows do nothing (owner, 2026-10-05: the queue arrows "don't
+        // let me scroll anything").
         let recent: Vec<String> = app
-            .history
-            .iter()
-            .rev()
-            .take(RECENT_ON_QUEUE)
-            .map(|h| format!("   {} — {}", h.track.artist, h.track.title))
+            .queue_fallback()
+            .map(|h| {
+                if h.track.artist.is_empty() {
+                    h.track.title.clone()
+                } else {
+                    format!("{} — {}", h.track.artist, h.track.title)
+                }
+            })
             .collect();
         if recent.is_empty() {
             out.push(hint("  and nothing has played yet this session"));
             return out;
         }
         out.push(Line::from(Span::styled("  Recently played", Theme::dim())));
-        out.extend(recent.into_iter().map(|line| fixed_line(&line)));
+        out.extend(recent.iter().enumerate().map(|(i, line)| {
+            row_line(
+                line,
+                i == app.web.queue_cursor,
+                theme,
+                app.focus == crate::tui::app::Focus::Pane,
+            )
+        }));
         return out;
     }
     out.push(Line::from(Span::styled("  Up next", Theme::dim())));
-    out.extend(upcoming.iter().map(|track| fixed_line(&track.to_string())));
+    out.extend(upcoming.iter().enumerate().map(|(i, track)| {
+        row_line(
+            &track.to_string(),
+            i == app.web.queue_cursor,
+            theme,
+            app.focus == crate::tui::app::Focus::Pane,
+        )
+    }));
     out
 }
 
@@ -647,8 +665,9 @@ fn row_line(text: &str, selected: bool, theme: &Theme, focused: bool) -> Line<'s
     Line::from(Span::styled(format!("{marker} {text}"), style))
 }
 
-/// A row in a list the user cannot move a cursor through -- the queue's up next
-/// and the three Library sections, none of which has a cursor in the state.
+/// A row in a list the user cannot move a cursor through -- the Liked
+/// tab's tracks and the three Library sections, none of which has a
+/// cursor in the state.
 ///
 /// A cell further in than [`row_line`], because these rows belong to the heading
 /// above them rather than to the tab, and no `›`: a marker that never moves is
@@ -728,7 +747,7 @@ mod tests {
     use super::*;
     use crate::player::parse::parse;
     use crate::testutil::fixture;
-    use crate::tui::app::{Connection, Event, update};
+    use crate::tui::app::{Connection, Event, RECENT_ON_QUEUE, update};
     use crate::web::api::{
         Album, Artist, FakeLibrary, Library, Playlist, PlaylistContents, Track, TrackItem,
     };
@@ -1165,7 +1184,9 @@ mod tests {
     // -- 7.8 queue -----------------------------------------------------------
 
     /// 7.8: now playing, then up next. The read is not Premium-gated, so
-    /// nothing here talks about Premium.
+    /// nothing here talks about Premium. The rows are list rows, so
+    /// they carry the mark cell -- blank while the bar has the
+    /// arrows, which is where this app sits.
     #[test]
     fn the_queue_tab_is_now_playing_then_up_next() {
         let mut app = app_on(Tab::Queue);
@@ -1181,8 +1202,8 @@ mod tests {
             concat!(
                 "▶ Frank Ocean — Nights\n",
                 "  Up next\n",
-                "   Frank Ocean — Solo\n",
-                "   Frank Ocean — Self Control",
+                "  Frank Ocean — Solo\n",
+                "  Frank Ocean — Self Control",
             ),
         );
         assert!(!shown(&app).to_lowercase().contains("premium"));
@@ -1220,6 +1241,73 @@ mod tests {
         let newer = text.find("Self Control").unwrap();
         let older = text.find("— Solo").unwrap();
         assert!(newer < older, "newest first: {text}");
+    }
+
+    /// The Queue tab's rows are marked like every other list: the
+    /// `›` follows the cursor, and only while the pane has the
+    /// arrows. Both lists it can show -- "up next" and the
+    /// recently played fallback -- are the same kind of list.
+    #[test]
+    fn the_queue_rows_are_marked_while_the_pane_has_the_focus() {
+        let mut app = app_on(Tab::Queue);
+        app.web.queue = Queue {
+            now_playing: None,
+            upcoming: vec![
+                track("Solo", "Frank Ocean"),
+                track("Self Control", "Frank Ocean"),
+            ],
+        };
+        // On the bar nothing is marked, even with the cursor on a row.
+        let text = shown(&app);
+        assert!(text.contains(" Frank Ocean — Solo"), "{text}");
+        assert!(!text.contains('›'), "{text}");
+
+        // In the pane: into the list, then to the second row.
+        let app = in_pane(app);
+        let app = update(app, Event::Key('j')).app;
+        let app = update(app, Event::Key('j')).app;
+        assert_eq!(app.web.queue_cursor, 1);
+        let text = shown(&app);
+        assert!(
+            text.contains("› Frank Ocean — Self Control"),
+            "the row the cursor is on is marked: {text}"
+        );
+        assert!(text.contains(" Frank Ocean — Solo"), "{text}");
+        assert_eq!(
+            text.lines().filter(|l| l.contains('›')).count(),
+            1,
+            "and only that row: {text}"
+        );
+
+        // The fallback rows are marked the same way.
+        let mut app = app_on(Tab::Queue);
+        app.web.queue.now_playing = Some(track("Nights", "Frank Ocean"));
+        for (title, artist) in [("Solo", "Frank Ocean"), ("Self Control", "Frank Ocean")] {
+            app.history.push(crate::tui::app::HistoryEntry {
+                track: crate::player::TrackInfo {
+                    title: title.into(),
+                    artist: artist.into(),
+                    ..crate::player::fake::sample_track()
+                },
+                at: std::time::Instant::now(),
+            });
+        }
+        let app = in_pane(app);
+        let app = update(app, Event::Key('j')).app;
+        let app = update(app, Event::Key('j')).app;
+        let text = shown(&app);
+        // The cursor moved to the second row, which is the
+        // *older* track: the fallback is newest first, so the
+        // last track pushed is row 0.
+        assert!(
+            text.contains("› Frank Ocean — Solo"),
+            "the fallback row under the cursor: {text}"
+        );
+        assert_eq!(
+            text.lines().filter(|l| l.contains('›')).count(),
+            1,
+            "and only that row: {text}"
+        );
     }
 
     /// **The selected row is marked with the album's colour, not reversed video.**

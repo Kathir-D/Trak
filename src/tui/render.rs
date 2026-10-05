@@ -1642,7 +1642,18 @@ fn draw_tabs(f: &mut Frame, area: Rect, app: &App, theme: &Theme, regions: &mut 
     // which is also what stops it being the flat grey slab the owner also asked
     // about: a pane's border is the one thing on screen that is neither text nor
     // picture, so it is where a colour can go without competing with either.
-    let focused = app.web.list_focus;
+    //
+    // Which list the arrows are on has two answers. The Web tabs report it
+    // through `web.list_focus`; History and Lyrics answer `j`/`k` and the
+    // arrows themselves and report it through `app.focus` -- and reading
+    // only the Web flag left those two panes dim forever, however deep in
+    // them the keys were (owner, 2026-10-03 and 2026-10-04: the pane
+    // never said it had the keys). Info is left out on purpose: nothing
+    // inside it answers the arrows, so a lit border there would say the
+    // keys go somewhere they do not.
+    let focused = app.web.list_focus
+        || (matches!(app.tab, Tab::History | Tab::Lyrics)
+            && app.focus == crate::tui::app::Focus::Pane);
     let block = pane_block(strip.line(), theme, focused);
     f.render_widget(block, area);
     // **The right pane's border is not grey.** Owner, 2026-10-03: "instead of a gray
@@ -2114,7 +2125,17 @@ fn history_lines<'a>(app: &'a App, theme: &'a Theme) -> Vec<Line<'a>> {
             .take(HISTORY_VIEW)
             .enumerate()
             .map(|(i, e)| {
-                let selected = i == app.history_cursor && app.focus == crate::tui::app::Focus::Pane;
+                // `i` counts rows in the *window*, and the window
+                // starts `history_scroll` in: the cursor's row here is
+                // the cursor minus the scroll. Comparing against the
+                // bare cursor marked a row that many places further
+                // down -- one that had scrolled off the top, so a
+                // scrolled history showed no focus at all however far
+                // in the pane the keys were (owner, 2026-10-05: "it
+                // just lets me scroll all the songs but never shows
+                // that its in focus").
+                let selected = i == app.history_cursor.saturating_sub(app.history_scroll)
+                    && app.focus == crate::tui::app::Focus::Pane;
                 let marker = if selected { "›" } else { " " };
                 let text = if e.track.artist.is_empty() {
                     e.track.title.clone()
@@ -2129,7 +2150,7 @@ fn history_lines<'a>(app: &'a App, theme: &'a Theme) -> Vec<Line<'a>> {
                 // Marked only while the **pane** has the focus, like everything else
                 // in it (owner, 2026-10-04). A row the arrows cannot reach should not
                 // look as though they can.
-                let style = if selected && app.focus == crate::tui::app::Focus::Pane {
+                let style = if selected {
                     theme.accent_style().add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
@@ -4088,6 +4109,61 @@ mod tests {
         let _ = (top, bottom, left, right);
     }
 
+    /// **History and Lyrics light up like a Web tab when the arrows are
+    /// in them** (owner, 2026-10-03 and 2026-10-04: the panes never
+    /// said they had the keys).
+    ///
+    /// `web.list_focus` is the Web tabs' signal, and those were the only
+    /// panes whose border ever took the accent. History and Lyrics answer
+    /// `j`/`k` and the arrows through `app.focus`, which nothing read, so
+    /// their border stayed dim however deep in them the keys were. The
+    /// side pane's left border is read from the buffer, like the test
+    /// above, because the border is the thing being claimed about.
+    #[test]
+    fn the_history_and_lyrics_panes_say_they_have_the_keys() {
+        let theme = Theme::default();
+        for tab in [Tab::History, Tab::Lyrics] {
+            let mut app = app_at(160, 40);
+            app.tab = tab;
+            // The side pane's left border: the first pair of adjacent
+            // rules on a middle row is Now Playing's right edge meeting
+            // the side pane's left edge, whatever width the split made.
+            let pane_x = {
+                let (buf, _) = render(160, 40, &app);
+                (1..158)
+                    .find(|x| {
+                        row_text(&buf, 20, *x, 1) == "│" && row_text(&buf, 20, *x + 1, 1) == "│"
+                    })
+                    .expect("two panes side by side")
+                    + 1
+            };
+            // From the top bar: dim, the unfocused look.
+            assert!(
+                buf_is_dim(160, 40, &app, pane_x, 20),
+                "{tab:?} from the bar is not dim"
+            );
+            // Inside the pane: the plain accent, and not dim.
+            app.focus = crate::tui::app::Focus::Pane;
+            assert!(
+                !buf_is_dim(160, 40, &app, pane_x, 20),
+                "{tab:?} inside the pane is still dim"
+            );
+            let (buf, _) = render(160, 40, &app);
+            assert_eq!(
+                buf[(pane_x, 20)].fg,
+                theme.accent_colour(),
+                "{tab:?} inside the pane is not the accent"
+            );
+        }
+    }
+
+    /// Whether one cell of a drawn frame is dim, for the border checks
+    /// that read the buffer rather than the styles that were passed in.
+    fn buf_is_dim(w: u16, h: u16, app: &App, x: u16, y: u16) -> bool {
+        let (buf, _) = render(w, h, app);
+        buf[(x, y)].modifier.contains(Modifier::DIM)
+    }
+
     /// **Nothing inside a pane is marked until the pane has the focus** (owner,
     /// 2026-10-04: "if I didn't press arrow down to go into the tab the text isn't
     /// highlighted, only when I'm inside the tab highlighted").
@@ -4143,6 +4219,80 @@ mod tests {
         assert!(
             (0..30).any(|y| row_text(&buf, y, 0, 120).contains('\u{203a}')),
             "the strip keeps its own marker, so the assertion above is about the row"
+        );
+    }
+
+    /// **The focused row stays marked once the list has scrolled**
+    /// (owner, 2026-10-05: "on the history tab it just lets me scroll
+    /// all the songs but never shows that its in focus").
+    ///
+    /// The rows drawn start `history_scroll` in, so the cursor's row
+    /// *in the window* is the cursor minus the scroll. Comparing against
+    /// the bare cursor landed the `›` on a row that many places further
+    /// down -- one that had scrolled off the top, which is why a
+    /// scrolled history looked unmarked however far in the pane the
+    /// keys were.
+    #[test]
+    fn the_focused_history_row_stays_marked_when_the_list_has_scrolled() {
+        let mut app = app_at(120, 30);
+        app.tab = Tab::History;
+        app.focus = crate::tui::app::Focus::Pane;
+        app.viewport = 20;
+        app.history_scroll = 6;
+        app.history_cursor = 10;
+        // Thirty entries in play order, so the newest is "Track 29" and
+        // the cursor's row is "Track 19", the tenth from the top of the
+        // view. The row the old comparison marked is "Track 13".
+        for i in 0..30 {
+            let mut t = crate::player::fake::sample_track();
+            t.title = format!("Track {i}");
+            t.uri = Some(format!("spotify:track:{i}"));
+            app.history.push(crate::tui::app::HistoryEntry {
+                track: t,
+                at: std::time::Instant::now(),
+            });
+        }
+        let history_rows = |app: &App| -> Vec<String> {
+            let (buf, _) = render(120, 30, app);
+            (0..30)
+                .map(|y| row_text(&buf, y, 0, 120))
+                .filter(|line| line.contains("Track "))
+                .collect()
+        };
+        // The cursor's own row carries the marker, and it is the only
+        // history row that does.
+        let rows = history_rows(&app);
+        let cursor_row = rows
+            .iter()
+            .find(|l| l.contains("Track 19"))
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            cursor_row.contains('\u{203a}'),
+            "the cursor's row is not marked once scrolled: {cursor_row:?}"
+        );
+        assert_eq!(
+            rows.iter().filter(|l| l.contains('\u{203a}')).count(),
+            1,
+            "more than one history row is marked: {rows:?}"
+        );
+        // And the row the scroll offset used to land on is not.
+        let stale_row = rows
+            .iter()
+            .find(|l| l.contains("Track 13"))
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            !stale_row.contains('\u{203a}'),
+            "the row below the cursor is marked: {stale_row:?}"
+        );
+        // From the top bar nothing is marked, scrolled or not -- the
+        // same rule as an unscrolled list (owner, 2026-10-04).
+        app.focus = crate::tui::app::Focus::Bar;
+        let from_the_bar = history_rows(&app);
+        assert!(
+            from_the_bar.iter().all(|l| !l.contains('\u{203a}')),
+            "nothing is marked from the top bar: {from_the_bar:?}"
         );
     }
 
@@ -4228,6 +4378,93 @@ mod tests {
             assert!(
                 distinct.len() > 1,
                 "({r},{g},{b}) produced one flat colour, not a gradient: {distinct:?}"
+            );
+        }
+    }
+
+    /// **The selected tab in the strip is bold *and* gradient-coloured
+    /// in the buffer** (owner, 2026-10-05: "the active tab is only
+    /// coloured, not bold").
+    ///
+    /// Read from the buffer rather than from the spans, because the
+    /// strip is drawn twice -- by the pane's block and, unfocused,
+    /// again over the border `paint_edges` put there -- so what is on
+    /// screen is the thing to claim about. Unfocused is the harder
+    /// case: an unselected label's spans are `Style::default()`, so
+    /// its cells show the border paint straight through, which is the
+    /// point -- the strip colours the selected tab and nothing else.
+    #[test]
+    fn the_selected_tab_in_the_strip_is_bold_and_gradient_coloured() {
+        use ratatui::style::Color;
+
+        let mut app = app_at(160, 40);
+        app.tab = Tab::Queue;
+        let (buf, _regions) = render(160, 40, &app);
+        // The side pane, found by its own left border: the first pair of adjacent
+        // rules on a middle row is Now Playing's right edge meeting the side pane's
+        // left edge.
+        let pane_x = (1..158)
+            .find(|x| row_text(&buf, 20, *x, 1) == "│" && row_text(&buf, 20, *x + 1, 1) == "│")
+            .expect("two panes side by side")
+            + 1;
+        // A numbered tab's selected form is "[n]Label" and its plain form is
+        // " n Label ", so the selected label is findable and is not the string an
+        // unselected neighbour is drawn as. Queue is tab 3 and Playlists is the tab
+        // beside it, so at this width both are always in the window.
+        //
+        // The strip rides the side pane's *top border*, which is found rather than
+        // assumed: the page keeps a menu bar of its own above the two panes, so row
+        // 0 is the menu bar and not the strip.
+        let (strip_y, sel_x, plain_x) = (0..6u16)
+            .find_map(|y| {
+                // Columns, not byte offsets: the row opens with a `│`, which is
+                // three bytes and one column, and `find` would hand back a byte
+                // offset and land the read two cells off.
+                let row: Vec<char> = row_text(&buf, y, pane_x, 160 - pane_x).chars().collect();
+                let at = |needle: &str| {
+                    let n: Vec<char> = needle.chars().collect();
+                    row.windows(n.len()).position(|w| w == n).map(|i| i as u16)
+                };
+                Some((y, pane_x + at("[3]Queue")?, pane_x + at("Playlists")?))
+            })
+            .expect("the tab strip is drawn on the pane's top border");
+        // Selected: every character is its own span, so every cell of the label is
+        // bold and carries a gradient colour of its own.
+        let mut fgs = Vec::new();
+        for x in sel_x..sel_x + "[3]Queue".chars().count() as u16 {
+            let cell = &buf[(x, strip_y)];
+            assert!(
+                cell.modifier.contains(Modifier::BOLD),
+                "the selected tab's cell ({x},{strip_y}) is not bold: {cell:?}"
+            );
+            assert_ne!(
+                cell.fg,
+                Color::Reset,
+                "the selected tab's cell ({x},{strip_y}) has no colour: {cell:?}"
+            );
+            fgs.push(cell.fg);
+        }
+        // A gradient, not one flat colour repeated.
+        assert!(
+            fgs.iter().any(|c| *c != fgs[0]),
+            "the selected tab is one flat colour, not a gradient: {fgs:?}"
+        );
+        // Unselected: neither bold nor coloured by the strip. The comparison is
+        // against a border cell the strip does not cover -- the pane's top-right
+        // corner, which `paint_edges` painted and nothing else did -- because an
+        // unselected label's spans are `Style::default()` and so leave the border
+        // paint in place rather than resetting it.
+        let corner = &buf[(160 - 1, strip_y)];
+        for x in plain_x..plain_x + "Playlists".chars().count() as u16 {
+            let cell = &buf[(x, strip_y)];
+            assert!(
+                !cell.modifier.contains(Modifier::BOLD),
+                "an unselected tab's cell ({x},{strip_y}) is bold: {cell:?}"
+            );
+            assert_eq!(
+                cell.fg, corner.fg,
+                "an unselected tab's cell ({x},{strip_y}) is coloured by the \
+                 strip, not by the border: {cell:?} vs {corner:?}"
             );
         }
     }
