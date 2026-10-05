@@ -362,6 +362,48 @@ One row per release, filled in from §4 and §7.
 | 0.1.1 | 2026-10-02 | `5b48141e9d57` | `b19d4b9` | Both install paths below, verbatim. |
 | 0.2.0 | 2026-10-03 | `dbbd2d04133b` | `3643d20` | Release and tap published; `brew audit --strict --online kathir-d/tap/trak` exit 0; `brew fetch kathir-d/tap/trak` resolves 0.2.0 after `brew update`; the tarball's sha256 matches the published `SHA256SUMS.txt` and the extracted binary answers `--version` and `status` against real Spotify. `brew install --formula ./Formula/trak.rb` no longer works on this machine (Homebrew refuses a formula outside a tap), so §1 step 4 was verified with `brew audit` plus extracting the tarball. **[owner]** a real `brew install` on a machine that has never had trak. |
 | 0.2.1 | 2026-10-04 | `182d073a2350` | `9e05109` | Both jobs green; `brew audit --strict --online kathir-d/tap/trak` and `brew style` clean against the released formula. The curl installer was checked against the real release (no quarantine attribute, `trak status` answers). Logged from the tag rather than from a §4 session, so the universal-binary and ad-hoc-signature lines were verified by `scripts/package-release.sh` on the runner and not re-checked here. |
+| 0.2.2 | 2026-10-05 | `953445944fe1` | `530c099` | §4 in full, below. `brew audit --strict --online` exit 0, `brew style` clean, `brew fetch kathir-d/tap/trak` resolves 0.2.2, and the curl installer installed and uninstalled the real release into a scratch `TRAK_INSTALL_DIR`. **[owner]** a real `brew install` on a machine that has never had trak (9.6). |
+
+### 0.2.2 verification, 2026-10-05
+
+```text
+$ curl -sL .../v0.2.2/SHA256SUMS.txt
+953445944fe11de2d57f5a984837690ba9f860e17375cdc4381d1c899835c88f  trak-0.2.2-macos.tar.gz
+$ shasum -a 256 -c SHA256SUMS.txt
+trak-0.2.2-macos.tar.gz: OK                      # the published number, not a local rebuild
+$ tar -tzf trak-0.2.2-macos.tar.gz
+trak-0.2.2/  trak-0.2.2/LICENSE  trak-0.2.2/THIRD-PARTY-NOTICES.md  trak-0.2.2/trak  trak-0.2.2/README.md
+$ file trak && lipo -archs trak
+Mach-O universal binary with 2 architectures: [x86_64 …] [arm64]
+x86_64 arm64
+$ codesign -dv trak 2>&1 | grep -E '^(CodeDirectory|Signature)'
+CodeDirectory v=20400 … flags=0x2(adhoc) hashes=1024+2 location=embedded
+Signature=adhoc
+$ codesign --verify --strict trak
+signature verifies
+$ xattr -l trak
+com.apple.provenance:              # not com.apple.quarantine: no Gatekeeper prompt
+$ ./trak --version
+trak 0.2.2
+$ brew audit --strict --online kathir-d/tap/trak        # exit 0, no output
+$ brew style kathir-d/tap/trak                         # 1 file inspected, no offenses
+$ brew update && brew fetch kathir-d/tap/trak
+✔︎ Formula trak (0.2.2)
+$ TRAK_INSTALL_DIR="$scratch" sh install.sh
+Downloading trak 0.2.2
+Checksum OK
+Installed trak 0.2.2 to $scratch/trak
+$ "$scratch/trak" --version && lipo -archs "$scratch/trak"
+trak 0.2.2
+x86_64 arm64
+$ TRAK_INSTALL_DIR="$scratch" sh install.sh --uninstall
+Removed $scratch/trak
+Settings and any Spotify login in ~/.config/trak were left alone.
+```
+
+`flags=0x2(adhoc)` with no `linker-signed`, which is the line TODO 1.8 turned on. §1 step 4's
+`brew install --formula ./Formula/trak.rb` was **not** run: this Homebrew refuses a formula
+outside a tap, as the 0.2.0 row records.
 
 ### 0.2.0 verification, 2026-10-03
 
