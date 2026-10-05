@@ -59,13 +59,27 @@ Then, in this order:
    ./scripts/package-release.sh
    ```
 
-   It fails loudly rather than shipping something odd: on a version mismatch, on a
-   missing slice, on a binary that is not both architectures, on a signature that
-   is not ad-hoc, on a tarball missing its license, on a binary whose `--version`
+It fails loudly rather than shipping something odd: on a version mismatch, on a
+   missing slice, on a binary that is not both architectures, on a signature that is
+   not ad-hoc, on a tarball missing its license, on a binary whose `--version`
    does not match. It leaves no staging directory behind, on success or failure.
+
+   **One thing it does not check is that the version is unreleased**, and it will
+   happily rebuild a version whose tag already exists (measured 2026-10-05: it
+   re-packaged 0.2.1 without a word). That matters because of step 4: a rebuild's
+   sha256 is *not* the published one (§9), so a local `dist/` tarball is only ever
+   evidence about your own machine.
 
 4. **Smoke-test the formula against that local tarball.** This is TODO 9.3's
    `Done when`, and it is the only chance to catch a formula that cannot install.
+
+   **What it can and cannot prove.** The local tarball's sha256 is *not* the one CI
+   will publish (§9: the ad-hoc signature covers the built bytes and gzip stamps a
+   timestamp in), so this step proves the *formula* installs and the *binary* runs —
+   not that a checksum matches. The checksum is proved in §4, against the published
+   asset, and the committed formula must go back to its placeholders afterwards:
+   CI rewrites `url` and `sha256` from the published numbers, and a local sha256
+   left in the file is a formula that cannot install for anyone.
 
    > **This Homebrew refuses a formula outside a tap** ("Homebrew requires formulae
    > to be in a tap, rejecting: ./Formula/trak.rb"), and `brew test trak` is ambiguous
@@ -347,6 +361,7 @@ One row per release, filled in from §4 and §7.
 | 0.1.0 | 2026-10-02 | `3339b815bb5c` | `92359db` | Workflow green. `brew audit --strict --online` failed: `version "0.1.0"` is redundant with the URL. Superseded by 0.1.1; the binary is the same. |
 | 0.1.1 | 2026-10-02 | `5b48141e9d57` | `b19d4b9` | Both install paths below, verbatim. |
 | 0.2.0 | 2026-10-03 | `dbbd2d04133b` | `3643d20` | Release and tap published; `brew audit --strict --online kathir-d/tap/trak` exit 0; `brew fetch kathir-d/tap/trak` resolves 0.2.0 after `brew update`; the tarball's sha256 matches the published `SHA256SUMS.txt` and the extracted binary answers `--version` and `status` against real Spotify. `brew install --formula ./Formula/trak.rb` no longer works on this machine (Homebrew refuses a formula outside a tap), so §1 step 4 was verified with `brew audit` plus extracting the tarball. **[owner]** a real `brew install` on a machine that has never had trak. |
+| 0.2.1 | 2026-10-04 | `182d073a2350` | `9e05109` | Both jobs green; `brew audit --strict --online kathir-d/tap/trak` and `brew style` clean against the released formula. The curl installer was checked against the real release (no quarantine attribute, `trak status` answers). Logged from the tag rather than from a §4 session, so the universal-binary and ad-hoc-signature lines were verified by `scripts/package-release.sh` on the runner and not re-checked here. |
 
 ### 0.2.0 verification, 2026-10-03
 

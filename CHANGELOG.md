@@ -5,7 +5,7 @@ All notable changes to Trak are recorded here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). How a release is cut
 is in [`docs/RELEASING.md`](docs/RELEASING.md).
 
-## [Unreleased]
+## [0.2.2] - 2026-10-05
 
 Reports from the owner on 0.2.1, and every one of them the same shape: the state said
 where the keys were and the pane drew something else. A History tab you could scroll and
@@ -320,7 +320,8 @@ a real account or a real permission prompt.
   universal (arm64 + x86_64) and **ad-hoc signed, not notarized**; neither
   install path sets a quarantine flag, so there is no Gatekeeper prompt.
 
-[Unreleased]: https://github.com/Kathir-D/Trak/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/Kathir-D/Trak/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/Kathir-D/Trak/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/Kathir-D/Trak/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/Kathir-D/Trak/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/Kathir-D/Trak/compare/v0.1.0...v0.1.1
