@@ -1119,6 +1119,26 @@ built on, which is the whole reason this phase exists.
       > Premium account still gets the real queue from the API, unchanged. `docs/WEB-API.md` §2
       > already records that only the **add** is Premium-gated; this is the read's empty case.
 
+- [x] 13.23 **Released as 0.2.1** (2026-10-04), tag `v0.2.1`, both CI jobs green.
+      > Verified by hand, the whole of `docs/RELEASING.md` §4: `SHA256SUMS.txt` says `OK`, the
+      > tarball holds `trak`, `LICENSE`, `README.md` and `THIRD-PARTY-NOTICES.md` and **no extended
+      > attributes**, `lipo -archs` says `x86_64 arm64`, `codesign -dv` reports
+      > **`flags=0x2(adhoc)`** (not `0x20002(adhoc,linker-signed)`, which would mean nothing
+      > re-signed the merged binary), `codesign --verify --strict` passes, and `--version` prints
+      > `trak 0.2.1`. The CI-reported sha256 and the one in the formula are the same number.
+      > `brew upgrade kathir-d/tap/trak` installs 0.2.1 from the tap and `brew test
+      > kathir-d/tap/trak` passes (the bare `brew test trak` is ambiguous on this machine --
+      > `trak-local/audit/trak` also exists -- so the fully-qualified name is needed). The curl
+      > installer was run against the real release into a temporary directory: it resolved "latest"
+      > to 0.2.1, verified the checksum, installed, and `--uninstall` removed it and left the
+      > settings alone.
+      > `RELEASING.md` §1.4's `brew install --formula ./Formula/trak.rb` **no longer works** with
+      > this Homebrew: it refuses a formula outside a tap. The equivalent check is a throwaway
+      > local tap, which is what was done. Worth fixing in the document.
+      > The extracted binary carries `com.apple.provenance`, which macOS adds at extraction; it is
+      > **not** `com.apple.quarantine` and the tarball itself has no extended attributes at all, so
+      > there is no Gatekeeper prompt on either install path.
+
 - [x] 13.22 **Nothing inside a pane is marked until the pane has the focus** (owner, 2026-10-04, with
       a screenshot of the Library strip showing `[Saved albums]` while the top bar held the arrows:
       "if I didn't press arrow down to go into the tab the text isn't highlighted, only when i'm

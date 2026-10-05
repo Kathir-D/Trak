@@ -67,6 +67,25 @@ Then, in this order:
 4. **Smoke-test the formula against that local tarball.** This is TODO 9.3's
    `Done when`, and it is the only chance to catch a formula that cannot install.
 
+   > **This Homebrew refuses a formula outside a tap** ("Homebrew requires formulae
+   > to be in a tap, rejecting: ./Formula/trak.rb"), and `brew test trak` is ambiguous
+   > on a machine that has more than one tap carrying a `trak`. Put the rewritten
+   > formula in a throwaway local tap instead:
+   >
+   > ```sh
+   > TAPS="$(brew --repository)/Library/Taps"
+   > mkdir -p "$TAPS/traktest/homebrew-trak/Formula"
+   > cp Formula/trak.rb "$TAPS/traktest/homebrew-trak/Formula/trak.rb"
+   > brew trust --formula traktest/homebrew-trak/trak   # newer Homebrew asks for this
+   > brew test traktest/homebrew-trak/trak
+   > rm -rf "$TAPS/traktest"
+   > ```
+   >
+   > If the machine already has trak installed from the real tap, `brew install` of
+   > the throwaway one is refused as a duplicate; `brew test` needs no install, so
+   > test it there and use `brew upgrade kathir-d/tap/trak` afterwards for the real
+   > end-to-end check.
+
    ```sh
    V="$(cat VERSION)"
    SHA="$(shasum -a 256 "dist/trak-$V-macos.tar.gz" | cut -d' ' -f1)"
