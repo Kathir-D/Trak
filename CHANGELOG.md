@@ -5,6 +5,24 @@ All notable changes to Trak are recorded here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). How a release is cut
 is in [`docs/RELEASING.md`](docs/RELEASING.md).
 
+## [0.2.3] - 2026-10-14
+
+One report from the owner on 0.2.2: choosing a song to play from a list in the TUI brought
+the Spotify window up over the terminal every time.
+
+### Fixed
+
+- **Playing a track no longer leaves Spotify in front.** Measured against a running
+  Spotify behind cmux: `play track` is the only command Spotify answers by raising its own
+  window, about 1.3 s after the key, when the track has loaded. Next, prev, pause, play,
+  volume, seek, shuffle and repeat never did. A watcher now starts before the write and
+  hands focus back to the app that had it within a few milliseconds of Spotify taking it.
+  Spotify went from in front for most of a measured run to at most three sampled frames
+  (about 30 ms), through both the CLI and Enter on a History row in the TUI. Reacting
+  after the fact cannot do better than a blip, and `docs/APPLESCRIPT.md` §11 records what
+  was tried and did not help (`open -g`, hiding Spotify first, a System Events restore
+  afterwards).
+
 ## [0.2.2] - 2026-10-05
 
 Reports from the owner on 0.2.1, and every one of them the same shape: the state said
@@ -320,7 +338,8 @@ a real account or a real permission prompt.
   universal (arm64 + x86_64) and **ad-hoc signed, not notarized**; neither
   install path sets a quarantine flag, so there is no Gatekeeper prompt.
 
-[Unreleased]: https://github.com/Kathir-D/Trak/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/Kathir-D/Trak/compare/v0.2.3...HEAD
+[0.2.3]: https://github.com/Kathir-D/Trak/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/Kathir-D/Trak/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/Kathir-D/Trak/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/Kathir-D/Trak/compare/v0.1.1...v0.2.0
