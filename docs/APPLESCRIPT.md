@@ -481,3 +481,21 @@ happen every second, because the notification tells Trak immediately when
 something changed. The poll becomes 3–5 s (or slower) and only has to cover
 volume, shuffle, repeat and artwork — the things the notification is silent
 about. Recorded in `docs/ARCHITECTURE.md`.
+
+## 11. `play track` raises Spotify's window; nothing else does (measured 2026-10-13)
+
+With cmux in front and Spotify running behind it, sampling `lsappinfo front` in a tight
+loop while each command ran: `next`, `prev`, `pause`, `play`, `vol`, `pos`, `toggle shuffle` and
+`toggle repeat` never put Spotify in front (0 of ~650 samples each). `play track "<uri>"` did,
+and left it there (85 of ~110 samples, the old build). It lands about 1.3 s after the key, when
+the track has loaded, so the raise comes after the Apple Event has returned.
+
+Things that did **not** help: `open -g spotify:track:...` (worse: Spotify stayed in front and the
+track did not change), hiding Spotify first (`play track` unhides it), and putting focus back from
+the same script afterwards through System Events (still 4-7 samples).
+
+What did: `FocusGuard` in `src/player/applescript.rs`, a JXA loop started *before* the write that
+re-activates the previous front app within ~1 ms of Spotify taking focus. Measured 0-3 samples
+(each ~10 ms) per play, so a blip of at most ~30 ms is still possible. Reacting after the fact
+cannot go lower; the only complete fix would be Spotify not activating itself, which it does not
+offer. Driving the TUI in cmux with real keystrokes (Enter on a History row) gave the same 1-3.

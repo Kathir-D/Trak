@@ -220,25 +220,9 @@ end run
         let script = format!(
             r#"on run argv
 	if application "Spotify" is not running then return "not-running"
-	-- Spotify raises its own window for some writes (`play track` above all), so
-	-- note who had focus and hand it back. Best effort: a refused System Events
-	-- must never turn a write that worked into an error.
-	set prior to ""
-	try
-		tell application "System Events" to set prior to unix id of first application process whose frontmost is true
-	end try
 	tell application "Spotify"
 		{line}
 	end tell
-	if prior is not "" then
-		try
-			tell application "System Events"
-				if (unix id of first application process whose frontmost is true) is not prior then
-					set frontmost of first application process whose unix id is prior to true
-				end if
-			end tell
-		end try
-	end if
 	return "ok"
 end run
 "#
@@ -343,11 +327,75 @@ impl Player for AppleScriptPlayer {
     fn play_uri(&self, uri: &str) -> Result<(), PlayerError> {
         let uri = uri.trim();
         crate::player::check_playable_uri(uri)?;
+        // `play track` is the one write Spotify answers by raising its own window
+        // (measured: next, pause, play, volume, seek and shuffle never do). A
+        // fix after the fact still flashes it, so a watcher runs beside the write.
+        let _guard = FocusGuard::start();
         self.command(&format!("play track \"{uri}\""))
     }
 
     fn command(&self, script: &str) -> Result<(), PlayerError> {
         AppleScriptPlayer::command(self, script)
+    }
+}
+
+/// Hands focus straight back if Spotify takes it while a write is in flight.
+///
+/// A JXA loop, not AppleScript, because it has to notice within a couple of
+/// milliseconds: asking System Events afterwards was measured at 4-7 sampled
+/// frames of Spotify on top, against at most one with this. It prints `ready`
+/// once it has noted who owns the focus, and stops itself after 1.5 s.
+const FOCUS_WATCH: &str = r#"
+ObjC.import('AppKit');
+function run(argv) {
+	var ws = $.NSWorkspace.sharedWorkspace;
+	var spin = function (s) {
+		$.NSRunLoop.currentRunLoop.runUntilDate($.NSDate.dateWithTimeIntervalSinceNow(s));
+	};
+	spin(0.001);
+	var prior = ws.frontmostApplication;
+	if (!prior || ObjC.unwrap(prior.bundleIdentifier) === 'com.spotify.client') return 'skip';
+	console.log('ready');
+	var end = Date.now() + 1500;
+	while (Date.now() < end) {
+		spin(0.0005);
+		var f = ws.frontmostApplication;
+		if (f && ObjC.unwrap(f.bundleIdentifier) === 'com.spotify.client') {
+			prior.activateWithOptions(2);
+		}
+	}
+	return 'done';
+}
+"#;
+
+/// A running [`FOCUS_WATCH`]. Best effort end to end: if it cannot start, the write
+/// still happens, only without the guard, because a raised window is a smaller harm
+/// than a track that does not play.
+struct FocusGuard;
+
+impl FocusGuard {
+    fn start() -> Option<Self> {
+        let mut child = Command::new(osascript_path())
+            .args(["-l", "JavaScript", "-e", FOCUS_WATCH])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            // `console.log` in JXA writes to stderr, which is how `ready` arrives.
+            .stderr(Stdio::piped())
+            .spawn()
+            .ok()?;
+        let stderr = child.stderr.take()?;
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            use std::io::{BufRead, BufReader};
+            let mut line = String::new();
+            let _ = BufReader::new(stderr).read_line(&mut line);
+            let _ = tx.send(line);
+            // Reaps the watcher once it has stopped itself.
+            let _ = child.wait();
+        });
+        // Bounded, so a watcher that never starts cannot hold the write up.
+        let ready = rx.recv_timeout(Duration::from_millis(800)).ok()?;
+        ready.trim().eq("ready").then_some(Self)
     }
 }
 
