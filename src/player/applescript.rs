@@ -220,9 +220,25 @@ end run
         let script = format!(
             r#"on run argv
 	if application "Spotify" is not running then return "not-running"
+	-- Spotify raises its own window for some writes (`play track` above all), so
+	-- note who had focus and hand it back. Best effort: a refused System Events
+	-- must never turn a write that worked into an error.
+	set prior to ""
+	try
+		tell application "System Events" to set prior to unix id of first application process whose frontmost is true
+	end try
 	tell application "Spotify"
 		{line}
 	end tell
+	if prior is not "" then
+		try
+			tell application "System Events"
+				if (unix id of first application process whose frontmost is true) is not prior then
+					set frontmost of first application process whose unix id is prior to true
+				end if
+			end tell
+		end try
+	end if
 	return "ok"
 end run
 "#
